@@ -1,0 +1,155 @@
+--- a/lib/pdcp/pdcp_entity_rx.h
++++ b/lib/pdcp/pdcp_entity_rx.h
+@@ -37,6 +37,7 @@
+ #include "srsran/security/security_engine.h"
+ #include "srsran/support/sdu_window.h"
+ #include "srsran/support/timers.h"
++#include "srsran/support/p5g_gnb_tracer.h"
+ #include "fmt/format.h"
+ 
+ namespace srsran {
+@@ -174,6 +175,26 @@
+   bool          is_reordering_timer_running() const { return reordering_timer.is_running(); }
+ 
+ private:
++  // p5g: fill a PDCP SDU trace row (bearer id + IPv4/UDP/RTP parse of the SDU head). Copies <= 64 bytes.
++  void p5g_fill_sdu_row(p5g::pdcp_sdu_row& row, uint32_t count, const byte_buffer& sdu) const
++  {
++    row.t         = p5g::trace_now();
++    row.ue_index  = p5g_ue_index;
++    row.rb_is_drb = p5g_rb_is_drb;
++    row.rb_id     = p5g_rb_id;
++    row.count     = count;
++    row.sdu_bytes = static_cast<uint32_t>(sdu.length());
++    uint8_t head[64];
++    size_t  n = 0;
++    for (auto it = sdu.begin(); it != sdu.end() && n < sizeof(head); ++it) {
++      head[n++] = *it;
++    }
++    p5g::parse_ip_udp_rtp(head, n, row);
++  }
++  uint32_t p5g_ue_index  = 0;
++  uint32_t p5g_rb_is_drb = 0;
++  uint32_t p5g_rb_id     = 0;
++
+   pdcp_bearer_logger   logger;
+   const pdcp_rx_config cfg;
+   bool                 stopped = false;
+--- a/lib/pdcp/pdcp_entity_rx.cpp
++++ b/lib/pdcp/pdcp_entity_rx.cpp
+@@ -52,6 +52,11 @@
+   metrics(metrics_agg_.get_metrics_period().count()),
+   metrics_agg(metrics_agg_)
+ {
++  // p5g: remember bearer identity for the tracer.
++  p5g_ue_index  = ue_index;
++  p5g_rb_is_drb = rb_id_.is_drb() ? 1 : 0;
++  p5g_rb_id     = rb_id_.is_drb() ? static_cast<uint32_t>(rb_id_.get_drb_id()) : static_cast<uint32_t>(rb_id_.get_srb_id());
++
+   if (metrics_agg.get_metrics_period().count()) {
+     metrics_timer = ue_ul_timer_factory.create_timer();
+     metrics_timer.set(std::chrono::milliseconds(metrics_agg.get_metrics_period().count()), [this](timer_id_t tid) {
+@@ -476,6 +481,12 @@
+     auto sdu_latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+         std::chrono::high_resolution_clock::now() - sdu_info.time_of_arrival);
+     metrics.add_sdu_latency_ns(sdu_latency_ns.count());
++    // p5g: PDCP SDU (= IP packet from the UE) leaves the RAN towards the core.
++    if (p5g::gnb_tracer::get().enabled()) {
++      p5g::pdcp_sdu_row row{};
++      p5g_fill_sdu_row(row, st.rx_deliv, sdu_info.buf);
++      p5g::gnb_tracer::get().on_pdcp_ul(row);
++    }
+     upper_dn.on_new_sdu(std::move(sdu_info.buf));
+     rx_window.remove_sn(st.rx_deliv);
+ 
+@@ -500,6 +511,12 @@
+       auto sdu_latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+           std::chrono::high_resolution_clock::now() - sdu_info.time_of_arrival);
+       metrics.add_sdu_latency_ns(sdu_latency_ns.count());
++      // p5g: PDCP SDU (= IP packet from the UE) leaves the RAN towards the core.
++      if (p5g::gnb_tracer::get().enabled()) {
++        p5g::pdcp_sdu_row row{};
++        p5g_fill_sdu_row(row, count, sdu_info.buf);
++        p5g::gnb_tracer::get().on_pdcp_ul(row);
++      }
+       upper_dn.on_new_sdu(std::move(sdu_info.buf));
+       rx_window.remove_sn(count);
+     }
+@@ -688,6 +705,12 @@
+       auto sdu_latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+           std::chrono::high_resolution_clock::now() - sdu_info.time_of_arrival);
+       metrics.add_sdu_latency_ns(sdu_latency_ns.count());
++      // p5g: PDCP SDU (= IP packet from the UE) leaves the RAN towards the core.
++      if (p5g::gnb_tracer::get().enabled()) {
++        p5g::pdcp_sdu_row row{};
++        p5g_fill_sdu_row(row, st.rx_deliv, sdu_info.buf);
++        p5g::gnb_tracer::get().on_pdcp_ul(row);
++      }
+       upper_dn.on_new_sdu(std::move(sdu_info.buf));
+       rx_window.remove_sn(st.rx_deliv);
+     }
+--- a/lib/pdcp/pdcp_entity_tx.h
++++ b/lib/pdcp/pdcp_entity_tx.h
+@@ -38,6 +38,7 @@
+ #include "srsran/security/security.h"
+ #include "srsran/security/security_engine.h"
+ #include "srsran/support/timers.h"
++#include "srsran/support/p5g_gnb_tracer.h"
+ 
+ namespace srsran {
+ 
+@@ -238,6 +239,26 @@
+   enum class early_drop_reason { zero_dbs, full_rlc_queue, full_window, no_drop };
+ 
+ private:
++  // p5g: fill a PDCP SDU trace row (bearer id + IPv4/UDP/RTP parse of the SDU head). Copies <= 64 bytes.
++  void p5g_fill_sdu_row(p5g::pdcp_sdu_row& row, uint32_t count, const byte_buffer& sdu) const
++  {
++    row.t         = p5g::trace_now();
++    row.ue_index  = p5g_ue_index;
++    row.rb_is_drb = p5g_rb_is_drb;
++    row.rb_id     = p5g_rb_id;
++    row.count     = count;
++    row.sdu_bytes = static_cast<uint32_t>(sdu.length());
++    uint8_t head[64];
++    size_t  n = 0;
++    for (auto it = sdu.begin(); it != sdu.end() && n < sizeof(head); ++it) {
++      head[n++] = *it;
++    }
++    p5g::parse_ip_udp_rtp(head, n, row);
++  }
++  uint32_t p5g_ue_index  = 0;
++  uint32_t p5g_rb_is_drb = 0;
++  uint32_t p5g_rb_id     = 0;
++
+   pdcp_bearer_logger              logger;
+   const pdcp_tx_config            cfg;
+   bool                            stopped         = false;
+--- a/lib/pdcp/pdcp_entity_tx.cpp
++++ b/lib/pdcp/pdcp_entity_tx.cpp
+@@ -53,6 +53,11 @@
+   metrics(metrics_agg_.get_metrics_period().count()),
+   metrics_agg(metrics_agg_)
+ {
++  // p5g: remember bearer identity for the tracer.
++  p5g_ue_index  = ue_index;
++  p5g_rb_is_drb = rb_id_.is_drb() ? 1 : 0;
++  p5g_rb_id     = rb_id_.is_drb() ? static_cast<uint32_t>(rb_id_.get_drb_id()) : static_cast<uint32_t>(rb_id_.get_srb_id());
++
+   if (metrics_agg.get_metrics_period().count()) {
+     metrics_timer = ue_ctrl_timer_factory.create_timer();
+     metrics_timer.set(std::chrono::milliseconds(metrics_agg.get_metrics_period().count()), [this](timer_id_t tid) {
+@@ -236,6 +241,13 @@
+     }
+   }
+ 
++  // p5g: PDCP SDU (= IP packet from the core) enters the RAN towards the UE; COUNT is the value it will get.
++  if (p5g::gnb_tracer::get().enabled()) {
++    p5g::pdcp_sdu_row row{};
++    p5g_fill_sdu_row(row, st.tx_next, buf);
++    p5g::gnb_tracer::get().on_pdcp_dl(row);
++  }
++
+   // Wrap SDU with meta information.
+   pdcp_tx_window_sdu_info sdu_info = {
+       .sdu                   = {}, // we will store a copy of the SDU here later if required.

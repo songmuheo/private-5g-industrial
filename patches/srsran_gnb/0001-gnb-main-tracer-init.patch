@@ -1,0 +1,21 @@
+--- a/apps/gnb/gnb.cpp
++++ b/apps/gnb/gnb.cpp
+@@ -63,6 +63,7 @@
+ #include "srsran/support/signal_handling.h"
+ #include "srsran/support/signal_observer.h"
+ #include "srsran/support/sysinfo.h"
++#include "srsran/support/p5g_gnb_tracer.h"
+ #include "srsran/support/versioning/build_info.h"
+ #include "srsran/support/versioning/version.h"
+ #include <atomic>
+@@ -213,6 +214,10 @@
+   // Set the application error handler.
+   set_error_handler(app_error_report_handler);
+ 
++  // p5g: open per-event CSV traces (P5G_GNB_TRACE_DIR) before any RAN thread starts; closed on any exit path.
++  p5g::gnb_tracer::get().init_from_env();
++  auto p5g_tracer_guard = make_scope_exit([]() { p5g::gnb_tracer::get().shutdown(); });
++
+   static constexpr std::string_view app_name = "gNB";
+   app_services::application_message_banners::announce_app_and_version(app_name);
+ 

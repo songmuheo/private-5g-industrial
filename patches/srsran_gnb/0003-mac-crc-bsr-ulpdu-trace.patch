@@ -1,0 +1,93 @@
+--- a/lib/mac/mac_sched/srsran_scheduler_adapter.cpp
++++ b/lib/mac/mac_sched/srsran_scheduler_adapter.cpp
+@@ -21,6 +21,7 @@
+  */
+ 
+ #include "srsran_scheduler_adapter.h"
++#include "srsran/support/p5g_gnb_tracer.h"
+ #include "srsran/scheduler/result/sched_result.h"
+ #include "srsran/scheduler/scheduler_factory.h"
+ #include "srsran/support/executors/execute_until_success.h"
+@@ -389,6 +390,27 @@
+     pdu.time_advance_offset        = mac_pdu.time_advance_offset;
+   }
+ 
++  // p5g: UL HARQ outcome per PUSCH (CRC + PHY-reported SINR / RSRP / timing advance).
++  if (p5g::gnb_tracer::get().enabled()) {
++    const p5g::trace_clock_stamp ts = p5g::trace_now();
++    for (const ul_crc_pdu_indication& crc : ind.crcs) {
++      p5g::ul_crc_row row{};
++      row.t            = ts;
++      row.sfn          = msg.sl_rx.sfn();
++      row.slot         = msg.sl_rx.slot_index();
++      row.ue_index     = static_cast<uint32_t>(crc.ue_index);
++      row.rnti         = to_value(crc.rnti);
++      row.harq_id      = static_cast<uint32_t>(crc.harq_id);
++      row.crc_ok       = crc.tb_crc_success ? 1 : 0;
++      row.ul_sinr_db   = crc.ul_sinr_dB.value_or(std::numeric_limits<float>::quiet_NaN());
++      row.ul_rsrp_dbfs = crc.ul_rsrp_dBFS.value_or(std::numeric_limits<float>::quiet_NaN());
++      row.ta_us        = crc.time_advance_offset.has_value()
++                             ? crc.time_advance_offset->to_seconds<float>() * 1e6f
++                             : std::numeric_limits<float>::quiet_NaN();
++      p5g::gnb_tracer::get().on_ul_crc(row);
++    }
++  }
++
+   // Forward CRC indication to the scheduler.
+   parent.sched_impl->handle_crc_indication(ind);
+ 
+--- a/lib/mac/mac_ul/pdu_rx_handler.cpp
++++ b/lib/mac/mac_ul/pdu_rx_handler.cpp
+@@ -21,6 +21,7 @@
+  */
+ 
+ #include "pdu_rx_handler.h"
++#include "srsran/support/p5g_gnb_tracer.h"
+ #include "srsran/instrumentation/traces/up_traces.h"
+ #include "srsran/srslog/srslog.h"
+ #include "srsran/support/format/fmt_basic_parser.h"
+@@ -97,6 +98,19 @@
+   // > Fetch UE index based on PDU RNTI.
+   du_ue_index_t ue_index = rnti_table[pdu.rnti];
+ 
++  // p5g: one row per received MAC UL PDU (per UE, per PUSCH) — the UL air-interface delivery event.
++  if (p5g::gnb_tracer::get().enabled()) {
++    p5g::mac_ul_pdu_row row{};
++    row.t         = p5g::trace_now();
++    row.sfn       = sl_rx.sfn();
++    row.slot      = sl_rx.slot_index();
++    row.ue_index  = static_cast<uint32_t>(ue_index);
++    row.rnti      = to_value(pdu.rnti);
++    row.harq_id   = pdu.harq_id;
++    row.pdu_bytes = pdu.pdu.length();
++    p5g::gnb_tracer::get().on_mac_ul_pdu(row);
++  }
++
+   // > Decode MAC UL PDU.
+   decoded_mac_rx_pdu      ctx{sl_rx, cell_index, std::move(pdu), ue_index};
+   error_type<std::string> ret = ctx.decoded_subpdus.unpack(ctx.pdu_rx.pdu);
+@@ -262,6 +276,24 @@
+         bsr_ind.lcg_reports = lbsr_report.value().list;
+       }
+       sched.handle_ul_bsr_indication(bsr_ind);
++
++      // p5g: BSR MAC CE trace, one row per LCG; buffer_bytes is the decoded upper bound of the 3GPP index.
++      if (p5g::gnb_tracer::get().enabled()) {
++        const p5g::trace_clock_stamp ts = p5g::trace_now();
++        for (const lcg_bsr_report& rep : bsr_ind.lcg_reports) {
++          p5g::bsr_row row{};
++          row.t                 = ts;
++          row.sfn               = ctx.slot_rx.sfn();
++          row.slot              = ctx.slot_rx.slot_index();
++          row.ue_index          = static_cast<uint32_t>(ctx.ue_index);
++          row.rnti              = to_value(ctx.pdu_rx.rnti);
++          row.bsr_format        = static_cast<uint32_t>(bsr_ind.bsr_fmt);
++          row.lcg_id            = static_cast<uint32_t>(rep.lcg_id);
++          row.buffer_size_index = rep.buffer_size;
++          row.buffer_bytes      = buff_size_field_to_bytes(rep.buffer_size, bsr_ind.bsr_fmt);
++          p5g::gnb_tracer::get().on_bsr(row);
++        }
++      }
+     } break;
+     case lcid_ul_sch_t::CRNTI: {
+       // The MAC C-RNTI CE is handled separately in case of Msg3, and before all other CEs. See handle_rx_pdu().

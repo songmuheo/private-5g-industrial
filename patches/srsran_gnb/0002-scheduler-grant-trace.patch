@@ -1,0 +1,85 @@
+--- a/lib/scheduler/cell_scheduler.cpp
++++ b/lib/scheduler/cell_scheduler.cpp
+@@ -23,6 +23,7 @@
+ #include "cell_scheduler.h"
+ #include "logging/scheduler_metrics_handler.h"
+ #include "ue_scheduling/ue_scheduler_impl.h"
++#include "srsran/support/p5g_gnb_tracer.h"
+ 
+ using namespace srsran;
+ 
+@@ -142,6 +143,74 @@
+   // > Log the scheduler results.
+   result_logger.on_scheduler_result(last_result(), slot_dur);
+ 
++  // p5g: per-grant resource allocation trace (observe-only). last_result() holds the PDSCHs and PUSCHs that
++  // are transmitted in slot sl_tx (PUSCH grants were placed here k2 slots earlier by their DCI).
++  if (p5g::gnb_tracer::get().enabled()) {
++    const sched_result&     res = last_result();
++    const p5g::trace_clock_stamp ts = p5g::trace_now();
++    for (const dl_msg_alloc& g : res.dl.ue_grants) {
++      p5g::sched_grant_row row{};
++      row.t                  = ts;
++      row.sfn                = sl_tx.sfn();
++      row.slot               = sl_tx.slot_index();
++      row.k_offset           = g.context.k1;
++      row.ue_index           = static_cast<uint32_t>(g.context.ue_index);
++      row.rnti               = to_value(g.pdsch_cfg.rnti);
++      row.harq_id            = static_cast<uint32_t>(g.pdsch_cfg.harq_id);
++      row.nof_retxs          = g.context.nof_retxs;
++      if (not g.pdsch_cfg.codewords.empty()) {
++        const pdsch_codeword& cw = g.pdsch_cfg.codewords[0];
++        row.new_data  = cw.new_data ? 1 : 0;
++        row.rv        = cw.rv_index;
++        row.mcs       = cw.mcs_index.to_uint();
++        row.mcs_table = static_cast<uint32_t>(cw.mcs_table);
++        row.tbs_bytes = cw.tb_size_bytes;
++      }
++      if (g.pdsch_cfg.rbs.is_type1()) {
++        row.rb_start = g.pdsch_cfg.rbs.type1().start();
++        row.rb_count = g.pdsch_cfg.rbs.type1().stop() - g.pdsch_cfg.rbs.type1().start();
++      } else {
++        row.rb_count = g.pdsch_cfg.rbs.type0().count();
++      }
++      row.sym_start          = g.pdsch_cfg.symbols.start();
++      row.sym_count          = g.pdsch_cfg.symbols.stop() - g.pdsch_cfg.symbols.start();
++      row.nof_layers         = g.pdsch_cfg.nof_layers;
++      row.buffer_occupancy   = g.context.buffer_occupancy;
++      row.olla_offset        = g.context.olla_offset.value_or(std::numeric_limits<float>::quiet_NaN());
++      row.nof_grants_in_slot = res.dl.ue_grants.size();
++      p5g::gnb_tracer::get().on_sched_dl(row);
++    }
++    for (const ul_sched_info& g : res.ul.puschs) {
++      p5g::sched_grant_row row{};
++      row.t                  = ts;
++      row.sfn                = sl_tx.sfn();
++      row.slot               = sl_tx.slot_index();
++      row.k_offset           = g.context.k2;
++      row.ue_index           = static_cast<uint32_t>(g.context.ue_index);
++      row.rnti               = to_value(g.pusch_cfg.rnti);
++      row.harq_id            = static_cast<uint32_t>(g.pusch_cfg.harq_id);
++      row.new_data           = g.pusch_cfg.new_data ? 1 : 0;
++      row.nof_retxs          = g.context.nof_retxs;
++      row.rv                 = g.pusch_cfg.rv_index;
++      row.mcs                = g.pusch_cfg.mcs_index.to_uint();
++      row.mcs_table          = static_cast<uint32_t>(g.pusch_cfg.mcs_table);
++      if (g.pusch_cfg.rbs.is_type1()) {
++        row.rb_start = g.pusch_cfg.rbs.type1().start();
++        row.rb_count = g.pusch_cfg.rbs.type1().stop() - g.pusch_cfg.rbs.type1().start();
++      } else {
++        row.rb_count = g.pusch_cfg.rbs.type0().count();
++      }
++      row.sym_start          = g.pusch_cfg.symbols.start();
++      row.sym_count          = g.pusch_cfg.symbols.stop() - g.pusch_cfg.symbols.start();
++      row.nof_layers         = g.pusch_cfg.nof_layers;
++      row.tbs_bytes          = g.pusch_cfg.tb_size_bytes;
++      row.buffer_occupancy   = 0;
++      row.olla_offset        = g.context.olla_offset.value_or(std::numeric_limits<float>::quiet_NaN());
++      row.nof_grants_in_slot = res.ul.puschs.size();
++      p5g::gnb_tracer::get().on_sched_ul(row);
++    }
++  }
++
+   // > Push the scheduler results to the metrics handler.
+   metrics.push_result(sl_tx, last_result(), slot_dur);
+ }

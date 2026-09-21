@@ -1,0 +1,64 @@
+# srsRAN gNB — ZeroMQ loopback profile, CODE-TEST TOOL ONLY (gNB <-> srsUE on one PC, no radio)
+#
+# Based on: srsRAN tutorial "srsUE + srsRAN gNB via ZMQ" and configs/gnb_rf_b210_fdd_srsUE.yml
+# (release_25_10). Changes: AMF/N2 on our Open5GS bridge (10.53.1.x), stdout/JSON metrics on.
+# Cell: band 3 FDD, 15 kHz SCS, 20 MHz (106 PRB) — the only numerology srsUE 5G SA supports.
+# The measurement profile is gnb_b210_n78_tdd_20mhz.yml; keep both in sync except for radio/cell.
+
+cu_cp:
+  amf:
+    addr: 10.53.1.2
+    port: 38412
+    bind_addr: 10.53.1.1
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+
+ru_sdr:
+  device_driver: zmq
+  device_args: tx_port=tcp://127.0.0.1:2000,rx_port=tcp://127.0.0.1:2001,base_srate=23.04e6
+  srate: 23.04
+  tx_gain: 75
+  rx_gain: 75
+
+cell_cfg:
+  dl_arfcn: 368500
+  band: 3
+  channel_bandwidth_MHz: 20
+  common_scs: 15
+  plmn: "00101"
+  tac: 7
+  pci: 1
+  pdcch:                            # srsUE capabilities (tutorial values)
+    dedicated:
+      ss2_type: common
+      dci_format_0_1_and_1_1: false
+    common:
+      ss0_index: 0
+      coreset0_index: 12
+  prach:
+    prach_config_index: 1
+  pdsch:
+    mcs_table: qam64
+  pusch:
+    mcs_table: qam64
+
+log:
+  filename: stdout                  # run_gnb.sh overrides with --log.filename
+  all_level: warning
+
+pcap:                               # enabled/redirected by run_gnb.sh when P5G_GNB_PCAP=1
+  mac_enable: false
+  ngap_enable: false
+
+remote_control:                     # JSON metrics stream for ran/gnb/metrics_json_client.py
+  enabled: true
+  bind_addr: 127.0.0.1
+  port: 8001
+
+metrics:
+  enable_json: true
+  autostart_stdout_metrics: true    # 1 s per-UE table -> <trace_dir>/gnb_stdout.log

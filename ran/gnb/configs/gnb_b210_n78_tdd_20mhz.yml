@@ -1,0 +1,61 @@
+# srsRAN gNB — USRP B210 + COTS UE (Pixel) profile: band n78 TDD, 30 kHz SCS, 20 MHz (51 PRB)
+#
+# Based on: third_party/srsRAN_Project/configs/gnb_rf_b200_tdd_n78_20mhz.yml (release_25_10),
+#           the srsRAN "COTS UE" application note (docs.srsran.com) for B210 tuning.
+# Changes vs. the sample: AMF/N2 addresses of our Open5GS (ran/core), tac 1 to match the SIMs,
+# stdout metrics on, log level info (traces are the primary data; logs are for debugging).
+#
+# Hardware notes (B210): 20 MHz @ 30 kHz is the reliable maximum over USB 3.0; keep the sample rate
+# at 23.04 MHz. Use an external 10 MHz / GPSDO reference if the phone struggles to sync
+# (ru_sdr: clock: external). Adjust tx_gain/rx_gain to the antenna setup (start 80/40).
+
+cu_cp:
+  amf:
+    addr: 10.53.1.2                 # Open5GS AMF (ran/core on this host)
+    port: 38412
+    bind_addr: 10.53.1.1            # host side of the p5g_ran docker bridge
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+
+ru_sdr:
+  device_driver: uhd
+  device_args: type=b200,num_recv_frames=64,num_send_frames=64
+  srate: 23.04
+  otw_format: sc12
+  tx_gain: 80
+  rx_gain: 40
+  # clock: external                 # uncomment with a GPSDO / 10 MHz reference
+
+cell_cfg:
+  dl_arfcn: 632628                  # 3489.42 MHz (n78, GSCN-aligned SSB per the srsRAN sample)
+  band: 78
+  channel_bandwidth_MHz: 20
+  common_scs: 30
+  plmn: "00101"
+  tac: 7
+  pci: 1
+
+log:
+  filename: stdout                  # run_gnb.sh overrides with --log.filename
+  all_level: info
+
+pcap:
+  mac_enable: false                 # set true for ground-truth MAC pcap (large; tracer covers most needs)
+  mac_filename: /tmp/gnb_mac.pcap
+  ngap_enable: false
+  ngap_filename: /tmp/gnb_ngap.pcap
+
+# JSON metrics (official): the remote-control WebSocket server pushes the per-UE/cell metrics as JSON
+# to subscribers; ran/gnb/metrics_json_client.py appends them to <trace_dir>/gnb_metrics.jsonl.
+remote_control:
+  enabled: true
+  bind_addr: 127.0.0.1
+  port: 8001
+
+metrics:
+  enable_json: true            # JSON metrics -> remote-control subscribers (top-level 'metrics' section)
+  autostart_stdout_metrics: true    # 1 s per-UE table -> <trace_dir>/gnb_stdout.log

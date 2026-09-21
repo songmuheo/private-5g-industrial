@@ -1,0 +1,78 @@
+--- a/lib/scheduler/ue_scheduling/ue_event_manager.cpp
++++ b/lib/scheduler/ue_scheduling/ue_event_manager.cpp
+@@ -21,6 +21,7 @@
+  */
+ 
+ #include "ue_event_manager.h"
++#include "srsran/support/p5g_gnb_tracer.h"
+ #include "../logging/scheduler_event_logger.h"
+ #include "../logging/scheduler_metrics_handler.h"
+ #include "../srs/srs_scheduler.h"
+@@ -585,6 +586,11 @@
+         if (pucch_f0f1->sr_detected) {
+           // Handle SR indication.
+           u.handle_sr_indication();
++          // p5g: SR detection (PUCCH format 0/1).
++          if (p5g::gnb_tracer::get().enabled()) {
++            p5g::gnb_tracer::get().on_sr(p5g::sr_row{p5g::trace_now(), uci_sl.sfn(), uci_sl.slot_index(),
++                                                     static_cast<uint32_t>(ue_cc->ue_index), to_value(ue_cc->rnti()), 1});
++          }
+ 
+           if (ue_cc->is_in_fallback_mode()) {
+             fallback_sched.handle_sr_indication(ue_cc->ue_index);
+@@ -629,6 +635,11 @@
+         if (not pucch_f2f3f4->sr_info.empty() and pucch_f2f3f4->sr_info.test(sr_bit_position_with_1_sr_bit)) {
+           // Handle SR indication.
+           u.handle_sr_indication();
++          // p5g: SR detection (PUCCH format 2/3/4).
++          if (p5g::gnb_tracer::get().enabled()) {
++            p5g::gnb_tracer::get().on_sr(p5g::sr_row{p5g::trace_now(), uci_sl.sfn(), uci_sl.slot_index(),
++                                                     static_cast<uint32_t>(ue_cc->ue_index), to_value(ue_cc->rnti()), 2});
++          }
+ 
+           // Log SR event.
+           ev_logger.enqueue(scheduler_event_logger::sr_event{ue_cc->ue_index, ue_cc->rnti()});
+@@ -971,6 +982,22 @@
+       // Respective HARQ was found.
+       const units::bytes tbs{result->h_dl.get_grant_params().tbs_bytes};
+ 
++      // p5g: DL HARQ-ACK feedback per HARQ process.
++      if (p5g::gnb_tracer::get().enabled()) {
++        p5g::dl_harq_ack_row row{};
++        row.t             = p5g::trace_now();
++        row.sfn           = uci_sl.sfn();
++        row.slot          = uci_sl.slot_index();
++        row.ue_index      = static_cast<uint32_t>(ue_cc.ue_index);
++        row.rnti          = to_value(ue_cc.rnti());
++        row.harq_id       = static_cast<uint32_t>(result->h_dl.id());
++        row.ack           = static_cast<int32_t>(harq_bits[harq_idx]);
++        row.tbs_bytes     = tbs.value();
++        row.status        = static_cast<int32_t>(result->update);
++        row.pucch_sinr_db = pucch_snr.value_or(std::numeric_limits<float>::quiet_NaN());
++        p5g::gnb_tracer::get().on_dl_harq_ack(row);
++      }
++
+       // Log Event.
+       ev_logger.enqueue(scheduler_event_logger::harq_ack_event{
+           ue_cc.ue_index, ue_cc.rnti(), ue_cc.cell_index, uci_sl, result->h_dl.id(), harq_bits[harq_idx], tbs});
+@@ -996,6 +1023,20 @@
+   // Forward CSI bits to UE.
+   ue_cc.handle_csi_report(csi_rep);
+ 
++  // p5g: CSI report (wideband CQI / RI) per UE.
++  if (p5g::gnb_tracer::get().enabled()) {
++    p5g::csi_row row{};
++    row.t        = p5g::trace_now();
++    row.sfn      = sl_rx.sfn();
++    row.slot     = sl_rx.slot_index();
++    row.ue_index = static_cast<uint32_t>(ue_cc.ue_index);
++    row.rnti     = to_value(ue_cc.rnti());
++    row.cqi      = csi_rep.first_tb_wideband_cqi.has_value() ? static_cast<int32_t>(csi_rep.first_tb_wideband_cqi->value()) : -1;
++    row.ri       = csi_rep.ri.has_value() ? static_cast<int32_t>(csi_rep.ri->value()) : -1;
++    row.valid    = csi_rep.valid ? 1 : 0;
++    p5g::gnb_tracer::get().on_csi(row);
++  }
++
+   // Log event.
+   ev_logger.enqueue(scheduler_event_logger::csi_report_event{ue_cc.ue_index, ue_cc.rnti(), sl_rx, csi_rep});
+ }

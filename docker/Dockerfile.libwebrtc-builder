@@ -1,0 +1,25 @@
+# Toolchain image for building libwebrtc (M120) and the WebRTC apps that link it.
+#
+# Why a container: depot_tools needs Python >= 3.11 (StrEnum); the gNB PC runs
+# Ubuntu 22.04 / Python 3.10. Ubuntu 24.04 ships Python 3.12.
+# The libwebrtc checkout itself is NOT baked into this image; it lives in a host
+# volume (third_party/libwebrtc) so incremental ninja builds persist.
+#
+# Base pinned by digest (noble / 24.04) for a reproducible toolchain.
+FROM ubuntu:24.04@sha256:84e77dee7d1bc93fb029a45e3c6cb9d8aa4831ccfcc7103d36e876938d28895b
+
+ENV DEBIAN_FRONTEND=noninteractive TZ=Asia/Seoul
+# Minimal tools for depot_tools + install-build-deps; libwebrtc's own
+# build/install-build-deps.sh installs the rest on first fetch.
+# X11 dev headers: libwebrtc.a references X11 symbols from its desktop-capture
+# module even though we only use the video pipeline.
+RUN apt-get update && apt-get install --yes --no-install-recommends \
+        git curl ca-certificates python3 python3-pip python3-setuptools \
+        python3-httplib2 python3-six python3-pkg-resources \
+        lsb-release sudo xz-utils file pkg-config build-essential \
+        clang lld ninja-build cmake \
+        libx11-dev libxext-dev libxdamage-dev libxfixes-dev \
+        libxcomposite-dev libxrandr-dev libxtst-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work

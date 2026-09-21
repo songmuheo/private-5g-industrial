@@ -1,0 +1,20 @@
+# build outputs (srsRAN gNB/UE builds, patched source mirror, app binaries)
+/build/
+# libwebrtc checkout (20+ GB, fetched by scripts/build/build_libwebrtc.sh) — may be a symlink
+/third_party/libwebrtc
+/third_party/libwebrtc/
+# experiment results
+/results/
+# video assets (downloaded / converted)
+/video/assets/
+# python
+.venv/
+__pycache__/
+*.pyc
+# editor / os
+.idea/
+.vscode/
+*.swp
+.DS_Store
+# SIM secrets (Ki/OPc) — keep local; add deliberately if you want them in the repo
+/ran/P-Sim.csv

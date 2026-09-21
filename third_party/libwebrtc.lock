@@ -1,0 +1,5 @@
+# libwebrtc pin used by scripts/build/build_libwebrtc.sh (stock, no patches)
+webrtc_commit: b0b827e0fa26f6dc141807c8bbd41c050029483b
+webrtc_branch: branch-heads/6099
+milestone: M120
+depot_tools_commit: fa1fac8477c70532274e7244777a846537004750

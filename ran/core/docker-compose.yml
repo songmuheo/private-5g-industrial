@@ -1,0 +1,46 @@
+# Open5GS 5G core (all-in-one container) — the srsRAN Project docker recipe, used unchanged.
+#
+# Image: built from third_party/srsRAN_Project/docker/open5gs (stock srsRAN Dockerfile,
+#        Open5GS v2.7.0). Only our env file and subscriber list differ.
+# Network: docker bridge 10.53.1.0/24; the core is 10.53.1.2, the host is 10.53.1.1 (gNB N2/N3 bind).
+# UE pool: 10.45.0.0/16 (UE_IP_BASE) NAT'ed by the core. To reach UEs from the host add a route:
+#          sudo ip route add 10.45.0.0/16 via 10.53.1.2   (scripts/run/start_core.sh does this)
+#
+# Usage:  docker compose -f ran/core/docker-compose.yml up -d --build
+#         docker compose -f ran/core/docker-compose.yml down
+services:
+  open5gs:
+    container_name: p5g_open5gs
+    image: p5g/open5gs:v2.7.0
+    build:
+      context: ../../third_party/srsRAN_Project/docker/open5gs
+      target: open5gs
+      args:
+        OS_VERSION: "22.04"
+        OPEN5GS_VERSION: "v2.7.0"
+    env_file:
+      - open5gs.env
+    volumes:
+      # Subscriber list (IMSI/K/OPc of the SIM cards in the Pixel phones + the srsUE test SIM).
+      # The entrypoint (WORKDIR /open5gs) resolves SUBSCRIBER_DB relative to its working directory.
+      - ./subscriber_db.csv:/open5gs/subscriber_db.csv:ro
+    privileged: true          # creates ogstun + iptables NAT inside the container
+    ports:
+      - "9999:9999/tcp"       # Open5GS WebUI (subscriber management)
+    command: 5gc -c open5gs-5gc.yml
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.20 7777"]
+      interval: 3s
+      timeout: 1s
+      retries: 60
+    networks:
+      ran:
+        ipv4_address: 10.53.1.2
+
+networks:
+  ran:
+    name: p5g_ran
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.53.1.0/24

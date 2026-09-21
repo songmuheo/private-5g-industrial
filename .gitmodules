@@ -1,0 +1,6 @@
+[submodule "third_party/srsRAN_Project"]
+	path = third_party/srsRAN_Project
+	url = https://github.com/srsran/srsRAN_Project.git
+[submodule "third_party/srsRAN_4G"]
+	path = third_party/srsRAN_4G
+	url = https://github.com/srsran/srsRAN_4G.git

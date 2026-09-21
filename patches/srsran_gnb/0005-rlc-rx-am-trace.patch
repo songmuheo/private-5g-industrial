@@ -1,0 +1,77 @@
+--- a/lib/rlc/rlc_rx_am_entity.h
++++ b/lib/rlc/rlc_rx_am_entity.h
+@@ -149,6 +149,11 @@
+ 
+   bool stopped = false;
+ 
++  // p5g: bearer identity for the tracer (the stock entity keeps it only inside the log prefix).
++  uint32_t p5g_ue_index  = 0;
++  uint32_t p5g_rb_is_drb = 0;
++  uint32_t p5g_rb_id     = 0;
++
+ public:
+   rlc_rx_am_entity(gnb_du_id_t                       gnb_du_id,
+                    du_ue_index_t                     ue_index,
+--- a/lib/rlc/rlc_rx_am_entity.cpp
++++ b/lib/rlc/rlc_rx_am_entity.cpp
+@@ -23,6 +23,7 @@
+ #include "rlc_rx_am_entity.h"
+ #include "srsran/adt/scope_exit.h"
+ #include "srsran/instrumentation/traces/up_traces.h"
++#include "srsran/support/p5g_gnb_tracer.h"
+ 
+ using namespace srsran;
+ 
+@@ -50,6 +51,11 @@
+ {
+   metrics.metrics_set_mode(rlc_mode::am);
+ 
++  // p5g: remember bearer identity for the tracer.
++  p5g_ue_index  = static_cast<uint32_t>(ue_index);
++  p5g_rb_is_drb = rb_id.is_drb() ? 1 : 0;
++  p5g_rb_id     = rb_id.is_drb() ? static_cast<uint32_t>(rb_id.get_drb_id()) : static_cast<uint32_t>(rb_id.get_srb_id());
++
+   // check status_prohibit_timer
+   srsran_assert(status_prohibit_timer.is_valid(), "Cannot create RLC RX AM, status_prohibit_timer not configured.");
+   // check reassembly_timer
+@@ -102,6 +108,14 @@
+ 
+   pcap.push_pdu(pcap_context, buf);
+ 
++  // p5g: every RLC PDU handed up by MAC (data or status), before any processing.
++  if (p5g::gnb_tracer::get().enabled()) {
++    const bool is_ctrl = rlc_am_status_pdu::is_control_pdu(buf.view());
++    p5g::gnb_tracer::get().on_rlc_ul(p5g::rlc_ul_row{p5g::trace_now(), p5g_ue_index, p5g_rb_is_drb, p5g_rb_id,
++                                                     static_cast<uint32_t>(is_ctrl ? p5g::rlc_event::status_pdu_rx : p5g::rlc_event::pdu_rx),
++                                                     -1, static_cast<uint32_t>(buf.length()), st.rx_next, st.rx_highest_status});
++  }
++
+   if (rlc_am_status_pdu::is_control_pdu(buf.view())) {
+     metrics.metrics_add_ctrl_pdus(1, buf.length());
+     handle_control_pdu(std::move(buf));
+@@ -223,6 +237,12 @@
+     } else {
+       logger.log_info("RX SDU. sn={} sdu_len={}", header.sn, sdu.value().length());
+       metrics.metrics_add_sdus(1, sdu.value().length());
++      // p5g: reassembled RLC SDU delivered to PDCP.
++      if (p5g::gnb_tracer::get().enabled()) {
++        p5g::gnb_tracer::get().on_rlc_ul(p5g::rlc_ul_row{p5g::trace_now(), p5g_ue_index, p5g_rb_is_drb, p5g_rb_id,
++                                                         static_cast<uint32_t>(p5g::rlc_event::sdu_delivered), static_cast<int32_t>(header.sn),
++                                                         static_cast<uint32_t>(sdu.value().length()), st.rx_next, st.rx_highest_status});
++      }
+       auto latency = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                           sdu_info.time_of_arrival);
+       metrics.metrics_add_sdu_latency(latency.count() / 1000);
+@@ -704,6 +724,12 @@
+     logger.log_info("rx_next_status_trigger is outside RX window. Skipping outdated event. {}", st);
+     return;
+   }
++  // p5g: genuine t-Reassembly expiry (a lost / late RLC PDU was detected -> NACK will follow).
++  if (p5g::gnb_tracer::get().enabled()) {
++    p5g::gnb_tracer::get().on_rlc_ul(p5g::rlc_ul_row{p5g::trace_now(), p5g_ue_index, p5g_rb_is_drb, p5g_rb_id,
++                                                     static_cast<uint32_t>(p5g::rlc_event::reassembly_expired), -1, 0,
++                                                     st.rx_next, st.rx_highest_status});
++  }
+   /*
+    * 5.2.3.2.4 Actions when t-Reassembly expires:
+    * - update RX_Highest_Status to the SN of the first RLC SDU with SN >= RX_Next_Status_Trigger for which not
