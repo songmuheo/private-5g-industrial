@@ -164,3 +164,20 @@ against the relay address 10.53.1.1; the radio hop needs the UE laptop) twice, s
   - per-thread CPU of the running apps over 25 s (720p30 H264 loopback): sender total 4.44 s CPU
     (encoder thread 4.13 s), its 7 flusher threads (nice 19) 0.00 s; receiver total 0.94 s, 3 flusher
     threads 0.00 s (tick resolution 10 ms). Tracing cost is below the accounting resolution.
+
+## 2026-09-22 — multi-UE operation
+* Decision: one video_receiver process per UE behind one relay (run_receiver.sh reuses a relay already
+  listening on 8765). Reason: LedgerVideoDecoderFactory holds one decoded-frame trace and decoders are
+  created without a stream identity, so two streams in one process would mix -rx-decoded rows. The
+  receiver now refuses a second stream with an explicit message instead of silently mixing.
+* Senders: `--to recvN --stream-id camN`; all trace files are stream-prefixed, gNB rows are keyed by
+  ue_index/rnti (MAC/scheduler) and ue_index + UE IP + RTP ssrc (RLC/PDCP).
+* Verified two receivers (recv0/recv1) behind one relay with two senders (cam0/cam1) on loopback:
+  28 trace files, one set per stream, SSRCs fully separated per file, verify PASS for both; receiver
+  and sender logs named per id (receiver-recvN.log, sender-camN.log; run dir results/<ts>-sender-<stream>)
+  so nothing is overwritten when several instances share a directory or start within one second.
+  A duplicate --stream-id is now logged by the relay and refused by the receiver instead of being
+  silently dropped.
+* max bitrate: the apps set none unless --max-bitrate-kbps is given; the 2.5 Mbps ceiling seen on a
+  fixed 720p stream (outbound-rtp.targetBitrate = 2500000 while bandwidth_allocation was 4.8 Mbps) is
+  libwebrtc's own GetMaxDefaultVideoBitrateKbps for >960x540 — stock behaviour, left as is.

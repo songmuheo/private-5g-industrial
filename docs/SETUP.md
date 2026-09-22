@@ -14,7 +14,7 @@ against one server (cross-host latencies use `*_wall_ns`; record `chronyc tracki
 ```bash
 ./run_gnb_core.sh [label]       # gNB PC, terminal 1: core + gNB (foreground) + JSON metrics -> results/<ts>-<label>/{gnb,core}
 ./run_receiver.sh               # gNB PC (or internet host), terminal 2: relay :8765 + video_receiver -> same run's app/ (via results/CURRENT)
-./run_sender.sh 10.53.1.1       # UE laptop, after the phone attached: video_sender -> results/<ts>-sender/app
+./run_sender.sh 10.53.1.1       # UE laptop, after the phone attached: video_sender -> results/<ts>-sender-<stream>/app
 ```
 
 Each script owns its run directory, so nothing depends on shell variables shared between terminals
@@ -22,6 +22,38 @@ Each script owns its run directory, so nothing depends on shell variables shared
 running without traces). Ctrl-C in terminal 1 flushes the gNB traces, saves the core log and takes
 the core down. `make ota` / `make ota-stop` remain as the all-in-one background variant
 (`scripts/run/ota_restart.sh`).
+
+## Several UEs at once
+
+One relay, one `video_receiver` **per UE**, one stream id per UE. On the gNB PC (or receiver host), one
+terminal per UE; the first one also starts the relay, the others reuse it:
+
+```bash
+./run_receiver.sh --receiver-id recv0        # UE 1 (defaults)
+./run_receiver.sh --receiver-id recv1        # UE 2
+./run_receiver.sh --receiver-id recv2        # UE 3 ...
+```
+
+On each UE laptop, point the sender at its own receiver and give the stream a distinct name:
+
+```bash
+./run_sender.sh 10.53.1.1 --to recv1 --stream-id cam1      # -> results/<ts>-sender-cam1/app (cam1-tx-*, sender-cam1.log)
+```
+
+A second sender reusing a stream id is refused by the receiver ("duplicate offer for stream ... ignored")
+and flagged by the relay ("re-registered while another connection holds that stream id").
+
+Why one process per UE: the decoder-factory wrapper that writes `-rx-decoded.csv` cannot tell which
+PeerConnection a decoder belongs to, so a receiver refuses a second stream (logged as "offer for
+stream ... refused"). Everything else is multiplexed by the relay. All receivers write into the same
+run's `app/`, one file set per stream (`cam0-rx-*`, `cam1-rx-*`, ...), so per-UE analysis is a prefix.
+
+Per-UE attribution in the gNB traces: `gnb_sched_*`, `gnb_ul_crc`, `gnb_dl_harq_ack`, `gnb_bsr`,
+`gnb_sr`, `gnb_csi`, `gnb_mac_ul_pdu` carry `ue_index` and `rnti`; `gnb_rlc_ul` and `gnb_pdcp_*` carry
+`ue_index`, and the PDCP rows also carry the UE IP (`src_ip` / `dst_ip`, static per SIM in
+`subscriber_db.csv`) and the RTP `ssrc`. Use `ue_index` to join RLC/PDCP rows with the MAC/scheduler
+rows, the UE IP to map to a phone, and the `ssrc` to map to the app ledgers. `rnti` and `ue_index`
+change when a UE re-attaches, the static IP does not. `verify_run.py` already prints grants per RNTI.
 
 ## gNB PC (Ubuntu 22.04, UHD installed, docker) — step by step
 

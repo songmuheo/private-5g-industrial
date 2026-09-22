@@ -2,7 +2,8 @@
 //
 // Follows examples/peerconnection/client/conductor.cc (answerer): register -> receive offer ->
 // SetRemoteDescription -> CreateAnswer -> SetLocalDescription -> (non-trickle) send answer after ICE
-// gathering -> OnTrack attaches a frame sink. One PeerConnection per incoming stream.
+// gathering -> OnTrack attaches a frame sink. One stream (PeerConnection) per process; several
+// UEs are served by several receiver processes behind one signaling relay (see Receiver::OnMessage).
 //
 // Traces (all in --trace-dir):
 //   <stream>-rx-frames.csv   every decoded frame delivered to the app (trace_ring.h)
@@ -201,7 +202,20 @@ class Receiver {
     const std::string stream = m.at("stream").get<std::string>();
     const std::string sdp = m.at("sdp").get<std::string>();
     std::lock_guard<std::mutex> lk(mu_);
-    if (peers_.count(stream)) return;
+    if (peers_.count(stream)) {  // a second sender reusing this stream id would silently be dropped
+      P5G_LOG_ERROR << "duplicate offer for stream " << stream << " ignored: give every sender its own --stream-id";
+      return;
+    }
+    // One stream per receiver process: the decoder-factory wrapper has a single decoded-frame trace
+    // (decoders are created later, on the decode queue, without a stream identity), so a second
+    // stream in this process would write its -rx-decoded rows into the first stream's file. Several
+    // UEs -> several video_receiver processes (distinct --receiver-id) behind one relay.
+    if (!peers_.empty()) {
+      P5G_LOG_ERROR << "offer for stream " << stream << " refused: this receiver already serves stream "
+                    << peers_.begin()->first << " (one stream per process; start another video_receiver "
+                    << "with its own --receiver-id and point the sender's --to at it)";
+      return;
+    }
     auto peer = std::make_unique<ReceiverPeer>(stream, &sig_);
     bool ok = false;
     signaling_thread_->BlockingCall([&] { ok = peer->HandleOffer(factory_.get(), ledgers_, decoders_, sdp); });

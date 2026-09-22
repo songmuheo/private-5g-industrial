@@ -4,8 +4,10 @@
 #   ./run_receiver.sh [run_dir] [extra video_receiver args...]
 #
 # run_dir: default = the run published by ./run_gnb_core.sh (results/CURRENT), else a new
-# results/<timestamp>-receiver. Traces go to <run_dir>/app (rx-*.csv, rx-stats.jsonl, receiver.log,
-# signaling.log). The relay is started only if nothing listens on 8765 yet. Ctrl-C stops both.
+# results/<timestamp>-receiver. Traces go to <run_dir>/app (<stream>-rx-*.csv, -rx-stats.jsonl,
+# receiver-<id>.log, signaling.log). The relay is started only if nothing listens on 8765 yet, so
+# several receivers (one per UE: --receiver-id recv1 ...) share one relay and one run directory.
+# Ctrl-C stops the receiver (and the relay if this instance started it).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
@@ -16,6 +18,8 @@ if [ -z "$RD" ]; then
 fi
 mkdir -p "$RD/app"
 [ -x build/apps/video_receiver ] || { echo "build/apps/video_receiver missing (make build-apps)" >&2; exit 1; }
+# Several receivers (one per UE) may share this run directory: name this process's log after its id.
+RID=recv0; prev=""; for a in "$@"; do [ "$prev" = "--receiver-id" ] && RID="$a"; prev="$a"; done
 RELAY_PID=""
 cleanup() { set +e; [ -n "$RELAY_PID" ] && kill -TERM "$RELAY_PID" 2>/dev/null; echo "[receiver] stopped. traces: $RD/app"; }
 trap cleanup EXIT
@@ -30,4 +34,4 @@ fi
 echo "[receiver] run dir: $RD   (sender: ./run_sender.sh <this host's IP as seen from the UE>)"
 # tee ignores SIGINT so a Ctrl-C reaches the app first and its output (and trace flush) completes
 # before the pipe closes; otherwise the app dies of SIGPIPE mid-shutdown.
-build/apps/video_receiver --signaling-host 127.0.0.1 --signaling-port 8765 --trace-dir "$RD/app" "$@" 2>&1 | (trap '' INT; exec tee "$RD/app/receiver.log")
+build/apps/video_receiver --signaling-host 127.0.0.1 --signaling-port 8765 --trace-dir "$RD/app" "$@" 2>&1 | (trap '' INT; exec tee "$RD/app/receiver-$RID.log")

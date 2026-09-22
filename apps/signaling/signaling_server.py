@@ -77,12 +77,18 @@ class SignalingServer:
     async def register(self, writer, msg):
         s = self.session(msg["session"])
         if msg["role"] == "sender":
+            if msg["stream"] in s.senders:
+                log.warning("[%s] sender %s re-registered while another connection holds that stream id "
+                            "(two senders with the same --stream-id?)", s.name, msg["stream"])
             s.senders[msg["stream"]] = writer
             self.peers[writer] = (s.name, "sender", msg["stream"])
             log.info("[%s] sender %s registered", s.name, msg["stream"])
             for rid in s.receivers:
                 await self.send(writer, {"type": "receiver-ready", "receiver": rid})
         elif msg["role"] == "receiver":
+            if msg["receiver"] in s.receivers:
+                log.warning("[%s] receiver %s re-registered while another connection holds that id "
+                            "(two receivers with the same --receiver-id?)", s.name, msg["receiver"])
             s.receivers[msg["receiver"]] = writer
             self.peers[writer] = (s.name, "receiver", msg["receiver"])
             log.info("[%s] receiver %s registered", s.name, msg["receiver"])
