@@ -29,6 +29,10 @@ ru_sdr:
   tx_gain: 80
   rx_gain: 40
   # clock: external                 # uncomment with a GPSDO / 10 MHz reference
+  expert_cfg:
+    # Single-antenna operation on RF A "TX/RX": TDD is half duplex, so srsRAN switches the same port
+    # between TX and RX (radio_uhd_impl.cpp "Same port transmission mode"). Nothing is connected to RX2.
+    tx_mode: same-port
 
 cell_cfg:
   dl_arfcn: 632628                  # 3489.42 MHz (n78, GSCN-aligned SSB per the srsRAN sample)

@@ -1,0 +1,16 @@
+#
+# Subscriber database loaded into Open5GS at container start (add_users.py).
+# Format: Name,IMSI,Key,OP_Type,OP/OPc,AMF,QCI,IP_alloc
+#   Name     free text
+#   IMSI     15 digits, PLMN 001 01 (MCC 001, MNC 01) as configured in the gNB (plmn: "00101")
+#   Key      128-bit K (hex)
+#   OP_Type  "op" or "opc"
+#   OP/OPc   128-bit OP or OPc (hex)
+#   AMF      authentication management field (hex), 8000 for 5G SIMs programmed with pySim/sysmo tools
+#   QCI      5QI of the default bearer (9 = non-GBR best effort)
+#   IP_alloc static UE IP inside UE_IP_BASE (10.45.x.y) — one per subscriber, keeps traces attributable
+#
+# Lines starting with '#' are ignored. Change nothing in the first row unless ran/ue_sim/configs is
+# updated to match: it is the soft-SIM of the local srsUE loopback test.
+ue_sim,001010123456780,00112233445566778899aabbccddeeff,opc,63bfa50ee6523365ff14c1f45f88737d,8000,9,10.45.1.2
+#pixel1,00101<MSIN>,<Ki hex>,opc,<OPc hex>,8000,9,10.45.1.11

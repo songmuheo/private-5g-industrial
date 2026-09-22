@@ -29,4 +29,4 @@ if [ "${P5G_GNB_PCAP:-0}" = "1" ]; then
 fi
 echo "[run_gnb] profile=$PROFILE traces=$TRACE_DIR pcap=${P5G_GNB_PCAP:-0}"
 exec sudo -E env P5G_GNB_TRACE_DIR="$TRACE_DIR" P5G_GNB_TRACE_FLUSH_MS="${P5G_GNB_TRACE_FLUSH_MS:-500}" \
-  "$GNB" -c "$CFG" log --filename "$TRACE_DIR/gnb.log" "${PCAP_ARGS[@]}" "$@"
+  /usr/bin/stdbuf -oL "$GNB" -c "$CFG" log --filename "$TRACE_DIR/gnb.log" "${PCAP_ARGS[@]}" "$@"   # stdbuf: line-buffered stdout when redirected to a file

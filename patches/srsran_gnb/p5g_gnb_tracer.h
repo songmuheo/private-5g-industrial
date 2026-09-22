@@ -12,7 +12,7 @@
  *      call copies one POD row into a fixed circular ring (one CAS to claim a
  *      slot + one release store to publish it) and returns. A single low-priority
  *      background thread formats rows to CSV every P5G_GNB_TRACE_FLUSH_MS
- *      (default 500 ms) and frees the slots, so memory is constant (~6 MB/trace).
+ *      (default 500 ms) and frees the slots, so memory is constant (~4 MB for all traces).
  *   2. Multiple producers per trace. Scheduler cell thread, MAC UL PDU handler,
  *      per-UE RLC/PDCP executors all write concurrently -> claim/publish ring.
  *   3. Overflow is counted, never silently dropped: a footer and a `.ERROR`
@@ -224,12 +224,10 @@ class trace_ring
 public:
   using formatter_fn = void (*)(std::FILE*, const Row&);
 
+  // capacity is rounded up to a power of two: slot selection is a mask, not a 64-bit division.
   trace_ring(std::string path_, const char* header, formatter_fn fmt_, size_t capacity_) :
-    path(std::move(path_)), fmt(fmt_), capacity(capacity_), rows(capacity_), ready(capacity_)
+    path(std::move(path_)), fmt(fmt_), capacity(round_up_pow2(capacity_)), mask(capacity - 1), slots(new slot[capacity])
   {
-    for (auto& r : ready) {
-      r.store(0, std::memory_order_relaxed);
-    }
     std::FILE* f = std::fopen(path.c_str(), "w");
     if (f == nullptr) {
       std::fprintf(stderr, "[p5g_gnb_tracer] cannot open %s (%s)\n", path.c_str(), std::strerror(errno));
@@ -243,7 +241,8 @@ public:
 
   ~trace_ring() { close(); }
 
-  // Hot path: one CAS + POD copy + release store. No allocation, lock or I/O.
+  // Hot path: one CAS + POD copy + release store. No allocation, lock or I/O. Row and ready flag
+  // share a slot, so a write touches one cache line (two if the row straddles a boundary).
   void write(const Row& r)
   {
     if (!enabled || closed.load(std::memory_order_acquire)) {
@@ -259,8 +258,9 @@ public:
         break;
       }
     }
-    rows[i % capacity] = r;
-    ready[i % capacity].store(1, std::memory_order_release);
+    slot& s = slots[i & mask];
+    s.row   = r;
+    s.ready.store(1, std::memory_order_release);
   }
 
   // Background thread only.
@@ -278,9 +278,9 @@ public:
     if (f == nullptr) {
       return;
     }
-    for (; m != end && ready[m % capacity].load(std::memory_order_acquire); ++m) {
-      fmt(f, rows[m % capacity]);
-      ready[m % capacity].store(0, std::memory_order_release);
+    for (; m != end && slots[m & mask].ready.load(std::memory_order_acquire); ++m) {
+      fmt(f, slots[m & mask].row);
+      slots[m & mask].ready.store(0, std::memory_order_release);
       ++written;
     }
     consumed.store(m, std::memory_order_release);
@@ -303,6 +303,20 @@ public:
   }
 
 private:
+  struct slot {
+    Row                  row;
+    std::atomic<uint8_t> ready{0};
+  };
+
+  static size_t round_up_pow2(size_t n)
+  {
+    size_t c = 1;
+    while (c < n) {
+      c <<= 1;
+    }
+    return c;
+  }
+
   static std::string boot_id()
   {
     std::ifstream f("/proc/sys/kernel/random/boot_id");
@@ -313,17 +327,20 @@ private:
     return "unknown";
   }
 
-  const std::string                 path;
-  const formatter_fn                fmt;
-  const size_t                      capacity;
-  std::vector<Row>                  rows;
-  std::vector<std::atomic<uint8_t>> ready;
-  std::atomic<size_t>               claimed{0};
-  std::atomic<size_t>               consumed{0};
-  std::atomic<size_t>               overflow{0};
-  std::atomic<bool>                 closed{false};
-  size_t                            written = 0; // flusher-thread private
-  bool                              enabled = false;
+  static constexpr size_t cache_line = 64;
+  const std::string       path;
+  const formatter_fn      fmt;
+  const size_t            capacity;
+  const size_t            mask;
+  std::unique_ptr<slot[]> slots;
+  // Producer counter and flusher counter on separate cache lines so the flusher's periodic
+  // consumed store never invalidates the line the real-time threads CAS on.
+  alignas(cache_line) std::atomic<size_t> claimed{0};
+  alignas(cache_line) std::atomic<size_t> consumed{0};
+  alignas(cache_line) std::atomic<size_t> overflow{0};
+  std::atomic<bool>                       closed{false};
+  size_t                                  written = 0; // flusher-thread private
+  bool                                    enabled = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -577,20 +594,25 @@ public:
       return;
     }
     const std::string d = std::string(dir) + "/";
-    // Ring depth = rows that can accumulate within one flush period (default 500 ms) with slack;
-    // 65536 rows * ~100 B = ~6 MB per trace, constant for the whole run.
-    constexpr size_t kRingDepth = 65536;
-    sched_dl    = std::make_unique<trace_ring<sched_grant_row>>(d + "gnb_sched_dl.csv", hdr_sched_grant, fmt_sched_grant, kRingDepth);
-    sched_ul    = std::make_unique<trace_ring<sched_grant_row>>(d + "gnb_sched_ul.csv", hdr_sched_grant, fmt_sched_grant, kRingDepth);
-    ul_crc      = std::make_unique<trace_ring<ul_crc_row>>(d + "gnb_ul_crc.csv", hdr_ul_crc, fmt_ul_crc, kRingDepth);
-    dl_harq_ack = std::make_unique<trace_ring<dl_harq_ack_row>>(d + "gnb_dl_harq_ack.csv", hdr_dl_harq_ack, fmt_dl_harq_ack, kRingDepth);
-    bsr         = std::make_unique<trace_ring<bsr_row>>(d + "gnb_bsr.csv", hdr_bsr, fmt_bsr, kRingDepth);
-    sr          = std::make_unique<trace_ring<sr_row>>(d + "gnb_sr.csv", hdr_sr, fmt_sr, kRingDepth);
-    csi         = std::make_unique<trace_ring<csi_row>>(d + "gnb_csi.csv", hdr_csi, fmt_csi, kRingDepth);
-    mac_ul_pdu  = std::make_unique<trace_ring<mac_ul_pdu_row>>(d + "gnb_mac_ul_pdu.csv", hdr_mac_ul_pdu, fmt_mac_ul_pdu, kRingDepth);
-    rlc_ul      = std::make_unique<trace_ring<rlc_ul_row>>(d + "gnb_rlc_ul.csv", hdr_rlc_ul, fmt_rlc_ul, kRingDepth);
-    pdcp_ul     = std::make_unique<trace_ring<pdcp_sdu_row>>(d + "gnb_pdcp_ul.csv", hdr_pdcp_sdu, fmt_pdcp_sdu, kRingDepth);
-    pdcp_dl     = std::make_unique<trace_ring<pdcp_sdu_row>>(d + "gnb_pdcp_dl.csv", hdr_pdcp_sdu, fmt_pdcp_sdu, kRingDepth);
+    // Ring depth = rows that can accumulate within one flush period (default 500 ms) with >10x slack
+    // for a delayed flusher, sized per event rate so the working set stays small (cache-resident):
+    //   packet-rate traces (PDCP/RLC/MAC PDU, ~3k rows/s at 25 Mbps of 1200 B packets)  -> 16384
+    //   slot-rate traces   (grants, CRC, HARQ-ACK: <= a few per slot, 2000 slots/s)      -> 16384
+    //   report-rate traces (BSR, SR, CSI: tens to hundreds per second)                   ->  4096
+    // Total ~4 MB for all eleven rings instead of ~70 MB with a uniform 65536.
+    constexpr size_t kDepthPacket = 16384;
+    constexpr size_t kDepthReport = 4096;
+    sched_dl    = std::make_unique<trace_ring<sched_grant_row>>(d + "gnb_sched_dl.csv", hdr_sched_grant, fmt_sched_grant, kDepthPacket);
+    sched_ul    = std::make_unique<trace_ring<sched_grant_row>>(d + "gnb_sched_ul.csv", hdr_sched_grant, fmt_sched_grant, kDepthPacket);
+    ul_crc      = std::make_unique<trace_ring<ul_crc_row>>(d + "gnb_ul_crc.csv", hdr_ul_crc, fmt_ul_crc, kDepthPacket);
+    dl_harq_ack = std::make_unique<trace_ring<dl_harq_ack_row>>(d + "gnb_dl_harq_ack.csv", hdr_dl_harq_ack, fmt_dl_harq_ack, kDepthPacket);
+    bsr         = std::make_unique<trace_ring<bsr_row>>(d + "gnb_bsr.csv", hdr_bsr, fmt_bsr, kDepthReport);
+    sr          = std::make_unique<trace_ring<sr_row>>(d + "gnb_sr.csv", hdr_sr, fmt_sr, kDepthReport);
+    csi         = std::make_unique<trace_ring<csi_row>>(d + "gnb_csi.csv", hdr_csi, fmt_csi, kDepthReport);
+    mac_ul_pdu  = std::make_unique<trace_ring<mac_ul_pdu_row>>(d + "gnb_mac_ul_pdu.csv", hdr_mac_ul_pdu, fmt_mac_ul_pdu, kDepthPacket);
+    rlc_ul      = std::make_unique<trace_ring<rlc_ul_row>>(d + "gnb_rlc_ul.csv", hdr_rlc_ul, fmt_rlc_ul, kDepthPacket);
+    pdcp_ul     = std::make_unique<trace_ring<pdcp_sdu_row>>(d + "gnb_pdcp_ul.csv", hdr_pdcp_sdu, fmt_pdcp_sdu, kDepthPacket);
+    pdcp_dl     = std::make_unique<trace_ring<pdcp_sdu_row>>(d + "gnb_pdcp_dl.csv", hdr_pdcp_sdu, fmt_pdcp_sdu, kDepthPacket);
 
     int flush_ms = 500;
     if (const char* fm = std::getenv("P5G_GNB_TRACE_FLUSH_MS")) {

@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from trace_io import iter_error_sidecars, read_trace  # noqa: E402
 
-APP_TRACES = ("tx-frames", "tx-encoded", "tx-rtp", "tx-rtcp", "tx-events",
+APP_TRACES = ("tx-frames", "tx-encoded", "tx-encoder-rates", "tx-cc", "tx-rtp", "tx-rtcp", "tx-events",
               "rx-frames", "rx-decoded", "rx-rtp", "rx-rtcp", "rx-events")
 GNB_TRACES = ("gnb_sched_dl", "gnb_sched_ul", "gnb_ul_crc", "gnb_dl_harq_ack", "gnb_bsr", "gnb_sr",
               "gnb_csi", "gnb_mac_ul_pdu", "gnb_rlc_ul", "gnb_pdcp_ul", "gnb_pdcp_dl")

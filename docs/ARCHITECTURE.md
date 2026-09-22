@@ -22,7 +22,7 @@
 ```
 sender                                   gNB (uplink)                                    receiver
 capture ─► encode ─► RTP out ─► [UE stack+air] ─► MAC PDU ─► RLC SDU ─► PDCP SDU ─► [core+internet] ─► RTP in ─► decode ─► app
-tx-frames  tx-encoded tx-rtp         sched_ul/ul_crc  mac_ul_pdu rlc_ul   pdcp_ul                          rx-rtp    rx-decoded rx-frames
+tx-frames  tx-encoded(+rates) tx-cc tx-rtp      sched_ul/ul_crc  mac_ul_pdu rlc_ul   pdcp_ul                          rx-rtp    rx-decoded rx-frames
 tx-events (GoogCC: delay/loss estimate, probes, ALR; ICE/DTLS)        rx-events                          tx/rx-stats.jsonl (1 s getStats)
 ```
 
@@ -55,5 +55,5 @@ tx-events (GoogCC: delay/loss estimate, probes, ALR; ICE/DTLS)        rx-events 
 * libwebrtc emits no per-frame decode event through `RtcEventLog`; decode timing comes from the
   decoder-factory wrapper (`-rx-decoded.csv`).
 * Cross-host latencies depend on wall-clock sync.
-* Radio profile not yet exercised with hardware; SIMs in `ran/P-Sim.csv` are PLMN 999/70 while the
-  configs use 001/01.
+* Phones request their own APN name as DNN; the core subscription must list it (`core_add_dnn.sh`,
+  default `oai`) or the AMF rejects the PDU session ("DNN Not Supported").

@@ -13,9 +13,9 @@ against one server (cross-host latencies use `*_wall_ns`; record `chronyc tracki
 
 ```bash
 make deps && make build-gnb                 # ~15 min; needs third_party/srsRAN_Project (make submodules)
-# SIMs: add one row per phone to ran/core/subscriber_db.csv (IMSI, K, OPc, AMF 8000, 5QI 9, static IP).
-#       ran/P-Sim.csv holds the sysmocom SIM list (PLMN 999/70): using those SIMs requires plmn "99970"
-#       in ran/gnb/configs/*.yml and the Open5GS PLMN (ran/core) — currently everything is 001/01.
+# SIMs: one row per phone in ran/core/subscriber_db.csv (git-ignored; template subscriber_db.example.csv):
+#       IMSI 00101<MSIN>, K, OPc, AMF 8000, 5QI 9, static IP. Phones keep their existing APN profile:
+#       start_core.sh adds the DNNs in P5G_UE_DNNS (default "oai") to every subscription.
 make core-up                                # Open5GS at 10.53.1.2, WebUI :9999, route 10.45.0.0/16 via core
 RD=results/$(date +%Y%m%d-%H%M%S)-<label>; mkdir -p $RD/gnb $RD/core
 scripts/run/run_gnb.sh b210_n78_tdd_20mhz $RD/gnb | tee $RD/gnb/gnb_stdout.log     # tracer -> gnb_*.csv

@@ -3,7 +3,8 @@
 # Image: built from third_party/srsRAN_Project/docker/open5gs (stock srsRAN Dockerfile,
 #        Open5GS v2.7.0). Only our env file and subscriber list differ.
 # Network: docker bridge 10.53.1.0/24; the core is 10.53.1.2, the host is 10.53.1.1 (gNB N2/N3 bind).
-# UE pool: 10.45.0.0/16 (UE_IP_BASE) NAT'ed by the core. To reach UEs from the host add a route:
+# UE pool: 10.45.0.0/16 (UE_IP_BASE). The UPF routes UE traffic to this host, which forwards it and
+#          masquerades it on its default-route NIC (start_core.sh). To reach UEs from the host add a route:
 #          sudo ip route add 10.45.0.0/16 via 10.53.1.2   (scripts/run/start_core.sh does this)
 #
 # Usage:  docker compose -f ran/core/docker-compose.yml up -d --build
@@ -21,7 +22,7 @@ services:
     env_file:
       - open5gs.env
     volumes:
-      # Subscriber list (IMSI/K/OPc of the SIM cards in the Pixel phones + the srsUE test SIM).
+      # Subscriber list (git-ignored; start from subscriber_db.example.csv). IMSI/K/OPc of the Pixel SIMs + the srsUE test SIM.
       # The entrypoint (WORKDIR /open5gs) resolves SUBSCRIBER_DB relative to its working directory.
       - ./subscriber_db.csv:/open5gs/subscriber_db.csv:ro
     privileged: true          # creates ogstun + iptables NAT inside the container

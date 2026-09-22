@@ -12,6 +12,8 @@
 // Traces (all in --trace-dir):
 //   <stream>-tx-frames.csv   every capture slot (video_source.h)
 //   <stream>-tx-encoded.csv  every encoded frame (webrtc_tracing.h)
+//   <stream>-tx-encoder-rates.csv  every encoder target-bitrate update (VideoEncoder::SetRates)
+//   <stream>-tx-cc.csv       every GoogCC output update (target/stable rate, estimate, RTT, loss, pacer)
 //   <stream>-tx-rtp.csv      every sent RTP packet;  <stream>-tx-rtcp.csv every RTCP packet (both dirs)
 //   <stream>-tx-stats.jsonl  W3C getStats() every --stats-period-ms (0 = off)
 #include <atomic>
@@ -51,6 +53,10 @@ struct SenderConfig {
   // learn its server-reflexive address, as in examples/peerconnection/client/conductor.cc.
   std::string ice_servers;
   int stats_period_ms = 1000;  // periodic getStats() sampling; 0 = off
+  // The only on-wire deviation from stock M120: negotiate the abs-capture-time header extension
+  // (+12 bytes on the first packet of each frame) so the receiver can log the sender-space rtp_ts
+  // live. 0 = stock header set; rx-frames.sender_rtp_ts_est then stays -1 (join offline via RTCP SR).
+  int abs_capture_time = 1;
   VideoSourceConfig video;
 };
 static SenderConfig g_cfg;
@@ -90,7 +96,7 @@ class SenderPeer : public webrtc::PeerConnectionObserver {
       if (tr->media_type() != cricket::MEDIA_TYPE_VIDEO) continue;
       auto err = tr->SetCodecPreferences(prefs);
       if (!err.ok()) P5G_FATAL("SetCodecPreferences(" << g_cfg.codec << ") failed: " << err.message());
-      RequireAbsCaptureTime(tr.get());
+      if (g_cfg.abs_capture_time) RequireAbsCaptureTime(tr.get());
     }
 
     // Optional deviations from stock, all off by default and recorded in the run config.
@@ -170,9 +176,15 @@ class Sender {
     encoded_trace_ = std::make_unique<EncodedFrameTrace>(TracePrefix() + "-encoded.csv",
                                                          kEncodedFrameHeader, &FormatEncodedFrameRow,
                                                          kFrameTraceCapacity);
+    encoder_rates_ = std::make_unique<EncoderRateTrace>(TracePrefix() + "-encoder-rates.csv",
+                                                        kEncoderRateHeader, &FormatEncoderRateRow,
+                                                        kFrameTraceCapacity);
+    cc_trace_ = std::make_unique<CcUpdateTrace>(TracePrefix() + "-cc.csv", kCcUpdateHeader,
+                                                &FormatCcUpdateRow, kFrameTraceCapacity);
     signaling_thread_ = rtc::Thread::CreateWithSocketServer();
     signaling_thread_->Start();
-    factory_ = CreateFactory(signaling_thread_.get(), encoded_trace_.get(), &ledgers_);
+    factory_ = CreateFactory(signaling_thread_.get(), encoded_trace_.get(), &ledgers_, nullptr,
+                             encoder_rates_.get(), cc_trace_.get());
     if (!factory_) P5G_FATAL("PeerConnectionFactory creation failed");
   }
 
@@ -236,6 +248,8 @@ class Sender {
 
  private:
   std::unique_ptr<EncodedFrameTrace> encoded_trace_;  // must outlive factory_ (encoder wrapper holds raw ptr)
+  std::unique_ptr<EncoderRateTrace> encoder_rates_;   // same lifetime rule
+  std::unique_ptr<CcUpdateTrace> cc_trace_;           // same lifetime rule
   std::unique_ptr<rtc::Thread> signaling_thread_;
   rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
   RtpPacketLedgerFactory* ledgers_ = nullptr;  // owned by factory_
@@ -254,7 +268,8 @@ static void Usage() {
                "             --trace-dir DIR [--yuv FILE | (pattern)] --width W --height H --fps F\n"
                "             [--codec H264|VP8|VP9|AV1] [--max-bitrate-kbps N] [--start-bitrate-kbps N]\n"
                "             [--degradation stock|maintain_resolution|maintain_framerate] [--duration S]\n"
-               "             [--ice-servers stun:host:port,...] [--stats-period-ms 1000]\n");
+               "             [--ice-servers stun:host:port,...] [--stats-period-ms 1000]\n"
+               "             [--abs-capture-time 1|0]\n");
 }
 
 int main(int argc, char** argv) {
@@ -279,6 +294,7 @@ int main(int argc, char** argv) {
   c.duration_s = a.GetInt("duration", 0);
   c.ice_servers = a.Get("ice-servers", "");
   c.stats_period_ms = a.GetInt("stats-period-ms", c.stats_period_ms);
+  c.abs_capture_time = a.GetInt("abs-capture-time", c.abs_capture_time);
   c.video.yuv_path = a.Get("yuv", "");
   c.video.width = a.GetInt("width", c.video.width);
   c.video.height = a.GetInt("height", c.video.height);

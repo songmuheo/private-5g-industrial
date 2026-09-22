@@ -17,4 +17,5 @@ __pycache__/
 *.swp
 .DS_Store
 # SIM secrets (Ki/OPc) — keep local; add deliberately if you want them in the repo
-/ran/P-Sim.csv
+# real subscriber keys (Ki/OPc) — local only; copy subscriber_db.example.csv to subscriber_db.csv and fill in
+/ran/core/subscriber_db.csv

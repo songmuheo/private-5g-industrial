@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -23,8 +24,9 @@
 // run regardless of run length. If producers outrun the flusher the row is dropped and COUNTED
 // (footer + `<path>.ERROR` sidecar), never silently.
 //
-// Producer cost: one CAS to claim a sequence number, one POD copy, one release store. Works for any
-// number of producer threads; the flusher is the only consumer.
+// Producer cost: one CAS to claim a sequence number, one POD copy, one release store (row and flag
+// in the same slot; capacity is a power of two so the slot index is a mask). Works for any number of
+// producer threads; the flusher is the only consumer.
 
 namespace p5g {
 
@@ -38,9 +40,10 @@ class TraceRing {
  public:
   using Formatter = void (*)(std::FILE*, const Row&);
 
+  // capacity is rounded up to a power of two so slot selection is a mask, not a 64-bit division.
   TraceRing(std::string path, std::string header, Formatter fmt, size_t capacity)
-      : path_(std::move(path)), fmt_(fmt), cap_(capacity), buf_(capacity), ready_(capacity) {
-    for (auto& f : ready_) f.store(0, std::memory_order_relaxed);
+      : path_(std::move(path)), fmt_(fmt), cap_(RoundUpPow2(capacity)), mask_(cap_ - 1),
+        slots_(new Slot[cap_]) {
     std::FILE* f = std::fopen(path_.c_str(), "w");
     if (!f || std::fprintf(f, "%s\n", header.c_str()) < 0 || std::fclose(f) != 0) {
       std::fprintf(stderr, "[p5g][trace] cannot create %s\n", path_.c_str());
@@ -53,7 +56,8 @@ class TraceRing {
   }
   ~TraceRing() { Close(); }
 
-  // Hot path.
+  // Hot path: one CAS to claim a slot, one POD copy, one release store. The row and its ready flag
+  // live in the same slot, so a write touches one cache line (two if the row straddles a boundary).
   void Write(const Row& r) {
     if (!enabled_) return;
     if (closed_.load(std::memory_order_acquire)) {
@@ -69,8 +73,9 @@ class TraceRing {
       if (claimed_.compare_exchange_weak(i, i + 1, std::memory_order_acq_rel, std::memory_order_relaxed))
         break;
     }
-    buf_[i % cap_] = r;
-    ready_[i % cap_].store(1, std::memory_order_release);
+    Slot& s = slots_[i & mask_];
+    s.row = r;
+    s.ready.store(1, std::memory_order_release);
   }
 
   const std::string& path() const { return path_; }
@@ -90,6 +95,17 @@ class TraceRing {
   }
 
  private:
+  struct Slot {
+    Row row;
+    std::atomic<uint8_t> ready{0};
+  };
+
+  static size_t RoundUpPow2(size_t n) {
+    size_t c = 1;
+    while (c < n) c <<= 1;
+    return c;
+  }
+
   static std::string BootId() {
     std::ifstream f("/proc/sys/kernel/random/boot_id");
     std::string v;
@@ -106,9 +122,9 @@ class TraceRing {
       std::ofstream(path_ + ".ERROR") << "append-failed\n";
       return;
     }
-    for (; m != end && ready_[m % cap_].load(std::memory_order_acquire); ++m) {
-      fmt_(f, buf_[m % cap_]);
-      ready_[m % cap_].store(0, std::memory_order_release);
+    for (; m != end && slots_[m & mask_].ready.load(std::memory_order_acquire); ++m) {
+      fmt_(f, slots_[m & mask_].row);
+      slots_[m & mask_].ready.store(0, std::memory_order_release);
       written_++;
     }
     consumed_.store(m, std::memory_order_release);
@@ -131,12 +147,18 @@ class TraceRing {
     }
   }
 
+  static constexpr size_t kCacheLine = 64;
   const std::string path_;
   const Formatter fmt_;
   const size_t cap_;
-  std::vector<Row> buf_;
-  std::vector<std::atomic<uint8_t>> ready_;
-  std::atomic<size_t> claimed_{0}, consumed_{0}, overflow_{0}, late_{0};
+  const size_t mask_;
+  std::unique_ptr<Slot[]> slots_;
+  // Producer-side counter and flusher-side counter on separate cache lines: the flusher's
+  // consumed_ store (every 500 ms) never invalidates the line the producers CAS on.
+  alignas(kCacheLine) std::atomic<size_t> claimed_{0};
+  alignas(kCacheLine) std::atomic<size_t> consumed_{0};
+  alignas(kCacheLine) std::atomic<size_t> overflow_{0};
+  std::atomic<size_t> late_{0};
   std::atomic<bool> closed_{false}, running_{false};
   std::thread flusher_;
   size_t written_ = 0;  // flusher private

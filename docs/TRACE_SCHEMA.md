@@ -76,6 +76,56 @@ results/<run>/
 `tx-frames`에 `to_encoder=1`인데 여기에 같은 `rtp_ts`가 없으면 **인코더가 버린 프레임**이다(시작 직후 300 kbps
 start bitrate 구간에서 순정 동작으로 몇 장 발생).
 
+### `-tx-encoder-rates.csv` — 인코더 목표 비트레이트가 바뀔 때마다 1행
+출처: 같은 `VideoEncoderFactory` 래퍼가 `VideoEncoder::SetRates()` 호출을 가로채는 지점(공식 인터페이스
+`api/video_codecs/video_encoder.h`의 `RateControlParameters`). 순정 경로는 GoogCC 추정 → `BitrateAllocator` →
+`VideoStreamEncoder` → `SetRates()`이며, 이 파일은 그 마지막 단계에서 인코더가 **실제로 받은 목표**를 그대로 적는다.
+`-tx-stats.jsonl`의 `outbound-rtp.targetBitrate`와 같은 값이지만 1초 샘플이 아니라 변경 시점마다 기록된다.
+
+| 컬럼 | 의미 |
+|---|---|
+| `set_mono_ns`, `set_wall_ns` | `SetRates()` 호출 시각 |
+| `target_bps` | `target_bitrate` 합(계층 합계). 인코더에 요구된 목표 |
+| `allocated_bps` | `bitrate` 합. 헤드룸/제한 반영 후 실제 할당(보통 `target_bps`와 같거나 낮음) |
+| `bandwidth_allocation_bps` | 이 스트림에 배정된 네트워크 추정 몫(`bandwidth_allocation`) |
+| `framerate_fps` | 인코더에 요구된 프레임률 |
+| `num_active_spatial_layers` | 0 bps가 아닌 공간 계층 수(단일 스트림 H.264는 1) |
+
+### `-tx-cc.csv` — GoogCC 출력이 갱신될 때마다 1행
+출처: `PeerConnectionFactoryDependencies::network_controller_factory`(공식 주입점, `api/transport/network_control.h`)에
+순정 `GoogCcNetworkControllerFactory`를 감싼 관찰자를 넣고, 컨트롤러가 돌려주는 `NetworkControlUpdate`를 그대로 적는다
+(수정하지 않음). 이것이 GoogCC의 **최종 출력**(지연/손실 추정 + pushback + 제약 반영 후)이며 `BitrateAllocator` →
+인코더 목표(`-tx-encoder-rates.csv`)의 입력이다. `-tx-events.csv`의 `bwe_delay`/`bwe_loss`는 한 단계 앞의 두 하위 추정기다.
+주입은 M120에서 필드 트라이얼 `WebRTC-Bwe-InjectedCongestionController`로만 열리는데(`pc/peer_connection_factory.cc`),
+이 트라이얼은 그 자리에서만 읽히는 순수 게이트라 다른 동작은 바뀌지 않는다(송신단에서만 켬). 갱신이 없는 호출은 행을 남기지 않는다.
+
+| 컬럼 | 의미 |
+|---|---|
+| `log_mono_ns`, `log_wall_ns` | 갱신 시각 |
+| `trigger` | 갱신을 만든 입력: 0 process_interval(25 ms 주기) / 1 transport_feedback(TWCC) / 2 transport_loss / 3 rtt_update / 4 route_change / 5 network_availability / 6 target_rate_constraints / 7 streams_config / 8 remote_bitrate_report(REMB) / 9 network_state_estimate / 10 sent_packet / 11 received_packet |
+| `target_bps` | `TargetTransferRate::target_rate` — **추정 비트레이트의 최종값** (-1 이번 갱신에 없음) |
+| `stable_target_bps` | 프로브 등 일시적 상승을 뺀 안정 목표 |
+| `est_bandwidth_bps` | `NetworkEstimate::bandwidth`. M120에서 deprecated 라 항상 -1(무한대) |
+| `rtt_us` | GoogCC가 보는 RTT |
+| `loss_rate_ratio` | 손실 기반 추정기가 보는 손실률 0..1 |
+| `bwe_period_ms` | 다음 추정 갱신까지 권고 주기 |
+| `cwnd_reduce_ratio` | congestion-window pushback 비율(0 = 없음) |
+| `pacer_rate_bps`, `pad_rate_bps` | pacer 송출 속도 / 패딩 속도(`PacerConfig`) |
+| `cwnd_bytes` | congestion window(-1 미설정) |
+| `num_probe_clusters` | 이 갱신이 만든 프로브 클러스터 수(상세는 `-tx-events.csv` `probe_created`) |
+
+#### 비트레이트 4종을 어디서 읽는가
+
+| 무엇 | 파일 | 갱신 단위 | 공식 출처 |
+|---|---|---|---|
+| **추정**(estimated, GoogCC) | `-tx-cc.csv` `target_bps`(최종), `stable_target_bps`; `-tx-events.csv` `bwe_delay`/`bwe_loss` a열(하위 추정기); `-tx-stats.jsonl` `candidate-pair.availableOutgoingBitrate` | 갱신마다 / 갱신마다 / 1초 | `NetworkControllerInterface` 주입; `RtcEventLog` `RtcEventBweUpdate{DelayBased,LossBased}`; W3C `RTCIceCandidatePairStats` |
+| **목표**(target, 인코더) | `-tx-encoder-rates.csv` `target_bps`; `-tx-stats.jsonl` `outbound-rtp.targetBitrate` | 변경마다 / 1초 | `VideoEncoder::SetRates`; W3C `RTCOutboundRtpStreamStats` |
+| **송신**(send) | `-tx-rtp.csv` 패킷별 `payload_bytes`+헤더 합산; `-tx-stats.jsonl` `outbound-rtp.bytesSent`, `headerBytesSent`, `retransmittedBytesSent` | 패킷마다 / 1초 | `RtcEventRtpPacketOutgoing`; W3C |
+| **수신**(received) | `-rx-rtp.csv` 패킷별 합산; `-rx-stats.jsonl` `inbound-rtp.bytesReceived`, `headerBytesReceived` | 패킷마다 / 1초 | `RtcEventRtpPacketIncoming`; W3C |
+
+수신 측 자체 추정치(`availableIncomingBitrate`)는 REMB 기반이라 transport-cc가 협상된 이 구성에서는 나오지 않는다
+(M120 수신단은 피드백만 보내고 추정은 송신단 GoogCC가 한다).
+
 ### `-tx-rtp.csv` — 송신 RTP 패킷마다 1행
 출처: libwebrtc가 패킷마다 `RtcEventLog::Log()`에 넘기는 `RtpPacketOutgoing` 이벤트(`RtpSenderEgress`, UDP 소켓
 write 직후). 우리 `RtcEventLog` 구현을 `PeerConnectionFactoryDependencies::event_log_factory`로 주입.
@@ -177,7 +227,7 @@ fmtp). 카운터는 누적(W3C §4.1)이라 구간 값은 두 샘플의 차이�
 | `frame_idx` | 수신 프로세스의 순번. **송신 `frame_idx`와 무관**(인코더가 버린 프레임은 수신 번호를 받지 않음) |
 | `rtp_ts` | 전선 공간(`VideoFrame::timestamp()`) |
 | `abs_capture_ntp_ms` | abs-capture-time 헤더 확장으로 실려온 **송신측 캡처 NTP(ms)**(-1 없음) |
-| `sender_rtp_ts_est` | `90 × (uint32)abs_capture_ntp_ms` — 실시간으로 복원한 **송신 공간 rtp_ts**. `tx-frames.rtp_ts`와 ±90 tick(1 ms 반올림) 안에서 일치 |
+| `sender_rtp_ts_est` | `90 × (uint32)abs_capture_ntp_ms` — 실시간으로 복원한 **송신 공간 rtp_ts**. `tx-frames.rtp_ts`와 ±90 tick(1 ms 반올림) 안에서 일치 | 송신단을 `--abs-capture-time 0`으로 띄우면(확장 협상 안 함 = 순정 헤더 집합) -1 이며, 이때는 RTCP SR의 NTP↔RTP 매핑으로 오프라인에서 K를 구한다.
 | `wire_offset_est` | `rtp_ts − sender_rtp_ts_est` = SSRC별 상수 K(전 행 동일해야 정상) |
 | `recv_wall_ns`, `recv_mono_ns` | 앱 도착 시각 |
 | `width`, `height` | 디코딩 해상도 |

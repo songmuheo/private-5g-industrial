@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "api/field_trials.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
 #include "api/call/call_factory_interface.h"
@@ -52,6 +53,8 @@
 //   * event_log_factory  = RtpPacketLedgerFactory (per-packet RTP/RTCP/event ledger, webrtc_tracing.h)
 //   * video_encoder_factory is wrapped by LedgerVideoEncoderFactory when an encoded-frame trace is
 //     given (sender); video_decoder_factory by LedgerVideoDecoderFactory when requested (receiver).
+//   * network_controller_factory = LedgerNetworkControllerFactory (stock GoogCC + observer) when a
+//     congestion-controller trace is given (sender).
 // Everything else (codecs, audio processing, task queue factory, field trials) is stock.
 
 namespace p5g {
@@ -59,13 +62,14 @@ namespace p5g {
 inline rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> CreateFactory(
     rtc::Thread* signaling_thread, EncodedFrameTrace* encoded_trace,
     RtpPacketLedgerFactory** out_ledger_factory,
-    LedgerVideoDecoderFactory** out_decoder_factory = nullptr) {
-  auto make_venc = [encoded_trace]() -> std::unique_ptr<webrtc::VideoEncoderFactory> {
+    LedgerVideoDecoderFactory** out_decoder_factory = nullptr,
+    EncoderRateTrace* encoder_rates = nullptr, CcUpdateTrace* cc_trace = nullptr) {
+  auto make_venc = [encoded_trace, encoder_rates]() -> std::unique_ptr<webrtc::VideoEncoderFactory> {
     auto base = std::make_unique<webrtc::VideoEncoderFactoryTemplate<
         webrtc::LibvpxVp8EncoderTemplateAdapter, webrtc::LibvpxVp9EncoderTemplateAdapter,
         webrtc::OpenH264EncoderTemplateAdapter, webrtc::LibaomAv1EncoderTemplateAdapter>>();
     if (!encoded_trace) return base;
-    return std::make_unique<LedgerVideoEncoderFactory>(std::move(base), encoded_trace);
+    return std::make_unique<LedgerVideoEncoderFactory>(std::move(base), encoded_trace, encoder_rates);
   };
   auto make_vdec = [out_decoder_factory]() -> std::unique_ptr<webrtc::VideoDecoderFactory> {
     auto base = std::make_unique<webrtc::VideoDecoderFactoryTemplate<
@@ -88,12 +92,23 @@ inline rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> CreateFactory(
   deps.network_thread = nullptr;
   deps.worker_thread = nullptr;
   deps.signaling_thread = signaling_thread;
-  std::unique_ptr<webrtc::FieldTrialsView> trials = std::make_unique<webrtc::FieldTrialBasedConfig>();
+  // Stock field trials (none set). PeerConnectionFactory honours an injected network controller
+  // only behind "WebRTC-Bwe-InjectedCongestionController" (pc/peer_connection_factory.cc); that
+  // trial is a pure gate — it is read nowhere else in M120 — so enabling it changes nothing but
+  // which factory object is asked to create the (still stock) GoogCC controller.
+  std::unique_ptr<webrtc::FieldTrialsView> trials;
+  if (cc_trace) {
+    trials = webrtc::FieldTrials::CreateNoGlobal("WebRTC-Bwe-InjectedCongestionController/Enabled/");
+  } else {
+    trials = std::make_unique<webrtc::FieldTrialBasedConfig>();
+  }
   deps.task_queue_factory = webrtc::CreateDefaultTaskQueueFactory(trials.get());
   deps.call_factory = webrtc::CreateCallFactory();
   auto ledger = std::make_unique<RtpPacketLedgerFactory>();
   if (out_ledger_factory) *out_ledger_factory = ledger.get();
-  deps.event_log_factory = std::move(ledger);  // <- only non-stock line
+  deps.event_log_factory = std::move(ledger);  // <- non-stock line 1 (observer)
+  if (cc_trace)                                 // <- non-stock line 2 (observer around stock GoogCC)
+    deps.network_controller_factory = std::make_unique<LedgerNetworkControllerFactory>(cc_trace);
   deps.trials = std::move(trials);
 
   cricket::MediaEngineDependencies media_deps;

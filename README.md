@@ -45,7 +45,7 @@ gnb/  gnb_sched_ul.csv gnb_sched_dl.csv   per-slot grants per UE (PRB, MCS, TBS,
       gnb_mac_ul_pdu.csv gnb_rlc_ul.csv   MAC PDUs, RLC PDU/SDU/reassembly events
       gnb_pdcp_ul.csv gnb_pdcp_dl.csv     IP packets leaving/entering the RAN, RTP header parsed (join key to app ledgers)
       gnb.log gnb_stdout.log gnb_metrics.jsonl   stock srsRAN log, 1 s metrics table, JSON metrics   [+ pcaps with P5G_GNB_PCAP=1]
-app/  <stream>-tx-frames.csv -tx-encoded.csv -tx-rtp.csv -tx-rtcp.csv -tx-events.csv -tx-stats.jsonl   sender
+app/  <stream>-tx-frames.csv -tx-encoded.csv -tx-encoder-rates.csv -tx-cc.csv -tx-rtp.csv -tx-rtcp.csv -tx-events.csv -tx-stats.jsonl   sender
       <stream>-rx-frames.csv -rx-decoded.csv -rx-rtp.csv -rx-rtcp.csv -rx-events.csv -rx-stats.jsonl       receiver
 core/ open5gs.log
 ```
@@ -60,10 +60,10 @@ apps/common/    app_util.h trace_ring.h webrtc_tracing.h webrtc_session.h video_
 apps/sender/ apps/receiver/ apps/signaling/
 ran/gnb/        gnb_b210_n78_tdd_20mhz.yml (testbed), gnb_zmq_local.yml (code test), metrics_json_client.py
 ran/ue_sim/     srsUE config for the code test
-ran/core/       docker-compose.yml, open5gs.env, subscriber_db.csv   (ran/P-Sim.csv, ran/oai_db.sql: reference SIM/DB data)
+ran/core/       docker-compose.yml, open5gs.env, subscriber_db.csv (git-ignored; keys) / subscriber_db.example.csv
 patches/        srsran_gnb/ (tracer header + 6 patches), libwebrtc/ (README: no patches needed)
 scripts/build/  build_srsran_gnb.sh build_libwebrtc.sh build_apps.sh
-scripts/run/    start_core.sh run_gnb.sh run_ue_sim.sh run_local_e2e.sh (last two: code test)
+scripts/run/    start_core.sh core_add_dnn.sh run_gnb.sh run_ue_sim.sh run_local_e2e.sh (last two: code test)
 analysis/       verify_run.py trace_io.py
 docker/         libwebrtc build toolchain image
 video/          test-sequence download/convert

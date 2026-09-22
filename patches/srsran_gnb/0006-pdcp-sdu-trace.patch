@@ -8,7 +8,7 @@
  #include "fmt/format.h"
  
  namespace srsran {
-@@ -174,6 +175,26 @@
+@@ -174,6 +175,31 @@
    bool          is_reordering_timer_running() const { return reordering_timer.is_running(); }
  
  private:
@@ -23,8 +23,13 @@
 +    row.sdu_bytes = static_cast<uint32_t>(sdu.length());
 +    uint8_t head[64];
 +    size_t  n = 0;
-+    for (auto it = sdu.begin(); it != sdu.end() && n < sizeof(head); ++it) {
-+      head[n++] = *it;
++    for (span<const uint8_t> seg : sdu.segments()) { // segment-wise memcpy, no per-byte iterator
++      const size_t k = std::min(seg.size(), sizeof(head) - n);
++      std::memcpy(head + n, seg.data(), k);
++      n += k;
++      if (n == sizeof(head)) {
++        break;
++      }
 +    }
 +    p5g::parse_ip_udp_rtp(head, n, row);
 +  }
@@ -98,7 +103,7 @@
  
  namespace srsran {
  
-@@ -238,6 +239,26 @@
+@@ -238,6 +239,31 @@
    enum class early_drop_reason { zero_dbs, full_rlc_queue, full_window, no_drop };
  
  private:
@@ -113,8 +118,13 @@
 +    row.sdu_bytes = static_cast<uint32_t>(sdu.length());
 +    uint8_t head[64];
 +    size_t  n = 0;
-+    for (auto it = sdu.begin(); it != sdu.end() && n < sizeof(head); ++it) {
-+      head[n++] = *it;
++    for (span<const uint8_t> seg : sdu.segments()) { // segment-wise memcpy, no per-byte iterator
++      const size_t k = std::min(seg.size(), sizeof(head) - n);
++      std::memcpy(head + n, seg.data(), k);
++      n += k;
++      if (n == sizeof(head)) {
++        break;
++      }
 +    }
 +    p5g::parse_ip_udp_rtp(head, n, row);
 +  }

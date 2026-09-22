@@ -1,8 +1,10 @@
 // libwebrtc tracing hooks — implemented against public extension points only (no libwebrtc patch):
 //   1. RtpPacketLedger / RtpPacketLedgerFactory: RtcEventLog implementation injected through
 //      PeerConnectionFactoryDependencies::event_log_factory -> -rtp.csv, -rtcp.csv, -events.csv
-//   2. LedgerVideoEncoderFactory: VideoEncoderFactory wrapper -> -tx-encoded.csv
+//   2. LedgerVideoEncoderFactory: VideoEncoderFactory wrapper -> -tx-encoded.csv, -tx-encoder-rates.csv
 //   3. LedgerVideoDecoderFactory: VideoDecoderFactory wrapper -> -rx-decoded.csv
+//   4. LedgerNetworkControllerFactory: NetworkControllerFactoryInterface wrapper around the stock
+//      GoogCC factory (PeerConnectionFactoryDependencies::network_controller_factory) -> -tx-cc.csv
 
 #ifndef P5G_APPS_COMMON_WEBRTC_TRACING_H
 #define P5G_APPS_COMMON_WEBRTC_TRACING_H
@@ -18,6 +20,8 @@
 #include "api/rtc_event_log/rtc_event.h"
 #include "api/rtc_event_log/rtc_event_log.h"
 #include "api/rtc_event_log/rtc_event_log_factory_interface.h"
+#include "api/transport/goog_cc_factory.h"
+#include "api/transport/network_control.h"
 #include "api/video/encoded_image.h"
 #include "api/video_codecs/video_encoder.h"
 #include "api/video_codecs/video_decoder.h"
@@ -456,6 +460,185 @@ inline void FormatEncodedFrameRow(std::FILE* f, const EncodedFrameRow& r) {
 // encoders, so allow multiple writers.
 using EncodedFrameTrace = TraceRing<EncodedFrameRow, /*kMultiWriter=*/true>;
 
+// <stream>-tx-encoder-rates.csv: one row per VideoEncoder::SetRates() call, i.e. every time the
+// stock rate controller (GoogCC estimate -> VideoStreamEncoder/BitrateAllocator) hands the encoder a
+// new target. This is the "target bitrate" the encoder is asked to hit, as opposed to the estimate
+// (`-events.csv` bwe_*) and the bytes actually sent (`-rtp.csv`). Official API: api/video_codecs/
+// video_encoder.h RateControlParameters (target_bitrate, bitrate, bandwidth_allocation, framerate_fps).
+struct EncoderRateRow {
+  int64_t set_mono_ns;
+  int64_t set_wall_ns;
+  int64_t target_bps;              // RateControlParameters::target_bitrate.get_sum_bps()
+  int64_t allocated_bps;           // RateControlParameters::bitrate.get_sum_bps() (after headroom/limits)
+  int64_t bandwidth_allocation_bps;// RateControlParameters::bandwidth_allocation (network estimate share)
+  double framerate_fps;
+  int32_t num_active_spatial_layers;
+};
+
+inline constexpr const char* kEncoderRateHeader =
+    "set_mono_ns,set_wall_ns,target_bps,allocated_bps,bandwidth_allocation_bps,framerate_fps,"
+    "num_active_spatial_layers";
+
+inline void FormatEncoderRateRow(std::FILE* f, const EncoderRateRow& r) {
+  std::fprintf(f, "%lld,%lld,%lld,%lld,%lld,%.3f,%d\n", (long long)r.set_mono_ns,
+               (long long)r.set_wall_ns, (long long)r.target_bps, (long long)r.allocated_bps,
+               (long long)r.bandwidth_allocation_bps, r.framerate_fps, r.num_active_spatial_layers);
+}
+
+using EncoderRateTrace = TraceRing<EncoderRateRow, /*kMultiWriter=*/true>;
+
+// ---------------------------------------------------------------------------------------------
+// <stream>-tx-cc.csv: the congestion controller's output, one row per NetworkControlUpdate that
+// carries something (target rate, pacer config, congestion window or probes). This is GoogCC's
+// *final* answer after delay/loss estimation, pushback and constraints — the value that feeds
+// BitrateAllocator and thus the encoder target (`-tx-encoder-rates.csv`). `bwe_delay`/`bwe_loss`
+// in `-events.csv` are the two sub-estimators one step earlier.
+// Official injection point: PeerConnectionFactoryDependencies::network_controller_factory
+// (api/transport/network_control.h). The wrapper forwards every call to the stock
+// GoogCcNetworkControllerFactory (constructed exactly like RtpTransportControllerSend's fallback)
+// and records the returned update; it never modifies it.
+struct CcUpdateRow {
+  int64_t log_mono_ns;
+  int64_t log_wall_ns;
+  int32_t trigger;                 // CcTrigger below: which controller input produced the update
+  int64_t target_bps;              // TargetTransferRate::target_rate            (-1 absent)
+  int64_t stable_target_bps;       // TargetTransferRate::stable_target_rate     (-1 absent)
+  int64_t est_bandwidth_bps;       // NetworkEstimate::bandwidth                 (-1 absent/inf)
+  int64_t rtt_us;                  // NetworkEstimate::round_trip_time           (-1 absent/inf)
+  double loss_rate_ratio;          // NetworkEstimate::loss_rate_ratio 0..1      (-1 absent)
+  int64_t bwe_period_ms;           // NetworkEstimate::bwe_period                (-1 absent/inf)
+  double cwnd_reduce_ratio;        // TargetTransferRate::cwnd_reduce_ratio      (-1 absent)
+  int64_t pacer_rate_bps;          // PacerConfig::data_rate()                   (-1 absent)
+  int64_t pad_rate_bps;            // PacerConfig::pad_rate()                    (-1 absent)
+  int64_t cwnd_bytes;              // congestion_window                          (-1 absent/inf)
+  int32_t num_probe_clusters;      // probe_cluster_configs.size()
+};
+
+enum class CcTrigger : int32_t {
+  process_interval = 0, transport_feedback, transport_loss, rtt_update, route_change,
+  network_availability, target_rate_constraints, streams_config, remote_bitrate_report,
+  network_state_estimate, sent_packet, received_packet
+};
+
+inline constexpr const char* kCcUpdateHeader =
+    "log_mono_ns,log_wall_ns,trigger,target_bps,stable_target_bps,est_bandwidth_bps,rtt_us,"
+    "loss_rate_ratio,bwe_period_ms,cwnd_reduce_ratio,pacer_rate_bps,pad_rate_bps,cwnd_bytes,"
+    "num_probe_clusters";
+
+inline void FormatCcUpdateRow(std::FILE* f, const CcUpdateRow& r) {
+  std::fprintf(f, "%lld,%lld,%d,%lld,%lld,%lld,%lld,%.4f,%lld,%.3f,%lld,%lld,%lld,%d\n",
+               (long long)r.log_mono_ns, (long long)r.log_wall_ns, r.trigger,
+               (long long)r.target_bps, (long long)r.stable_target_bps,
+               (long long)r.est_bandwidth_bps, (long long)r.rtt_us, r.loss_rate_ratio,
+               (long long)r.bwe_period_ms, r.cwnd_reduce_ratio, (long long)r.pacer_rate_bps,
+               (long long)r.pad_rate_bps, (long long)r.cwnd_bytes, r.num_probe_clusters);
+}
+
+using CcUpdateTrace = TraceRing<CcUpdateRow, /*kMultiWriter=*/true>;
+
+class LedgerNetworkController : public webrtc::NetworkControllerInterface {
+ public:
+  LedgerNetworkController(std::unique_ptr<webrtc::NetworkControllerInterface> inner,
+                          CcUpdateTrace* trace)
+      : inner_(std::move(inner)), trace_(trace) {}
+
+  webrtc::NetworkControlUpdate OnNetworkAvailability(webrtc::NetworkAvailability m) override {
+    return Observe(CcTrigger::network_availability, [&] { return inner_->OnNetworkAvailability(m); });
+  }
+  webrtc::NetworkControlUpdate OnNetworkRouteChange(webrtc::NetworkRouteChange m) override {
+    return Observe(CcTrigger::route_change, [&] { return inner_->OnNetworkRouteChange(m); });
+  }
+  webrtc::NetworkControlUpdate OnProcessInterval(webrtc::ProcessInterval m) override {
+    return Observe(CcTrigger::process_interval, [&] { return inner_->OnProcessInterval(m); });
+  }
+  webrtc::NetworkControlUpdate OnRemoteBitrateReport(webrtc::RemoteBitrateReport m) override {
+    return Observe(CcTrigger::remote_bitrate_report, [&] { return inner_->OnRemoteBitrateReport(m); });
+  }
+  webrtc::NetworkControlUpdate OnRoundTripTimeUpdate(webrtc::RoundTripTimeUpdate m) override {
+    return Observe(CcTrigger::rtt_update, [&] { return inner_->OnRoundTripTimeUpdate(m); });
+  }
+  webrtc::NetworkControlUpdate OnSentPacket(webrtc::SentPacket m) override {
+    return Observe(CcTrigger::sent_packet, [&] { return inner_->OnSentPacket(m); });
+  }
+  webrtc::NetworkControlUpdate OnReceivedPacket(webrtc::ReceivedPacket m) override {
+    return Observe(CcTrigger::received_packet, [&] { return inner_->OnReceivedPacket(m); });
+  }
+  webrtc::NetworkControlUpdate OnStreamsConfig(webrtc::StreamsConfig m) override {
+    return Observe(CcTrigger::streams_config, [&] { return inner_->OnStreamsConfig(m); });
+  }
+  webrtc::NetworkControlUpdate OnTargetRateConstraints(webrtc::TargetRateConstraints m) override {
+    return Observe(CcTrigger::target_rate_constraints, [&] { return inner_->OnTargetRateConstraints(m); });
+  }
+  webrtc::NetworkControlUpdate OnTransportLossReport(webrtc::TransportLossReport m) override {
+    return Observe(CcTrigger::transport_loss, [&] { return inner_->OnTransportLossReport(m); });
+  }
+  webrtc::NetworkControlUpdate OnTransportPacketsFeedback(
+      webrtc::TransportPacketsFeedback m) override {
+    return Observe(CcTrigger::transport_feedback, [&] { return inner_->OnTransportPacketsFeedback(m); });
+  }
+  webrtc::NetworkControlUpdate OnNetworkStateEstimate(webrtc::NetworkStateEstimate m) override {
+    return Observe(CcTrigger::network_state_estimate, [&] { return inner_->OnNetworkStateEstimate(m); });
+  }
+
+ private:
+  // Pure observation: the update is returned unchanged; rows only for updates that carry data.
+  // NetworkControlUpdate has no move constructor (user-declared copy ctor), so it is constructed
+  // in place from the stock call and returned as a named local (elided) — no extra copies.
+  template <class F>
+  webrtc::NetworkControlUpdate Observe(CcTrigger trigger, F&& call) {
+    webrtc::NetworkControlUpdate u = call();
+    Record(u, trigger);
+    return u;
+  }
+  void Record(const webrtc::NetworkControlUpdate& u, CcTrigger trigger) {
+    if (!trace_ || !u.has_updates()) return;
+    CcUpdateRow r{};
+    r.log_mono_ns = NowMonoNs();
+    r.log_wall_ns = NowWallNs();
+    r.trigger = static_cast<int32_t>(trigger);
+    r.target_bps = r.stable_target_bps = r.est_bandwidth_bps = r.rtt_us = r.bwe_period_ms = -1;
+    r.loss_rate_ratio = r.cwnd_reduce_ratio = -1.0;
+    r.pacer_rate_bps = r.pad_rate_bps = r.cwnd_bytes = -1;
+    if (u.target_rate) {
+      const auto& tr = *u.target_rate;
+      r.target_bps = tr.target_rate.bps();
+      r.stable_target_bps = tr.stable_target_rate.bps();
+      if (tr.network_estimate.bandwidth.IsFinite()) r.est_bandwidth_bps = tr.network_estimate.bandwidth.bps();
+      if (tr.network_estimate.round_trip_time.IsFinite()) r.rtt_us = tr.network_estimate.round_trip_time.us();
+      if (tr.network_estimate.bwe_period.IsFinite()) r.bwe_period_ms = tr.network_estimate.bwe_period.ms();
+      r.loss_rate_ratio = tr.network_estimate.loss_rate_ratio;
+      r.cwnd_reduce_ratio = tr.cwnd_reduce_ratio;
+    }
+    if (u.pacer_config) {
+      r.pacer_rate_bps = u.pacer_config->data_rate().bps();
+      r.pad_rate_bps = u.pacer_config->pad_rate().bps();
+    }
+    if (u.congestion_window && u.congestion_window->IsFinite()) r.cwnd_bytes = u.congestion_window->bytes();
+    r.num_probe_clusters = static_cast<int32_t>(u.probe_cluster_configs.size());
+    trace_->Write(r);
+  }
+
+  const std::unique_ptr<webrtc::NetworkControllerInterface> inner_;
+  CcUpdateTrace* const trace_;
+};
+
+class LedgerNetworkControllerFactory : public webrtc::NetworkControllerFactoryInterface {
+ public:
+  explicit LedgerNetworkControllerFactory(CcUpdateTrace* trace) : trace_(trace) {}
+  std::unique_ptr<webrtc::NetworkControllerInterface> Create(
+      webrtc::NetworkControllerConfig config) override {
+    return std::make_unique<LedgerNetworkController>(inner_.Create(config), trace_);
+  }
+  webrtc::TimeDelta GetProcessInterval() const override { return inner_.GetProcessInterval(); }
+
+ private:
+  // Same construction as call/rtp_transport_controller_send.cc's fallback with the default
+  // (null) network_state_predictor_factory, so the controller behaves exactly like stock.
+  webrtc::GoogCcNetworkControllerFactory inner_{
+      static_cast<webrtc::NetworkStatePredictorFactoryInterface*>(nullptr)};
+  CcUpdateTrace* const trace_;
+};
+
 class LedgerEncodedImageCallback : public webrtc::EncodedImageCallback {
  public:
   LedgerEncodedImageCallback(webrtc::EncodedImageCallback* inner, EncodedFrameTrace* trace)
@@ -498,8 +681,9 @@ class LedgerEncodedImageCallback : public webrtc::EncodedImageCallback {
 
 class LedgerVideoEncoder : public webrtc::VideoEncoder {
  public:
-  LedgerVideoEncoder(std::unique_ptr<webrtc::VideoEncoder> inner, EncodedFrameTrace* trace)
-      : inner_(std::move(inner)), trace_(trace) {}
+  LedgerVideoEncoder(std::unique_ptr<webrtc::VideoEncoder> inner, EncodedFrameTrace* trace,
+                     EncoderRateTrace* rates)
+      : inner_(std::move(inner)), trace_(trace), rates_(rates) {}
 
   void SetFecControllerOverride(webrtc::FecControllerOverride* o) override {
     inner_->SetFecControllerOverride(o);
@@ -524,7 +708,22 @@ class LedgerVideoEncoder : public webrtc::VideoEncoder {
                  const std::vector<webrtc::VideoFrameType>* types) override {
     return inner_->Encode(frame, types);
   }
-  void SetRates(const RateControlParameters& p) override { inner_->SetRates(p); }
+  void SetRates(const RateControlParameters& p) override {
+    inner_->SetRates(p);  // forward first; the record is pure observation
+    if (!rates_) return;
+    EncoderRateRow row{};
+    row.set_mono_ns = NowMonoNs();
+    row.set_wall_ns = NowWallNs();
+    row.target_bps = p.target_bitrate.get_sum_bps();
+    row.allocated_bps = p.bitrate.get_sum_bps();
+    row.bandwidth_allocation_bps = p.bandwidth_allocation.bps();
+    row.framerate_fps = p.framerate_fps;
+    int32_t active = 0;
+    for (size_t si = 0; si < webrtc::kMaxSpatialLayers; ++si)
+      if (p.bitrate.IsSpatialLayerUsed(si)) ++active;
+    row.num_active_spatial_layers = active;
+    rates_->Write(row);
+  }
   void OnPacketLossRateUpdate(float r) override { inner_->OnPacketLossRateUpdate(r); }
   void OnRttUpdate(int64_t rtt_ms) override { inner_->OnRttUpdate(rtt_ms); }
   void OnLossNotification(const LossNotification& n) override { inner_->OnLossNotification(n); }
@@ -533,6 +732,7 @@ class LedgerVideoEncoder : public webrtc::VideoEncoder {
  private:
   const std::unique_ptr<webrtc::VideoEncoder> inner_;
   EncodedFrameTrace* const trace_;
+  EncoderRateTrace* const rates_;
   std::unique_ptr<LedgerEncodedImageCallback> cb_;
 };
 
@@ -540,8 +740,8 @@ class LedgerVideoEncoder : public webrtc::VideoEncoder {
 class LedgerVideoEncoderFactory : public webrtc::VideoEncoderFactory {
  public:
   LedgerVideoEncoderFactory(std::unique_ptr<webrtc::VideoEncoderFactory> inner,
-                            EncodedFrameTrace* trace)
-      : inner_(std::move(inner)), trace_(trace) {}
+                            EncodedFrameTrace* trace, EncoderRateTrace* rates)
+      : inner_(std::move(inner)), trace_(trace), rates_(rates) {}
 
   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
     return inner_->GetSupportedFormats();
@@ -557,7 +757,7 @@ class LedgerVideoEncoderFactory : public webrtc::VideoEncoderFactory {
       const webrtc::SdpVideoFormat& format) override {
     auto enc = inner_->CreateVideoEncoder(format);
     if (!enc) return nullptr;
-    return std::make_unique<LedgerVideoEncoder>(std::move(enc), trace_);
+    return std::make_unique<LedgerVideoEncoder>(std::move(enc), trace_, rates_);
   }
   std::unique_ptr<webrtc::VideoEncoderFactory::EncoderSelectorInterface> GetEncoderSelector()
       const override {
@@ -567,6 +767,7 @@ class LedgerVideoEncoderFactory : public webrtc::VideoEncoderFactory {
  private:
   const std::unique_ptr<webrtc::VideoEncoderFactory> inner_;
   EncodedFrameTrace* const trace_;
+  EncoderRateTrace* const rates_;
 };
 
 }  // namespace p5g
