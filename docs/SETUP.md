@@ -13,7 +13,7 @@ against one server (cross-host latencies use `*_wall_ns`; record `chronyc tracki
 
 ```bash
 ./run_gnb_core.sh [label]       # gNB PC, terminal 1: core + gNB (foreground) + JSON metrics -> results/<ts>-<label>/{gnb,core}
-./run_receiver.sh               # gNB PC (or internet host), terminal 2: relay :8765 + video_receiver -> same run's app/ (via results/CURRENT)
+./run_receiver.sh [-n N]        # gNB PC (or internet host), terminal 2: relay :8765 + N video_receivers (recv0..) -> same run's app/ (via results/CURRENT)
 ./run_sender.sh 10.53.1.1       # UE laptop, after the phone attached: video_sender -> results/<ts>-sender-<stream>/app
 ```
 
@@ -25,14 +25,14 @@ the core down. `make ota` / `make ota-stop` remain as the all-in-one background 
 
 ## Several UEs at once
 
-One relay, one `video_receiver` **per UE**, one stream id per UE. On the gNB PC (or receiver host), one
-terminal per UE; the first one also starts the relay, the others reuse it:
+One relay, one `video_receiver` **per UE**, one stream id per UE. One script starts all of them:
 
 ```bash
-./run_receiver.sh --receiver-id recv0        # UE 1 (defaults)
-./run_receiver.sh --receiver-id recv1        # UE 2
-./run_receiver.sh --receiver-id recv2        # UE 3 ...
+./run_receiver.sh -n 3          # relay + recv0, recv1, recv2 in one terminal; Ctrl-C stops all (traces flush first)
 ```
+
+Their output is shown live (tail of `app/receiver-recvK.log`). Extra flags after `-n N` go to every
+receiver. (Separate terminals with `--receiver-id recvK` still work; the relay is reused.)
 
 On each UE laptop, point the sender at its own receiver and give the stream a distinct name:
 

@@ -28,7 +28,7 @@ Docs: [docs/SETUP.md](docs/SETUP.md) (per-machine commands), [docs/TRACE_SCHEMA.
 
 ```bash
 ./run_gnb_core.sh            # gNB PC: Open5GS + srsRAN gNB (tracer) + JSON metrics   -> results/<ts>-ota/{gnb,core}
-./run_receiver.sh            # receiver host: signaling relay + video_receiver          -> results/<run>/app (rx-*)
+./run_receiver.sh [-n N]     # receiver host: signaling relay + N video_receivers (one per UE) -> results/<run>/app (rx-*)
 ./run_sender.sh 10.53.1.1    # UE laptop: video_sender (720p30 H264, fixed resolution)  -> results/<ts>-sender/app (tx-*)
 ```
 

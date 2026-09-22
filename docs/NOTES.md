@@ -181,3 +181,6 @@ against the relay address 10.53.1.1; the radio hop needs the UE laptop) twice, s
 * max bitrate: the apps set none unless --max-bitrate-kbps is given; the 2.5 Mbps ceiling seen on a
   fixed 720p stream (outbound-rtp.targetBitrate = 2500000 while bandwidth_allocation was 4.8 Mbps) is
   libwebrtc's own GetMaxDefaultVideoBitrateKbps for >960x540 — stock behaviour, left as is.
+* run_receiver.sh -n N starts the relay and N receivers (recv0..recvN-1) from one terminal, output
+  tailed live, Ctrl-C stops receivers first (footers written) then the relay. Verified with -n 3 and three
+  senders: 3 x 14 trace files, all footers, verify PASS.
