@@ -15,6 +15,8 @@
 #include <thread>
 #include <unistd.h>
 
+#include "app_util.h"
+
 // Allocation-free, lock-free circular trace ring for the media hot paths.
 //
 // Producers (capture thread, encoder callback, pacer / network threads, decode queue) copy one POD
@@ -43,12 +45,11 @@ class TraceRing {
   TraceRing(std::string path, std::string header, Formatter fmt, size_t capacity)
       : path_(std::move(path)), fmt_(fmt), cap_(RoundUpPow2(capacity)), mask_(cap_ - 1),
         slots_(new Slot[cap_]) {
+    // A trace that cannot be created would silently lose the run (the app itself keeps working), so
+    // this is fatal: the usual cause is a wrong / missing --trace-dir.
     std::FILE* f = std::fopen(path_.c_str(), "w");
-    if (!f || std::fprintf(f, "%s\n", header.c_str()) < 0 || std::fclose(f) != 0) {
-      std::fprintf(stderr, "[p5g][trace] cannot create %s\n", path_.c_str());
-      std::ofstream(path_ + ".ERROR") << "open-failed\n";
-      return;
-    }
+    if (!f || std::fprintf(f, "%s\n", header.c_str()) < 0 || std::fclose(f) != 0)
+      P5G_FATAL("cannot create trace file " << path_ << " (check --trace-dir exists and is writable)");
     enabled_ = true;
     running_ = true;
     flusher_ = std::thread([this] { FlushLoop(); });

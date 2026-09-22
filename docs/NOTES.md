@@ -133,3 +133,34 @@ with default flags, (b) the base code stays as close to the framework examples a
   stale comments fixed; both apps now log one "config:" provenance line (the run's flags were not
   recorded anywhere since tx-source.txt was dropped); explicit Close() of all sender traces;
   `make ota` / `make ota-stop` wrap ota_restart.sh; README/SETUP list it.
+
+## 2026-09-22 — first OTA video session, and why app/ was empty
+* First over-the-air WebRTC session with a Pixel: gNB PDCP UL shows 7311 RTP packets 10.45.1.12 ->
+  10.53.1.1 and 936 RTCP packets back; the core log shows `DNN[oai] IPv4[10.45.1.12]`. The phone's own
+  background traffic (DNS/QUIC to Google, TCP) shares the bearer and is visible in gnb_pdcp_*.csv.
+* The receiver had been started with `--trace-dir $RD/app` in a terminal where RD was unset -> `/app`;
+  the trace rings logged "cannot create" and the app kept running with tracing disabled, so rx-* was
+  lost. Two fixes: a trace file that cannot be created is now fatal (trace_ring.h), and three root
+  scripts (run_gnb_core.sh / run_receiver.sh / run_sender.sh) own their run directories and share
+  them through results/CURRENT instead of shell variables.
+* At session end the metrics table showed PUSCH 100 % NOK with SINR -25 dB for a few seconds before
+  UEContextReleaseRequest: the UE had already left (DTX), not a link problem during the session.
+
+## 2026-09-22 — end-to-end exercise of the three run scripts on the real gNB, and measured overhead
+Ran ./run_gnb_core.sh (B210 gNB + Open5GS), ./run_receiver.sh and ./run_sender.sh (sender on the gNB PC
+against the relay address 10.53.1.1; the radio hop needs the UE laptop) twice, stopping with Ctrl-C.
+* Bug found and fixed: `app 2>&1 | tee log` + Ctrl-C kills tee first, the app's next stderr write hits
+  the closed pipe (SIGPIPE) and the app dies mid-shutdown -> rx-* and gnb_* traces ended without their
+  `# rows=` footer (tail of the last flush period lost). Fix: `| (trap '' INT; exec tee ...)` in all
+  three scripts. verify_run.py now FAILs on a trace without footer. Second run: every footer present,
+  verify PASS (RTP 5342/5342 lost 0), core log saved, core/route/NAT removed, files chowned.
+* A Pixel was attached during the runs (its own traffic): run test2 shows rnti 0x4602 with DL 47 MB /
+  UL 6 MB, UL BLER 63 % (2116 retx of 3901 grants) — the phone at that spot had a poor uplink; the
+  trace set captures exactly this kind of event per grant (gnb_sched_ul new_data=0, gnb_ul_crc).
+* Measured hook overhead (this PC, Release build):
+  - two clock reads (mono+wall) 27 ns; TraceRing::Write into a fresh (cold) slot 11 ns; two writers
+    contending 58 ns/write; realistic 3 kHz writes with the flusher draining: mean 29 ns, worst 254 ns
+    (microbenchmark against apps/common/trace_ring.h).
+  - per-thread CPU of the running apps over 25 s (720p30 H264 loopback): sender total 4.44 s CPU
+    (encoder thread 4.13 s), its 7 flusher threads (nice 19) 0.00 s; receiver total 0.94 s, 3 flusher
+    threads 0.00 s (tick resolution 10 ms). Tracing cost is below the accounting resolution.

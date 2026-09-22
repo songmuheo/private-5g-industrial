@@ -2,8 +2,8 @@
 
   .venv/bin/python analysis/verify_run.py results/<run>
 
-FAIL (exit 1) when an existing trace is empty or a `.ERROR` sidecar exists (ring overflow / write
-failure). Prints row counts, event-type counts, RTP sent/received/lost per SSRC (sequence-number set
+FAIL (exit 1) when an existing trace is empty, lacks its `# rows=` footer (process killed before its
+traces were flushed) or a `.ERROR` sidecar exists (ring overflow / write failure). Prints row counts, event-type counts, RTP sent/received/lost per SSRC (sequence-number set
 difference of the two ledgers when both sides are present) and per-RNTI grant counts, so a run can be
 sanity-checked at a glance. Writes <run>/summary.json with the same numbers.
 """
@@ -53,6 +53,8 @@ def main(run_dir: str) -> int:
             st[name] = {"rows": len(rows), "footer": footer}
             if f.exists() and not rows:
                 fail(f"{f.name} is empty")
+            if f.exists() and rows and "rows" not in footer:
+                fail(f"{f.name} has no '# rows=' footer: the process did not shut down cleanly (killed / SIGPIPE), tail lost")
             if name.endswith("events") and rows:
                 kinds = collections.Counter(r["event"] for r in rows)
                 st[name]["kinds"] = dict(kinds)
@@ -88,6 +90,8 @@ def main(run_dir: str) -> int:
             g[name] = {"rows": len(rows), "footer": footer}
             if (gnb / f"{name}.csv").exists() and not rows:
                 print(f"[WARN] {name}.csv has no rows")
+            if rows and "rows" not in footer:
+                fail(f"{name}.csv has no '# rows=' footer: the gNB did not shut down cleanly, tail lost")
         for name in GNB_FILES:
             f = gnb / name
             g[name] = {"bytes": f.stat().st_size if f.exists() else 0}

@@ -24,6 +24,14 @@ Docs: [docs/SETUP.md](docs/SETUP.md) (per-machine commands), [docs/TRACE_SCHEMA.
 (every output file and column), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (design and decisions),
 [docs/NOTES.md](docs/NOTES.md) (log).
 
+## Run (one script per terminal / machine)
+
+```bash
+./run_gnb_core.sh            # gNB PC: Open5GS + srsRAN gNB (tracer) + JSON metrics   -> results/<ts>-ota/{gnb,core}
+./run_receiver.sh            # receiver host: signaling relay + video_receiver          -> results/<run>/app (rx-*)
+./run_sender.sh 10.53.1.1    # UE laptop: video_sender (720p30 H264, fixed resolution)  -> results/<ts>-sender/app (tx-*)
+```
+
 ## Build
 
 ```bash
@@ -63,7 +71,8 @@ ran/ue_sim/     srsUE config for the code test
 ran/core/       docker-compose.yml, open5gs.env, subscriber_db.csv (git-ignored; keys) / subscriber_db.example.csv
 patches/        srsran_gnb/ (tracer header + 6 patches), libwebrtc/ (README: no patches needed)
 scripts/build/  build_srsran_gnb.sh build_libwebrtc.sh build_apps.sh
-scripts/run/    ota_restart.sh (gNB PC one-shot) start_core.sh core_add_dnn.sh run_gnb.sh run_ue_sim.sh run_local_e2e.sh (last two: code test)
+run_gnb_core.sh run_receiver.sh run_sender.sh   (repo root: one per terminal / machine)
+scripts/run/    ota_restart.sh (gNB PC one-shot, background) start_core.sh core_add_dnn.sh run_gnb.sh run_ue_sim.sh run_local_e2e.sh (last two: code test)
 analysis/       verify_run.py trace_io.py
 docker/         libwebrtc build toolchain image
 video/          test-sequence download/convert

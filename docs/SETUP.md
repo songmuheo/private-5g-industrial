@@ -9,17 +9,22 @@ results/<run>/app/ (tx-*)                                                       
 All hosts: `git clone --recurse-submodules --shallow-submodules <repo>`; sync wall clocks with chrony
 against one server (cross-host latencies use `*_wall_ns`; record `chronyc tracking` with each run).
 
-## gNB PC (Ubuntu 22.04, UHD installed, docker)
-
-One-shot (what the steps below do by hand, plus the JSON metrics client, the signaling relay and a
-local `video_receiver` for the case where this PC is also the receiver):
+## Quick path: three scripts, one per terminal / machine
 
 ```bash
-make ota            # = scripts/run/ota_restart.sh ota (OTA_LABEL=<name> to label the run dir)  -> results/<timestamp>-ota/{gnb,app,core}; sender: --signaling-host 10.53.1.1 --to recv0
-make ota-stop       # stops gNB, receiver, relay, metrics client and the core (route + NAT removed)
+./run_gnb_core.sh [label]       # gNB PC, terminal 1: core + gNB (foreground) + JSON metrics -> results/<ts>-<label>/{gnb,core}
+./run_receiver.sh               # gNB PC (or internet host), terminal 2: relay :8765 + video_receiver -> same run's app/ (via results/CURRENT)
+./run_sender.sh 10.53.1.1       # UE laptop, after the phone attached: video_sender -> results/<ts>-sender/app
 ```
 
-Step by step:
+Each script owns its run directory, so nothing depends on shell variables shared between terminals
+(a `--trace-dir $RD/app` typed where `RD` is unset becomes `/app`; the apps now abort instead of
+running without traces). Ctrl-C in terminal 1 flushes the gNB traces, saves the core log and takes
+the core down. `make ota` / `make ota-stop` remain as the all-in-one background variant
+(`scripts/run/ota_restart.sh`).
+
+## gNB PC (Ubuntu 22.04, UHD installed, docker) — step by step
+
 
 ```bash
 make deps && make build-gnb                 # ~15 min; needs third_party/srsRAN_Project (make submodules)
