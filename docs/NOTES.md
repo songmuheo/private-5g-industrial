@@ -184,3 +184,19 @@ against the relay address 10.53.1.1; the radio hop needs the UE laptop) twice, s
 * run_receiver.sh -n N starts the relay and N receivers (recv0..recvN-1) from one terminal, output
   tailed live, Ctrl-C stops receivers first (footers written) then the relay. Verified with -n 3 and three
   senders: 3 x 14 trace files, all footers, verify PASS.
+
+## 2026-09-22 — first valid 2-UE OTA run (results/2-ue-60s, copy of results/20260922-203019-2-UE)
+Two Pixels, 60 s each, 720p30 H264 fixed resolution, start 900 kbps, one receiver per stream.
+* Both streams complete: cam0 15113/15113 RTP, cam1 7750/7750 RTP, 0 lost; 30.0 fps delivered on both;
+  every RTP packet also present in gnb_pdcp_ul (UE 10.45.1.12 -> cam0 ssrc, 10.45.1.11 -> cam1 ssrc).
+* Asymmetric outcome under identical settings: cam0 reached the 2.5 Mbps encoder cap (QP 13.6, 2.29 Mbps
+  average) while cam1 stayed at ~0.9 Mbps (QP 23.8, 1.11 Mbps average): GoogCC for cam1 fell to 764 kbps
+  after 10 s. RAN side: UE1 (cam1) got 6391 UL grants vs 8423, mean 14.9 vs 24.3 PRBs, both ~13-14 %
+  UL BLER with ~1200/800 retransmissions, PUSCH SINR ~31 dB, MCS 27 on both. The link had headroom
+  (PRBs far below 51), so the cam1 limitation is GoogCC reacting to HARQ-induced delay variation, not a
+  capacity shortage — a first concrete case for the cross-layer analysis.
+* Cross-host timing (wall clocks, laptops not NTP-synced against the gNB PC): median one-way packet
+  delay 62 ms (cam0) vs 23 ms (cam1), frame capture->app ~120 ms both; treat as offset-contaminated
+  until chrony is set up. Same-host receiver internal (last packet -> app): 28 ms / 54 ms median.
+* Copy was taken while receivers and gNB were still running, so no file has its footer yet
+  (verify_run flags this; the live run directory gets footers at Ctrl-C).

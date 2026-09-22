@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <sstream>
 #include <string>
@@ -89,22 +90,35 @@ class LogLine {
     std::_Exit(1);                                         \
   } while (0)
 
-// Tiny "--key value" command line parser (avoids linking absl::flags).
+// Tiny command line parser (avoids linking absl::flags): "--key value", "--key=value" or a bare
+// "--flag" (= "1"). Anything else is an error: a misspelled or malformed flag must never fall back to
+// a default silently (a 2-UE run was lost to exactly that).
 
 namespace p5g {
 
 class CliArgs {
  public:
-  CliArgs(int argc, char** argv) {
+  // `known`: every flag the program accepts (without the leading "--"). Unknown flags and stray
+  // positional words terminate the program with a message naming the offending token.
+  CliArgs(int argc, char** argv, std::initializer_list<const char*> known) {
     for (int i = 1; i < argc; ++i) {
       std::string k = argv[i];
-      if (k.rfind("--", 0) != 0) continue;
+      if (k.rfind("--", 0) != 0) P5G_FATAL("unexpected argument '" << k << "' (flags are --key value); see --help");
       k = k.substr(2);
-      if (i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0) {
-        kv_[k] = argv[++i];
+      std::string v;
+      const size_t eq = k.find('=');
+      if (eq != std::string::npos) {           // --key=value
+        v = k.substr(eq + 1);
+        k = k.substr(0, eq);
+      } else if (i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0) {
+        v = argv[++i];                          // --key value
       } else {
-        kv_[k] = "1";  // bare flag
+        v = "1";                                // bare flag
       }
+      bool ok = false;
+      for (const char* kn : known) ok = ok || (k == kn);
+      if (!ok) P5G_FATAL("unknown flag --" << k << "; see --help");
+      kv_[k] = v;
     }
   }
   bool Has(const std::string& k) const { return kv_.count(k) != 0; }

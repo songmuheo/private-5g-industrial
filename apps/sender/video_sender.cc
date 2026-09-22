@@ -371,7 +371,10 @@ static void Usage() {
 }
 
 int main(int argc, char** argv) {
-  p5g::CliArgs a(argc, argv);
+  p5g::CliArgs a(argc, argv, {"help", "signaling-host", "signaling-port", "session", "stream-id", "to",
+                              "trace-dir", "codec", "degradation", "max-bitrate-kbps", "start-bitrate-kbps",
+                              "duration", "ice-servers", "stats-period-ms", "abs-capture-time", "yuv",
+                              "width", "height", "fps"});
   if (a.Has("help")) {
     Usage();
     return 0;
@@ -406,7 +409,9 @@ int main(int argc, char** argv) {
   }
 
   // One provenance line per run: the flags that shape the stream (nothing else records them).
-  P5G_LOG_INFO << "config: codec=" << c.codec << " " << c.video.width << "x" << c.video.height << "@" << c.video.fps
+  P5G_LOG_INFO << "config: stream_id=" << c.stream_id << " to=" << c.receiver_id << " session=" << c.session
+               << " signaling=" << c.signaling_host << ":" << c.signaling_port
+               << " codec=" << c.codec << " " << c.video.width << "x" << c.video.height << "@" << c.video.fps
                << " source=" << (c.video.yuv_path.empty() ? "pattern" : c.video.yuv_path)
                << " degradation=" << c.degradation << " start_bitrate_kbps=" << c.start_bitrate_kbps
                << " (" << c.start_bitrate << ") max_bitrate_kbps=" << c.max_bitrate_kbps

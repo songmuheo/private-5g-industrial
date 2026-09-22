@@ -257,7 +257,8 @@ static void Usage() {
 }
 
 int main(int argc, char** argv) {
-  p5g::CliArgs a(argc, argv);
+  p5g::CliArgs a(argc, argv, {"help", "signaling-host", "signaling-port", "session", "receiver-id", "trace-dir",
+                              "duration", "ice-servers", "stats-period-ms", "low-latency-playout"});
   if (a.Has("help")) {
     Usage();
     return 0;
