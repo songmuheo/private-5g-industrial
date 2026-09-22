@@ -14,7 +14,6 @@
 #include <sys/syscall.h>
 #include <thread>
 #include <unistd.h>
-#include <vector>
 
 // Allocation-free, lock-free circular trace ring for the media hot paths.
 //

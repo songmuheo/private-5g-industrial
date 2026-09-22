@@ -49,7 +49,7 @@
 // PeerConnectionFactory assembly and small libwebrtc helpers shared by sender and receiver.
 //
 // The factory is built with CreateModularPeerConnectionFactory, replicating the assembly of
-// api/create_peerconnection_factory.cc line by line, with exactly two differences:
+// api/create_peerconnection_factory.cc line by line, with exactly three differences (all observers):
 //   * event_log_factory  = RtpPacketLedgerFactory (per-packet RTP/RTCP/event ledger, webrtc_tracing.h)
 //   * video_encoder_factory is wrapped by LedgerVideoEncoderFactory when an encoded-frame trace is
 //     given (sender); video_decoder_factory by LedgerVideoDecoderFactory when requested (receiver).

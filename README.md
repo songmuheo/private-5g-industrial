@@ -63,7 +63,7 @@ ran/ue_sim/     srsUE config for the code test
 ran/core/       docker-compose.yml, open5gs.env, subscriber_db.csv (git-ignored; keys) / subscriber_db.example.csv
 patches/        srsran_gnb/ (tracer header + 6 patches), libwebrtc/ (README: no patches needed)
 scripts/build/  build_srsran_gnb.sh build_libwebrtc.sh build_apps.sh
-scripts/run/    start_core.sh core_add_dnn.sh run_gnb.sh run_ue_sim.sh run_local_e2e.sh (last two: code test)
+scripts/run/    ota_restart.sh (gNB PC one-shot) start_core.sh core_add_dnn.sh run_gnb.sh run_ue_sim.sh run_local_e2e.sh (last two: code test)
 analysis/       verify_run.py trace_io.py
 docker/         libwebrtc build toolchain image
 video/          test-sequence download/convert

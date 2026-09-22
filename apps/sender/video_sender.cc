@@ -16,8 +16,11 @@
 //   <stream>-tx-cc.csv       every GoogCC output update (target/stable rate, estimate, RTT, loss, pacer)
 //   <stream>-tx-rtp.csv      every sent RTP packet;  <stream>-tx-rtcp.csv every RTCP packet (both dirs)
 //   <stream>-tx-stats.jsonl  W3C getStats() every --stats-period-ms (0 = off)
+#include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -44,9 +47,16 @@ struct SenderConfig {
   std::string receiver_id = "recv0";
   std::string trace_dir = ".";
   std::string codec = "H264";         // VP8 | VP9 | H264 | AV1
-  std::string degradation = "stock";  // stock | maintain_resolution | maintain_framerate
+  // W3C RTCDegradationPreference (RtpParameters.degradation_preference). stock = libwebrtc default
+  // (BALANCED for video: resolution and frame rate both adapt); maintain_resolution = resolution
+  // fixed, frame rate adapts; maintain_framerate = the opposite; disabled = neither adapts (libwebrtc
+  // internal value, not in the web API): the encoder only varies QP / drops frames when starved.
+  std::string degradation = "stock";  // stock | maintain_resolution | maintain_framerate | disabled
   int max_bitrate_kbps = 0;           // 0 = libwebrtc default (derived from resolution)
-  int start_bitrate_kbps = 0;         // 0 = libwebrtc default
+  // "stock" = libwebrtc default 300 kbps (BitrateConstraints::kDefaultStartBitrateBps), a number in
+  // kbps, or "auto" = derived from the fixed resolution / fps / codec (see ResolveStartBitrateKbps).
+  std::string start_bitrate = "stock";
+  int start_bitrate_kbps = 0;         // resolved value; 0 = leave libwebrtc default
   int duration_s = 0;
   // ICE servers (comma-separated URLs, e.g. stun:stun.l.google.com:19302). Empty = host candidates only
   // (single-site test). Behind the UPF NAT on the internet topology a STUN server lets the UE side
@@ -62,6 +72,90 @@ struct SenderConfig {
 static SenderConfig g_cfg;
 
 std::string TracePrefix() { return g_cfg.trace_dir + "/" + g_cfg.stream_id + "-tx"; }
+
+// ---- Start bitrate for a fixed resolution ----------------------------------------------------
+// libwebrtc starts every call at 300 kbps (api/transport/bitrate_settings.h kDefaultStartBitrateBps)
+// and, with BALANCED degradation, hides that by encoding the first seconds at a lower resolution.
+// With the resolution pinned (--degradation maintain_resolution|disabled) that escape is gone, so the
+// start bitrate has to be adequate for the pinned resolution. Three libwebrtc rules define "adequate":
+//
+//  1. Recommended minimum start bitrate per resolution — VideoEncoder::ResolutionBitrateLimits::
+//     min_start_bitrate_bps, "Recommended minimum bitrate to start encoding" (api/video_codecs/
+//     video_encoder.h). Default tables per codec family: rtc_base/experiments/encoder_info_settings.cc
+//     GetDefaultSinglecastBitrateLimits(). Lookup rule (api/video_codecs/video_encoder.cc
+//     GetEncoderBitrateLimitsForResolution): the smallest row whose pixel count >= the frame's.
+//     NOTE: for a single H264 stream libwebrtc does not consult this table at run time (OpenH264
+//     reports no limits and default limits apply to simulcast only), which is exactly why the start
+//     value must be supplied from outside. We use the table as the recommendation it is.
+//  2. Initial frame-drop-due-to-size floor — video/video_stream_encoder.cc DropDueToSize(): with no
+//     encoder limits, frames are dropped while target < 300 kbps above 320x240 and < 500 kbps above
+//     640x480. The start bitrate must be at or above this floor or the first frames are discarded.
+//  3. Cap — the stream's max bitrate (--max-bitrate-kbps, else the default for the resolution,
+//     video/config/encoder_stream_factory.cc GetMaxDefaultVideoBitrateKbps: 600/1700/2000/2500 kbps
+//     for <=320x240 / <=640x480 / <=960x540 / larger). Starting above the cap is pointless.
+//
+// The tables assume 30 fps. For other frame rates the value is scaled by fps/30, i.e. constant bits
+// per pixel per frame (HYPOTHESIS: first-order; inter-frame coding gain makes the true relation
+// slightly sublinear in fps). Above 1280x720 the 720p row is extrapolated by pixel ratio (our
+// extension; libwebrtc has no row there).
+struct ResolutionKbps {
+  int width, height;
+  int min_start_kbps;
+  int max_kbps;
+};
+// CITE: encoder_info_settings.cc GetDefaultSinglecastBitrateLimits (M120), kbps, 30 fps.
+constexpr ResolutionKbps kLimitsH264Vp8[] = {
+    {320, 180, 0, 300}, {480, 270, 200, 500}, {640, 360, 300, 800}, {960, 540, 500, 1500}, {1280, 720, 900, 2500}};
+constexpr ResolutionKbps kLimitsVp9[] = {
+    {320, 180, 0, 150}, {480, 270, 120, 300}, {640, 360, 190, 420}, {960, 540, 350, 1000}, {1280, 720, 480, 1500}};
+constexpr ResolutionKbps kLimitsAv1[] = {
+    {320, 180, 0, 256}, {480, 270, 176, 384}, {640, 360, 256, 512}, {960, 540, 384, 1024}, {1280, 720, 576, 1536}};
+constexpr size_t kLimitsRows = sizeof(kLimitsH264Vp8) / sizeof(kLimitsH264Vp8[0]);
+constexpr double kTableFps = 30.0;
+
+// CITE: video/config/encoder_stream_factory.cc GetMaxDefaultVideoBitrateKbps
+int DefaultMaxBitrateKbps(int width, int height) {
+  const int px = width * height;
+  return px <= 320 * 240 ? 600 : px <= 640 * 480 ? 1700 : px <= 960 * 540 ? 2000 : 2500;
+}
+// CITE: video/video_stream_encoder.cc DropDueToSize fallback thresholds
+int SizeDropFloorKbps(int width, int height) {
+  const int px = width * height;
+  return px > 640 * 480 ? 500 : px > 320 * 240 ? 300 : 0;
+}
+
+int ResolveStartBitrateKbps(const std::string& codec, int width, int height, int fps, int max_kbps_flag) {
+  const ResolutionKbps* tab = codec == "VP9" ? kLimitsVp9 : codec == "AV1" ? kLimitsAv1 : kLimitsH264Vp8;
+  const int px = width * height;
+  const ResolutionKbps* row = nullptr;
+  for (size_t i = 0; i < kLimitsRows; ++i) {
+    if (tab[i].width * tab[i].height >= px) {  // smallest row covering the resolution (libwebrtc rule)
+      row = &tab[i];
+      break;
+    }
+  }
+  double base_kbps;
+  char how[96];
+  if (row) {
+    base_kbps = row->min_start_kbps;
+    std::snprintf(how, sizeof(how), "%dx%d row", row->width, row->height);
+  } else {  // above 720p: extrapolate the last row by pixel ratio
+    const ResolutionKbps& last = tab[kLimitsRows - 1];
+    const double ratio = static_cast<double>(px) / (last.width * last.height);
+    base_kbps = last.min_start_kbps * ratio;
+    std::snprintf(how, sizeof(how), "%dx%d row x %.2f pixels, extrapolated", last.width, last.height, ratio);
+  }
+  const double fps_scale = fps > 0 ? fps / kTableFps : 1.0;
+  const int floor_kbps = SizeDropFloorKbps(width, height);
+  const int cap_kbps = max_kbps_flag > 0 ? max_kbps_flag : DefaultMaxBitrateKbps(width, height);
+  const int unclamped_kbps = static_cast<int>(base_kbps * fps_scale + 0.5);
+  const int kbps = std::min(std::max(unclamped_kbps, floor_kbps), cap_kbps);
+  P5G_LOG_INFO << "start bitrate auto = " << kbps << " kbps: libwebrtc min_start for " << width << "x" << height
+               << " " << codec << " (" << how << ") = " << base_kbps << " kbps x fps/30 (" << fps_scale
+               << ") = " << unclamped_kbps << "; size-drop floor " << floor_kbps << "; cap " << cap_kbps
+               << (max_kbps_flag > 0 ? " (--max-bitrate-kbps)" : " (libwebrtc default max)");
+  return kbps;
+}
 
 class SenderPeer : public webrtc::PeerConnectionObserver {
  public:
@@ -99,13 +193,15 @@ class SenderPeer : public webrtc::PeerConnectionObserver {
       if (g_cfg.abs_capture_time) RequireAbsCaptureTime(tr.get());
     }
 
-    // Optional deviations from stock, all off by default and recorded in the run config.
+    // Optional deviations from stock, all off by default (the effective values are logged at start-up).
     auto sender = added.value();
     auto params = sender->GetParameters();
     if (g_cfg.degradation == "maintain_resolution")
       params.degradation_preference = webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
     else if (g_cfg.degradation == "maintain_framerate")
       params.degradation_preference = webrtc::DegradationPreference::MAINTAIN_FRAMERATE;
+    else if (g_cfg.degradation == "disabled")
+      params.degradation_preference = webrtc::DegradationPreference::DISABLED;
     else if (g_cfg.degradation != "stock")
       P5G_FATAL("unknown --degradation " << g_cfg.degradation);
     if (g_cfg.max_bitrate_kbps > 0)
@@ -244,6 +340,8 @@ class Sender {
     if (frame_trace_) frame_trace_->Close();
     if (ledgers_) ledgers_->CloseAll();
     if (encoded_trace_) encoded_trace_->Close();  // after PC close: encoder queue is drained
+    if (encoder_rates_) encoder_rates_->Close();
+    if (cc_trace_) cc_trace_->Close();            // after PC close: the Call (GoogCC) is gone
   }
 
  private:
@@ -266,8 +364,8 @@ static void Usage() {
   std::fprintf(stderr,
                "video_sender --signaling-host H --signaling-port P --session S --stream-id ID --to RECV_ID\n"
                "             --trace-dir DIR [--yuv FILE | (pattern)] --width W --height H --fps F\n"
-               "             [--codec H264|VP8|VP9|AV1] [--max-bitrate-kbps N] [--start-bitrate-kbps N]\n"
-               "             [--degradation stock|maintain_resolution|maintain_framerate] [--duration S]\n"
+               "             [--codec H264|VP8|VP9|AV1] [--max-bitrate-kbps N] [--start-bitrate-kbps N|auto|stock]\n"
+               "             [--degradation stock|maintain_resolution|maintain_framerate|disabled] [--duration S]\n"
                "             [--ice-servers stun:host:port,...] [--stats-period-ms 1000]\n"
                "             [--abs-capture-time 1|0]\n");
 }
@@ -290,7 +388,6 @@ int main(int argc, char** argv) {
   if (c.codec != "VP8" && c.codec != "VP9" && c.codec != "H264" && c.codec != "AV1") P5G_FATAL("unsupported --codec " << c.codec);
   c.degradation = a.Get("degradation", c.degradation);
   c.max_bitrate_kbps = a.GetInt("max-bitrate-kbps", 0);
-  c.start_bitrate_kbps = a.GetInt("start-bitrate-kbps", 0);
   c.duration_s = a.GetInt("duration", 0);
   c.ice_servers = a.Get("ice-servers", "");
   c.stats_period_ms = a.GetInt("stats-period-ms", c.stats_period_ms);
@@ -299,6 +396,22 @@ int main(int argc, char** argv) {
   c.video.width = a.GetInt("width", c.video.width);
   c.video.height = a.GetInt("height", c.video.height);
   c.video.fps = a.GetInt("fps", c.video.fps);
+  c.start_bitrate = a.Get("start-bitrate-kbps", c.start_bitrate);
+  if (c.start_bitrate == "auto") {
+    c.start_bitrate_kbps = p5g::ResolveStartBitrateKbps(c.codec, c.video.width, c.video.height, c.video.fps,
+                                                        c.max_bitrate_kbps);
+  } else if (c.start_bitrate != "stock" && c.start_bitrate != "0") {
+    c.start_bitrate_kbps = std::atoi(c.start_bitrate.c_str());
+    if (c.start_bitrate_kbps <= 0) P5G_FATAL("bad --start-bitrate-kbps " << c.start_bitrate);
+  }
+
+  // One provenance line per run: the flags that shape the stream (nothing else records them).
+  P5G_LOG_INFO << "config: codec=" << c.codec << " " << c.video.width << "x" << c.video.height << "@" << c.video.fps
+               << " source=" << (c.video.yuv_path.empty() ? "pattern" : c.video.yuv_path)
+               << " degradation=" << c.degradation << " start_bitrate_kbps=" << c.start_bitrate_kbps
+               << " (" << c.start_bitrate << ") max_bitrate_kbps=" << c.max_bitrate_kbps
+               << " abs_capture_time=" << c.abs_capture_time << " stats_period_ms=" << c.stats_period_ms
+               << " ice_servers=" << (c.ice_servers.empty() ? "none" : c.ice_servers);
 
   p5g::InstallSignalHandlers();
   p5g::MaybeEnableWebrtcLogging();

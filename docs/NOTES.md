@@ -103,3 +103,33 @@ gNB rebuilt cleanly with the regenerated patch (binary not yet run: the OTA gNB 
 kept alive as `build/srsran_gnb/apps/gnb/gnb.running-*`; delete it after the next restart).
 Not measured: a trace on/off A/B of latency. The hooks have no off switch by design (pure observation);
 adding one would be the next step if a quantitative bound is wanted.
+
+## 2026-09-22 — fixed resolution + derived start bitrate
+* `--degradation disabled` added (W3C RTCDegradationPreference; DISABLED is libwebrtc-internal). Loopback:
+  stock encoded 320x180..640x360 in the first 12 s; maintain_resolution / disabled stayed 1280x720.
+* `--start-bitrate-kbps auto`: libwebrtc min_start table (per codec, smallest covering row) x fps/30,
+  floored by the DropDueToSize thresholds, capped by the max bitrate. 720p30 H264 -> 900 kbps; 60 fps -> 1800.
+  Loopback A/B (maintain_resolution, first second): stock 300 kbps start drops 16 frames at QP 34 vs
+  auto 900 kbps drops 2 frames at QP 24; identical steady state (QP 13, 2.4 Mbps) from ~8 s.
+* Resolved: the 2.0 Mbps "720p cap" seen in earlier stock runs was the 960x540 cap — with BALANCED
+  degradation those runs were still encoding 960x540 at the end (tx-encoded width/height), and
+  GetMaxDefaultVideoBitrateKbps gives 2000 kbps for <=960x540. Fixed-720p runs reach the 2500 kbps cap.
+
+## 2026-09-22 — final review pass (defaults-run and example-conformance criteria)
+Checked every app source, script, config and doc against two criteria: (a) everything meaningful runs
+with default flags, (b) the base code stays as close to the framework examples as the tracing allows.
+* Sender/receiver need only `--signaling-host` (and `--trace-dir`) to run: H264 720p30 synthetic
+  pattern, stock degradation, stock 300 kbps start, abs-capture-time on, 1 s getStats. Verified with a
+  flags-free loopback run (PASS, 0 lost).
+* PeerConnection flow matches conductor.cc (Unified Plan, CreatePeerConnectionOrError, AddTrack,
+  SetRemote -> CreateAnswer); the deliberate differences are the modular factory (for the observer
+  injections), non-trickle ICE (complete SDP after gathering) and the lambda SDP observers, all noted
+  in the file headers. Capturer matches test_video_capturer.cc's OnFrame path (VideoAdapter ->
+  optional I420 ScaleFrom -> broadcaster), plus one trace row per slot and OnDiscardedFrame() on drops.
+* gNB config vs srsRAN's gnb_rf_b200_tdd_n78_20mhz.yml differs only in AMF/N2 addresses, same-port
+  TX mode, stdout/info logging and remote-control JSON metrics; the header comment now says exactly
+  that (it wrongly claimed a tac change).
+* Cleanups: unused capture timing counters (SourceTiming) removed; unused <vector> includes removed;
+  stale comments fixed; both apps now log one "config:" provenance line (the run's flags were not
+  recorded anywhere since tx-source.txt was dropped); explicit Close() of all sender traces;
+  `make ota` / `make ota-stop` wrap ota_restart.sh; README/SETUP list it.

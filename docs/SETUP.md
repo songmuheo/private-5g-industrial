@@ -11,6 +11,16 @@ against one server (cross-host latencies use `*_wall_ns`; record `chronyc tracki
 
 ## gNB PC (Ubuntu 22.04, UHD installed, docker)
 
+One-shot (what the steps below do by hand, plus the JSON metrics client, the signaling relay and a
+local `video_receiver` for the case where this PC is also the receiver):
+
+```bash
+make ota            # = scripts/run/ota_restart.sh ota (OTA_LABEL=<name> to label the run dir)  -> results/<timestamp>-ota/{gnb,app,core}; sender: --signaling-host 10.53.1.1 --to recv0
+make ota-stop       # stops gNB, receiver, relay, metrics client and the core (route + NAT removed)
+```
+
+Step by step:
+
 ```bash
 make deps && make build-gnb                 # ~15 min; needs third_party/srsRAN_Project (make submodules)
 # SIMs: one row per phone in ran/core/subscriber_db.csv (git-ignored; template subscriber_db.example.csv):
@@ -52,8 +62,40 @@ build/apps/video_sender --signaling-host <receiver-public-ip> --signaling-port 8
 ```
 
 Defaults are stock libwebrtc behaviour. The only deviations are explicit flags: `--degradation`,
-`--max-bitrate-kbps`, `--start-bitrate-kbps`, `--low-latency-playout` (receiver), and the logging
-knob `--stats-period-ms` (1 s getStats sampling; 0 disables).
+`--max-bitrate-kbps`, `--start-bitrate-kbps`, `--abs-capture-time 0`, `--low-latency-playout`
+(receiver), and the logging knob `--stats-period-ms` (1 s getStats sampling; 0 disables).
+
+`--degradation` sets the W3C `RTCDegradationPreference` on the video sender (`RtpParameters.
+degradation_preference`): `stock` (BALANCED: resolution and frame rate both adapt to the estimate),
+`maintain_resolution` (resolution fixed at `--width x --height`, frame rate adapts),
+`maintain_framerate`, `disabled` (neither adapts; the encoder only raises QP and drops frames when the
+target bitrate is too low). Verified on loopback: `stock` encoded 320x180 .. 640x360 during the first
+12 s, `maintain_resolution` and `disabled` stayed at 1280x720 for every frame.
+
+`--start-bitrate-kbps N|auto|stock` sets GoogCC's initial rate (`PeerConnection::SetBitrate`, W3C-less
+libwebrtc API `BitrateSettings.start_bitrate_bps`). Stock is 300 kbps for every resolution
+(`api/transport/bitrate_settings.h`); with BALANCED degradation libwebrtc hides that by encoding the
+first seconds at a lower resolution, so once the resolution is pinned the start rate must be set.
+`auto` derives it from libwebrtc's own rules instead of a guess (the derivation is printed to sender.log):
+
+| step | rule (M120 source) | 1280x720 H264 30 fps |
+|---|---|---|
+| base | `ResolutionBitrateLimits::min_start_bitrate_bps`, "recommended minimum bitrate to start encoding", default table per codec family (`rtc_base/experiments/encoder_info_settings.cc`), smallest row covering the pixel count (`video_encoder.cc GetEncoderBitrateLimitsForResolution`) | 900 kbps |
+| fps | table assumes 30 fps; scaled by fps/30 = constant bits per pixel per frame (first-order approximation) | x1 |
+| floor | `VideoStreamEncoder::DropDueToSize`: frames are discarded while target < 500 kbps above 640x480 (< 300 kbps above 320x240) | 500 kbps |
+| cap | `--max-bitrate-kbps`, else `GetMaxDefaultVideoBitrateKbps` (600/1700/2000/2500 kbps by size class) | 2500 kbps |
+
+Table rows (min_start / max, kbps): H264+VP8 270p 200/500, 360p 300/800, 540p 500/1500, 720p 900/2500;
+VP9 120/300, 190/420, 350/1000, 480/1500; AV1 176/384, 256/512, 384/1024, 576/1536. Above 720p the 720p
+row is extrapolated by pixel ratio (our extension). Note that for a single H264 stream libwebrtc does not
+apply this table at run time (OpenH264 reports no limits; defaults apply to simulcast only), which is why
+the value has to come from the command line.
+
+Measured effect on loopback (720p30 H264, `maintain_resolution`, first second after the first encoded frame):
+stock 300 kbps start -> 16 frames dropped by the encoder, mean QP 34, 620 kbps encoded;
+`auto` (900 kbps) -> 2 frames dropped, mean QP 24, 1.37 Mbps encoded; both converge to QP 13 / 2.4 Mbps by 8 s.
+For a bandwidth-limited uplink also set `--max-bitrate-kbps` below the measured UL capacity
+(`gnb_metrics.jsonl` ul_brate, `gnb_sched_ul.csv` tbs_bytes) so `auto`'s cap follows the link, not the table.
 
 ## Teardown
 

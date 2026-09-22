@@ -56,7 +56,6 @@
 #include <sys/syscall.h>
 #include <thread>
 #include <unistd.h>
-#include <vector>
 
 namespace p5g {
 

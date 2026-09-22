@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 ROOT  := $(shell pwd)
 
-.PHONY: help deps submodules build-gnb build-libwebrtc build-apps build-ue-sim core-up core-down run-local verify venv clean
+.PHONY: help deps submodules build-gnb build-libwebrtc build-apps build-ue-sim core-up core-down ota ota-stop run-local verify venv clean
 
 help:
 	@echo "private-5g-industrial"
@@ -12,6 +12,8 @@ help:
 	@echo "  make build-apps       video_sender / video_receiver -> build/apps/"
 	@echo "  make core-up          Open5GS (docker) + host route to the UE subnet     [gNB PC]"
 	@echo "  make core-down"
+	@echo "  make ota [OTA_LABEL=ota]  gNB PC one-shot: core + gNB + metrics client + signaling relay + receiver -> results/<ts>-<LABEL>"
+	@echo "  make ota-stop         stop all of the above"
 	@echo "  make verify RD=results/<run>   completeness check of the real-time logs"
 	@echo ""
 	@echo "code test (no radio): make build-ue-sim ; make run-local [DURATION=30 CODEC=H264 WIDTH=1280 HEIGHT=720 FPS=30 YUV= DIRECTION=ul|dl]"
@@ -47,6 +49,14 @@ core-up:
 
 core-down:
 	$(ROOT)/scripts/run/start_core.sh down
+
+# gNB PC over-the-air session (see scripts/run/ota_restart.sh)
+OTA_LABEL ?= ota
+ota:
+	$(ROOT)/scripts/run/ota_restart.sh $(OTA_LABEL)
+
+ota-stop:
+	$(ROOT)/scripts/run/ota_restart.sh stop
 
 DURATION ?= 30
 CODEC ?= H264

@@ -126,13 +126,6 @@ inline std::shared_ptr<SourceFrames> OpenYuvFile(const std::string& path, int w,
   return s;
 }
 
-struct SourceTiming {
-  int64_t emitted = 0;        // frames handed to the broadcaster
-  int64_t skipped_slots = 0;  // grid slots skipped because the thread fell > 1 slot behind
-  int64_t adapter_drops = 0;  // slots the VideoAdapter dropped (frame-rate adaptation)
-  int64_t max_late_us = 0;    // worst wake-up lateness vs. the grid
-};
-
 class GridVideoCapturer : public rtc::VideoSourceInterface<webrtc::VideoFrame> {
  public:
   GridVideoCapturer(const VideoSourceConfig& cfg, CaptureFrameTrace* trace)
@@ -153,10 +146,6 @@ class GridVideoCapturer : public rtc::VideoSourceInterface<webrtc::VideoFrame> {
     running_ = false;
     if (thread_.joinable()) thread_.join();
   }
-  SourceTiming timing() const {
-    return {emitted_.load(), skipped_slots_.load(), adapter_drops_.load(), max_late_us_.load()};
-  }
-
   // Identical to test/test_video_capturer.cc: forward merged sink wants to the adapter unchanged.
   void AddOrUpdateSink(rtc::VideoSinkInterface<webrtc::VideoFrame>* sink,
                        const rtc::VideoSinkWants& wants) override {
@@ -185,14 +174,9 @@ class GridVideoCapturer : public rtc::VideoSourceInterface<webrtc::VideoFrame> {
       SleepUntilMonoUs(target_us);
       int64_t now_us = rtc::TimeMicros();
       if (now_us >= (slot + 1) * frame_interval_us_) {  // fell behind: realign to the grid
-        const int64_t resync = now_us / frame_interval_us_;
-        skipped_slots_.fetch_add(resync - slot);
-        slot = resync;
+        slot = now_us / frame_interval_us_;               // (visible in tx-frames.csv as a gap in grid_slot)
         target_us = slot * frame_interval_us_;
-        now_us = rtc::TimeMicros();
       }
-      const int64_t late = now_us - target_us;
-      if (late > max_late_us_.load()) max_late_us_.store(late);
       // Only count slots as "offered" once a sink (encoder) exists — before the PeerConnection is
       // negotiated nothing could have been sent.
       if (broadcaster_.frame_wanted()) EmitSlot(slot, idx, target_us);
@@ -217,7 +201,6 @@ class GridVideoCapturer : public rtc::VideoSourceInterface<webrtc::VideoFrame> {
     const bool to_encoder = adapter_.AdaptFrameResolution(width_, height_, target_us * 1000,
                                                           &crop_w, &crop_h, &out_w, &out_h);
     if (!to_encoder) {
-      adapter_drops_.fetch_add(1);
       out_w = width_;
       out_h = height_;
       broadcaster_.OnDiscardedFrame();  // keeps libwebrtc's framesDropped stats consistent
@@ -249,7 +232,6 @@ class GridVideoCapturer : public rtc::VideoSourceInterface<webrtc::VideoFrame> {
                                    .set_rotation(webrtc::kVideoRotation_0)
                                    .build();
     broadcaster_.OnFrame(frame);
-    emitted_.fetch_add(1);
   }
 
   const int width_, height_;
@@ -263,7 +245,6 @@ class GridVideoCapturer : public rtc::VideoSourceInterface<webrtc::VideoFrame> {
   rtc::VideoBroadcaster broadcaster_;
   std::thread thread_;
   std::atomic<bool> running_{false};
-  std::atomic<int64_t> emitted_{0}, skipped_slots_{0}, adapter_drops_{0}, max_late_us_{0};
 };
 
 // conductor.cc's CapturerTrackSource equivalent.
@@ -278,7 +259,6 @@ class GridVideoTrackSource : public webrtc::VideoTrackSource {
   explicit GridVideoTrackSource(std::unique_ptr<GridVideoCapturer> cap)
       : webrtc::VideoTrackSource(/*remote=*/false), capturer_(std::move(cap)) {}
   void StopCapture() { capturer_->Stop(); }
-  SourceTiming timing() const { return capturer_->timing(); }
 
  private:
   rtc::VideoSourceInterface<webrtc::VideoFrame>* source() override { return capturer_.get(); }

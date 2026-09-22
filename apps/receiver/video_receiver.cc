@@ -269,6 +269,11 @@ int main(int argc, char** argv) {
     P5G_LOG_WARN << "low-latency playout enabled (non-stock jitter buffer behaviour)";
   }
 
+  P5G_LOG_INFO << "config: receiver_id=" << c.receiver_id << " session=" << c.session
+               << " low_latency_playout=" << (c.low_latency_playout ? 1 : 0)
+               << " stats_period_ms=" << c.stats_period_ms
+               << " ice_servers=" << (c.ice_servers.empty() ? "none" : c.ice_servers);
+
   p5g::InstallSignalHandlers();
   p5g::MaybeEnableWebrtcLogging();
   rtc::InitializeSSL();

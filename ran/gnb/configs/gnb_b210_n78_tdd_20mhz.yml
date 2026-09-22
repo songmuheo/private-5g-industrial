@@ -2,8 +2,10 @@
 #
 # Based on: third_party/srsRAN_Project/configs/gnb_rf_b200_tdd_n78_20mhz.yml (release_25_10),
 #           the srsRAN "COTS UE" application note (docs.srsran.com) for B210 tuning.
-# Changes vs. the sample: AMF/N2 addresses of our Open5GS (ran/core), tac 1 to match the SIMs,
-# stdout metrics on, log level info (traces are the primary data; logs are for debugging).
+# Changes vs. the sample: AMF/N2 addresses of our Open5GS (ran/core); ru_sdr.expert_cfg.tx_mode
+# same-port (single antenna port); log to stdout at level info instead of /tmp/gnb.log at warning
+# (procedure-level messages for attach debugging; per-packet detail is debug level and stays off);
+# remote_control + JSON metrics + stdout metrics table on. Cell parameters are the sample's.
 #
 # Hardware notes (B210): 20 MHz @ 30 kHz is the reliable maximum over USB 3.0; keep the sample rate
 # at 23.04 MHz. Use an external 10 MHz / GPSDO reference if the phone struggles to sync
