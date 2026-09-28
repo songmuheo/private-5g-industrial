@@ -200,3 +200,280 @@ Two Pixels, 60 s each, 720p30 H264 fixed resolution, start 900 kbps, one receive
   until chrony is set up. Same-host receiver internal (last packet -> app): 28 ms / 54 ms median.
 * Copy was taken while receivers and gNB were still running, so no file has its footer yet
   (verify_run flags this; the live run directory gets footers at Ctrl-C).
+
+## 2026-09-22 — 2-UE OTA run, two Pixel 7 (results/2-ue-60s-pixel7-7) vs Pixel 7 + Pixel 9 (…-pixel7-9)
+Same settings (720p30 H264 fixed, start 900 kbps, 60 s, one receiver per stream). Clean stop this time:
+all footers present, verify PASS, 0 RTP loss on both streams, 30.0 fps delivered on both.
+* Both streams now run high: cam0 2.43 Mbps (QP 13.3, at the 2.5 Mbps cap), cam1 2.17 Mbps (QP 14.8;
+  GoogCC ended at 1.46 Mbps). In the 7-9 run one stream sat at 1.11 Mbps (QP 23.8, GoogCC 0.76 Mbps).
+  The low stream in 7-9 was UE 10.45.1.11 (SIM …187860); the same SIM/IP ran at 2.17 Mbps here, so the
+  drop is not tied to a phone — HYPOTHESIS: GoogCC dynamics under HARQ-induced delay variation.
+* RAN per UE (60 s): 8524 / 8912 UL grants, ~24 PRBs each, MCS 27 both, PUSCH SINR 31-33 dB, UL BLER
+  16.2 % / 14.6 % (retx 15.8 % / 14.4 %) — the same ~15 % BLER at maximum MCS as every run so far. With
+  SINR > 30 dB this looks like link adaptation sitting at its ceiling rather than a coverage problem;
+  worth an experiment with a lower max PUSCH MCS or gain changes (open).
+* Cross-host delays (laptop wall clocks not synced to the gNB PC): one-way median 27 / 24 ms, frame
+  capture->app 79 / 91 ms — lower than the 7-9 run (62/23, 120/120) but offset-contaminated. Same-host
+  receiver internal (last packet -> app) 23 / 29 ms median (7-9: 28 / 54).
+
+## 2026-09-28 — 4-UE OTA run (results/20260928-161259-4-UE): why the senders back off
+Four Pixels (can0 10.45.1.14, cam1 .11, cam2 .15, cam3 .16), 720p30 H264 fixed resolution, 60 s, one
+receiver per stream, plus a fifth attached phone (.13) with background traffic. Stream id typo: recv0's
+stream is `can0`. verify PASS. cam1 ended after 10.9 s: its phone stopped answering (DL HARQ-ACK all DTX
+from t≈11 s, UL CRC stops), gNB RLF "100 consecutive HARQ-ACK KOs" at 16:20:24, release at 16:20:28,
+no re-attach before the end. Phone-side event, not load (SINR 32 dB until the last TB).
+* Delivered: can0 1303 frames (22 fps), cam2 1508 (25.5), cam3 1669 (28.1); RTP loss 0-1 packet per
+  stream, framesDropped 0. Received bitrate collapsed anyway: aggregate 4.5 Mbps (first 10 s) ->
+  1.0-1.3 Mbps from 40 s; cam2/cam3 1.5 -> 0.35 Mbps, can0 never above 0.5 Mbps.
+* NOT the gNB PC: UHD L/O/U 0, low-PHY real-time failure 0 in the run window (1 during Ctrl-C), late
+  HARQs / failed PDCCH+UCI allocs 0, MAC DL latency 10-16 us avg / <100 us max, and the grant-slot ->
+  PUSCH CRC report latency is 4.09 ms median, 4.2 ms p99, 4.3 ms max in every 5 s bin of the run —
+  flat, no I/Q processing backlog. (Note: joining sched_ul with ul_crc on (rnti,sfn,slot,harq) collides
+  across SFN wraps every 10.24 s; use time proximity for latency joins.)
+* NOT the channel for cam1/cam2/cam3: PUSCH SINR 30-35 dB, TA 0.1-0.4 us. can0's phone is different: its
+  SINR fell to 9-13 dB in 0-10 s and 45-50 s (MCS 3-4, 30+ PRB per grant -> it alone filled ~60 % of the
+  UL PRBs, BSR up to 77 KB, capture->arrival +100-800 ms). That is the only genuine UL congestion in the
+  run and it explains the first 10 s: everyone's BSR grew (28-40 KB) and everyone backed off together.
+* Phase 2 (10-60 s) has idle UL (PUSCH PRB use 2-3 of 51 per slot avg, BSR mean 0.5-2 KB, i.e. < 1 frame)
+  yet the rates stay down. Cause: UL link adaptation pinned at MCS 27 (256QAM table) with the OLLA SNR
+  offset saturated at its -5 dB floor (16738 grants at -5.0) -> new-data BLER 20-26 % (target 1 %),
+  retransmission BLER 48 %, 4-retx HARQ processes abandoned to RLC ARQ (cam2: 46/28/21/14/6/6 per 10 s;
+  t-Reassembly expiries 66/35/39/... per 5 s). Each HARQ round costs 10.0 ms (DDDDDDSUUU), so the
+  HARQ completion time is 4.1 ms median but 24 ms p90 / 44 ms p99 / up to 74 ms, and RLC recoveries add
+  ~100 ms. At the app this is delay dispersion, not loss: frame span (last-first packet) 10-20 ms
+  median, 40-70 ms p90, 100-390 ms max; capture->arrival median flat while p90/max tails grow
+  (cam3 t35-50: tail +90-240 ms while its rate fell 1.1 -> 0.3 Mbps). RLC AM hides the loss, so GoogCC's
+  loss estimator sees nothing and its delay-based (trendline) estimator reads the tails as queue growth:
+  decrease, no recovery, because the tails do not shrink when the rate does (BLER is per TB, MCS fixed).
+* Structure of the failures (new-data MCS 27, run window): TDD slot 7 (first UL slot after the DL->UL
+  switch) 23.8 % even when the UE is alone in the slot, slot 8 alone 4.9 %, slot 9 alone 17 %; 3-4 UEs
+  sharing a slot 29-50 %; SINR-bin 15-25 dB TBs fail 60-68 %, 30-35 dB 24-27 %. HYPOTHESIS: 256QAM at
+  MCS 27 sits at the EVM ceiling of phone PA + B210 RX (DMRS SINR over-estimates the effective SINR),
+  plus a same-port TX/RX switching transient in the first UL slot. Both testable.
+* Knobs for the next runs (srsRAN release_25_10 keys, du_high_config.h / cli11 schema):
+  `cell_cfg.pusch.mcs_table: qam64` (removes the 256QAM floor), `cell_cfg.pusch.olla_max_snr_offset`
+  (default 5 dB, raise to 10-15 so OLLA can actually reach MCS < 27), `cell_cfg.pusch.olla_target_bler`
+  (default 0.01), `cell_cfg.pusch.max_nof_harq_retxs` (default 4). App side: `--max-bitrate-kbps` per
+  sender below the per-UE share. Sender-side confirmation still needed: copy the laptops'
+  `cam*-tx-cc.csv` / `-tx-events.csv` (bwe_delay state, target_bps) next to this run's app/.
+* Config change (ran/gnb/configs/gnb_b210_n78_tdd_20mhz.yml): `tdd_ul_dl_cfg` DDDSU, period 5 slots
+  (2.5 ms), S = 6 DL / 4 guard / 4 UL symbols (srsRAN's e2e DDDSU values). Validated with a no-core ZMQ
+  dry run (DU started, SIB1 ms2p5 3/6/1/4, PRACH index 159 = slot 19 = U). Expected effect: UL
+  opportunity every 2.5 ms instead of 5 ms and the DL->UL switch moves into S (the full UL slot is no
+  longer the first slot after the switch); cost: UL share 3/10 -> 1/5 of the slots. Not yet run OTA.
+* verify_run.py prints the same UL BLER (0.3020) for every RNTI — it is the global value; per-RNTI
+  BLER must be computed from gnb_ul_crc.csv (to fix).
+
+## 2026-09-28 — 5-UE OTA run with DDDSU (results/20260928-164733-5-UE)
+First run with `tdd_ul_dl_cfg` DDDSU (SIB1: ms2p5, 3 DL / S 6D-4G-4U / 1 UL). Five Pixels (cam0 .14, cam1 .11,
+cam2 .15, cam3 .16, cam4 .13), 720p30 H264 fixed, 60 s, one receiver each. verify PASS, no RLF, all five
+streams ran the full 60 s, RTP loss 0/0/0/0/2, PLI 1 each (initial keyframe).
+* Delivered fps 26.3 / 21.4 / 19.7 / 24.3 / 26.4; freezes 3 / 7 / 5 / 0 / 1. Aggregate received bitrate
+  3.5 Mbps (first 5 s) -> 1.6-1.7 Mbps (15-30 s) -> 2.1-2.4 Mbps (35-60 s); per stream 250-700 kbps.
+  Same shape as the 4-UE run (start high, collapse, no return to the 1.5 Mbps start), but the plateau is
+  higher (2.1 vs 1.2 Mbps aggregate) with one more stream. n=1, not attributable to DDDSU yet.
+* First 10 s again genuine UL queueing: BSR max 77-108 KB (0.4-0.6 s of backlog at 1.5 Mbps), PUSCH PRB
+  use 56 % of the single UL slot, capture->arrival p90 +150-360 ms. After 15 s PRB use 27-33 %, BSR mean
+  0.2-1.4 KB: idle link, rates still low -> same GoogCC/delay-tail mechanism as the 4-UE run.
+* DDDSU effect on HARQ timing (measured): retx gap 10.0 -> 7.5 ms; HARQ completion p90 24 -> 19-21 ms,
+  p99 44 -> 36.5 ms. Frame span (last-first packet of a frame) p90 40-70 ms, max 115-265 ms: unchanged.
+* UL BLER got worse, not better: new-data 32 % (4-UE: 20.5 %), retx 49-63 %, per UE 39-41 % (cam4's
+  phone 50 %, SINR 29 dB). MCS 27 and OLLA offset -5.0 for every UE the whole run. gNB decode latency
+  4.1 / 4.2 / 4.3 ms (med/p99/max) flat -> still no processing backlog.
+* Structure: failure no longer depends on how many UEs share the slot (40.6 % alone .. 46.7 % with 5),
+  but grows with TB size (rb<10: 38 %, 10-19: 51 %, 20-29: 56 %, 30-39: 61 %, 40+: 65 %) — the
+  per-code-block error signature of an SINR margin near the MCS-27 threshold. Retx fail more than first
+  transmissions and success arrives at retx 3-4 with the same reported SINR (34/34/33/34 dB), i.e. no
+  visible HARQ combining gain.
+* FINDING (code): srsRAN release_25_10 default `pusch.rv_sequence` is `{0}` (PDSCH: {0,2,3,1}); every UL
+  retransmission is an RV0 repeat (chase combining only). Commercial gNBs cycle RV 0/2/3/1 (incremental
+  redundancy). Knob: `cell_cfg.pusch.rv_sequence: [0, 2, 3, 1]`. HYPOTHESIS: helps if the floor is
+  noise-like, not if it is a distortion floor.
+* HYPOTHESIS (strengthened): a receive-side transient after the same-port TX->RX switch. Ordered by time
+  from the switch to the PUSCH slot: DDDSU slot 4 (~4 symbols, 0.14 ms) 32 % fail alone; 4-UE slot 7
+  (0.5 ms) 24.5 %; slot 8 (1.0 ms) 4 %; slot 9 (1.5 ms, few grants) 17 %. Reported DMRS SINR is NOT
+  lower in the bad slots (4-UE slot 7 p10 28 dB vs slot 8 23 dB), so the impairment is not thermal
+  noise. PUCCH also slightly worse in DDDSU (HARQ-ACK DTX 6.7 % vs 4.4 %, PUCCH SINR 13.6 vs 16.1 dB).
+  Test: dual-port RX (antenna on RX2, drop `tx_mode: same-port`) removes the switch; or compare
+  `mcs_table: qam64` (removes the 256QAM margin) — one change per run.
+* Tooling: analysis/exp_run_report.py <run> <tdd_period_slots> produces sections A (app) and B (gNB) used
+  above for any run. verify_run.py per-RNTI UL BLER still prints the global value (to fix).
+
+## 2026-09-28 — gNB profile changes for the next runs: UL OLLA like a production gNB, 1 TX / 2 RX antennas
+Config only (ran/gnb/configs/gnb_b210_n78_tdd_20mhz.yml); validated with the no-core ZMQ dry run
+(1 TX / 2 RX zmq channels, DU started, values echoed in the non-default configuration block).
+* `cell_cfg.pusch`: `olla_target_bler 0.1` (was 0.01), `olla_max_snr_offset 20` (was 5),
+  `olla_snr_inc_step 0.02` (was 0.001). Why 20 dB: srsRAN's UL SNR->MCS thresholds are ZMQ/AWGN-calibrated
+  (mcs_calculator.cpp: MCS 27 needs 21.7 dB, MCS 19 = top of 64QAM 17.1 dB); from the measured 33 dB
+  median / 37 dB p90 PUSCH SINR the loop needs 11-15 dB to leave MCS 27 and 16-20 dB to reach 64QAM, so
+  the 5 dB default could never act (offset sat at -5.0 in every run). Why the step: the default 0.001 dB
+  moves ~0.33 dB/s at the observed BLER (a 15 dB correction would take ~45 s, most of a 60 s run);
+  0.02 up / 0.18 down converges in ~2 s and dithers +-0.2 dB. Target 10 % = the CQI definition
+  (TS 38.214 5.2.2.1) and the usual first-transmission OLLA target. DL OLLA left at default (not under study).
+* Antennas: RF A TX/RX (DL TX + UL RX) and RF B TX/RX (UL RX only): `nof_antennas_dl 1`, `nof_antennas_ul 2`,
+  `tx_mode same-port` kept (it only selects "TX/RX" as the RX antenna per channel; the actual TX<->RX switch
+  is the B210 ATR on channel 0). Channel 1 never transmits, so its port is not switched. `pcap.mac_type dlt`
+  added because the validator refuses >= 2 antennas with the udp pcap wrapper even with pcap disabled.
+  Not 2x2 on purpose: DL rank adaptation would be a second new variable for the UL study.
+* What the next run should show if the hypotheses hold: OLLA offset moving below -5 dB and MCS leaving
+  27 within seconds (per-UE olla_offset / mcs in gnb_sched_ul.csv), new-data BLER settling near 10 %,
+  HARQ completion p99 falling, and — from the second RX chain — higher PUSCH SINR at the same TX power.
+  The switching-transient hypothesis is only partly tested (channel 0 still switches); the clean test
+  remains RX on RX2 / no same-port.
+* 17:12 start attempt (results/20260928-171255-5-UE, no data) failed at radio init: "B2x0 devices do not
+  support different number of transmit and receive antennas" (radio_uhd). The ZMQ dry run does not catch
+  this (ZMQ allows asymmetry). Fixed to `nof_antennas_dl 2 / nof_antennas_ul 2` (2x2 same-port on RF A/B
+  TX/RX; DL becomes 2-port, `pdsch.max_rank: 1` available if DL must stay single-layer). run_gnb_core.sh's
+  trap took the core down; no gNB/metrics/route/NAT left behind. Re-validated over ZMQ (2 TX / 2 RX).
+
+## 2026-09-28 — 5-UE run, all five senders (results/20260928-172226-5-UE): the UL failure floor is a
+## TX->RX recovery effect of the B210 same-port path, not noise, load, MCS or I/Q transport
+Config: DDDSU, 2 TX / 2 RX (RF A/B TX/RX, same-port), UL OLLA target 10 % / offset cap 20 dB / step 0.02.
+verify PASS, 0 RLF, all five streams 60 s. cam0-cam3 25.6-29.5 fps, 0 loss, <= 1 freeze, 330-600 kbps
+each; cam4 (laptop on phone .13) 4.0 fps, 8 freezes (6.6 s), 150-360 kbps although its RAN figures equal
+the others (UL fail 30 %, MCS 13, SINR 30 dB, DL retx 4 %, HARQ-ACK 89 %) -> sender/laptop side, check
+sender-cam4.log (encoder fps, target bitrate). Aggregate received 2.2-2.5 Mbps (vs 2.1 previous 5-UE).
+* No I/Q-transport or compute problem with 5 UEs: 0 UHD late/underflow/overflow, 0 lower-PHY real-time
+  failures, PUSCH PHY processing 80 us median / 252 us p99 / 425 us max (slot 500 us), grant->CRC
+  4.1 / 4.3 / 4.5 ms (med/p99/max) flat over the run, MAC latency unchanged. USB load with 2x2 at
+  23.04 MS/s sc12 (~276 MB/s) is carried without overflow.
+* OLLA now works as configured: offset reached -19.x dB within 10 s on every UE, MCS 5-14 instead of 27.
+  BLER did not follow: 22 % new-data (target 10 %), flat from MCS 4 to 26; QPSK R<=0.3 1-9 %, QPSK R0.5
+  24 %, 16/64/256QAM 27-31 % regardless of order. PHY log: failed PUSCH have LDPC iter = 6 (max) at
+  DMRS SINR 32 dB, identical to the SINR of successes. An erasure of part of the slot, not an SNR margin.
+* Cause found (FACT, measured): PUSCH failure depends on gNB DL transmission in the slots just before:
+    PDSCH in the S slot (s-1)      -> 78.0 % fail (n=12258)   | S slot empty -> 8.9 % (n=48348)
+    PDSCH only in D(s-2)           -> 39.9 %                  | D(s-3), D(s-4) -> ~baseline
+    no PDSCH in the whole period   ->  6.8 % (n=38184)        | any PDSCH in the period -> 49-73 %
+    per UL slot: with DL data 39-55 %, without 5-8 %.
+  Presence matters, not power (S-slot PDSCH 1-10 PRB 78 %, >30 PRB 84 %): the RX needs ~1 ms after the
+  end of a TX burst (S-slot PDSCH ends ~290 us before the PUSCH slot: 78 %; D(s-2) >= 790 us: 40 %;
+  >= 1.3 ms: baseline). Same law explains the DDDDDDSUUU run (slot 7 worst, 9 best) and why UCI-mux,
+  PRACH-slot, UE-count, TB-size and RSRP hypotheses all failed. HYPOTHESIS on the chip mechanism:
+  AD9361 RX DC-offset / quadrature tracking (UHD default on) re-converging after the TX burst on the
+  shared port (IQ image / DC error kills >QPSK, spares low-rate QPSK); alternatively LNA recovery.
+  Two RX antennas did not help because both ports switch.
+* Consequence for the study: the UL error floor is coupled to DL scheduling (RTCP/TWCC feedback,
+  SIB/paging) — a testbed artefact a production gNB does not have; fix before drawing GoogCC conclusions.
+* Fixes to test (one per run): (1) RX on RX2 ports with `tx_mode` default (no port switching; only
+  TX->RX2 isolation matters); (2) lower `tx_gain` (80 -> 65-70) and/or `rx_gain` (40 -> 25-30) to reduce
+  leakage into the RX chain; (3) `nof_dl_symbols: 0` in S (TX burst ends >= 640 us earlier) as a
+  software-only mitigation. (1) is the decisive one.
+* Sender traces added (results/5-ue-60s-pixel7-only/: receiver/gNB run + five *-sender-cam*/app). Operation
+  check with both sides: identical sender configs (720p30 pattern, start 900 kbps auto, no cap), 1783-1791
+  frames captured per sender (30 fps), every sent RTP packet found at the receiver ((ssrc,seq) join
+  100 %, 0 loss), GoogCC loss estimator never engaged (loss_rate 0 throughout), GoogCC target == delay-based
+  estimate at all times (the trendline detector is the binding controller; 0-9 overuse events per 5 s even
+  in steady state). Delivered fps below 30 is the OpenH264 rate control skipping frames at 720p when the
+  target is < ~500 kbps (captured 150 / encoded 93-149 per 5 s), not network loss.
+* Relative one-way delay (tx-rtp -> rx-rtp, min-normalised, no clock sync needed): first 5 s 240-760 ms
+  max on cam0-3 and 1-4.9 s on cam4 (RTT 554 ms -> 2.5 s -> 4.7 s at t=2-8 s) = startup shock of 5 x 900 kbps
+  into one UL slot per 2.5 ms with 25-40 % BLER; cam4's queue was not in the phone's RLC (BSR <= 29 KB) but
+  before it (laptop / USB tethering / phone IP stack). GoogCC cut cam4 to 136-230 kbps and stayed there
+  (5 probes, no recovery); OpenH264 then skipped most frames ("iContinualSkipFrames") -> 4 fps. Its RAN
+  figures are the same as the other UEs, so this is a sender-path effect. From 15 s on all streams:
+  rel-OWD median 25-35 ms, p90 45-90 ms, max 70-220 ms; RTT 25-60 ms.
+* Next: stagger starts or `--start-bitrate-kbps 300` to remove the startup shock; keep the RF fix runs
+  separate from that change.
+* Profile switched to the srsRAN default port mapping (2026-09-28 evening): `tx_mode` removed (continuous:
+  TX on RF A TX/RX, RX on RF A RX2, no ATR switching), `nof_antennas_dl/ul 1/1`, `tx_gain 65` (was 80;
+  RX2 hears the gNB's own DL during DL slots, srsRAN #77; tutorial value is 50). OLLA and DDDSU unchanged.
+  ZMQ dry run OK. Expected: the S-slot-PDSCH -> 78 % PUSCH failure disappears; if the phones lose the cell,
+  raise tx_gain first.
+
+## 2026-09-28 — RX2 run (results/20260928-174551-5-UE): switching hypothesis CONFIRMED; new limit = RX overdrive
+TX on RF A TX/RX, RX on RF A RX2, tx_mode default (continuous), 1x1, tx_gain 65, rx_gain 40, OLLA/DDDSU as
+before. Four senders (cam2 not started). verify PASS, 0 RLF, 0 RF events, no "Same port" line.
+* FACT: the DL-coupled failure is gone. PUSCH fail with PDSCH in the S slot 13.5 % vs 14.1 % without
+  (before: 78.0 % vs 8.9 %); alone-in-slot 2.7 % vs 4.5 % (before 69.9 % vs 6.2 %). The same-port
+  ATR switching was the cause of the 20-35 % UL floor in every earlier run.
+* UL now behaves like an SNR-limited link: fail monotone in MCS (MCS 0-7: 1-6 %, 12-14: 22-26 %, 27: 72 %)
+  and in SINR (>= 10 dB: 2-9 %, < 0 dB: 30-98 %); alone 2.1 %, 2 UEs 14.6 %, 3 UEs 30 %, 4 UEs 37.5 %.
+  Overall 13.9 % (was 22-35 %). OLLA offsets now spread (-1 .. -19.7) instead of all pinned.
+* New problem: PUSCH SINR fell from 30-35 dB to 10-18 dB while the received power per RE is at the
+  metric ceiling (ul_rsrp 0.0 dBFS on 3 of 4 UEs; -8.6 on the fourth) and the noise+interference proxy
+  (rsrp - sinr) rose from -41 dBFS to -14 .. -22 dBFS, worse when UEs share the slot (-13.9 vs -19.2).
+  Mechanism (HYPOTHESIS, consistent): tx_gain 80 -> 65 lowered the DL by 15 dB while SIB1 still announces
+  ss-PBCH-BlockPower -16 dBm, so every UE estimates 15 dB more path loss and, with alpha = 1, transmits
+  15 dB more (P0 -76 dBm): the B210 RX (rx_gain 40) is driven into clipping; clipping distortion is the
+  new floor and grows with the number of co-scheduled UEs. DL also degraded: CQI 12 -> 5-10, DL retx
+  4 % -> up to 24 %, HARQ-ACK DTX 8 -> 14 % (feedback path for GoogCC).
+* App: cam0 25.6 fps / cam4 18.7 fps, but cam1 11.7 fps (18 freezes) and cam3 10.7 fps (9 freezes): the
+  two UEs with the lowest SINR (10-15 dB, MCS 3-6, 15-25 % fail) had GoogCC at 100-200 kbps.
+  Aggregate 3.0 -> 0.8 -> 1.5 Mbps. 0 RTP loss on all four.
+* Next (one change): restore `tx_gain: 80` (UE power and DL CQI back to the earlier regime; RSRP should
+  return to ~-7 dBFS). If the N+I proxy alone-in-slot does not return to ~-40 dBFS, TX->RX2 leakage is
+  present -> then lower rx_gain (40 -> 30). Alternative that keeps tx_gain 65: `ssb_block_power: -31`
+  so the UEs' path-loss estimate matches the real DL power.
+* tx_gain back to 80 (2026-09-28 evening) after results/20260928-174551-5-UE showed RX overdrive from the UE power-control reaction; RX2 mapping, 1x1, OLLA, DDDSU unchanged.
+
+## 2026-09-28 — RX2 + tx_gain 80 run (results/20260928-175503-5-UE): the RF path is now clean
+TX RF A TX/RX, RX RF A RX2, tx_mode default, 1x1, gains 80/40, DDDSU, OLLA 10 %/20 dB/0.02. Five senders.
+verify PASS, 0 RLF, 0 RF events.
+* UL: overall CRC fail 9.6 % (same-port runs: 22-35 %); new-data 6.9 %; per UE 7.4-11.4 %. Failure is
+  SNR-shaped (SINR >= 25 dB: 0.2-1.4 %, 10-20 dB: 7-17 %; alone 4.1 %, 2 UEs 8.2 %, 4 UEs 18 %). No
+  S-slot PDSCH effect (9.4 % vs 8.9 %). Noise+interference proxy back to -47 dBFS (alone) / -43 (sharing):
+  no measurable TX->RX2 leakage floor at tx_gain 80. OLLA offsets -8 .. -15 dB, MCS 5-24 per UE (no UE
+  pinned). PUSCH SINR 18-34 dB; per-UE RSRP -29 .. 0 dBFS (cam2's phone .15 is the weak one at -29 dBFS /
+  17.7 dB, MCS 5-8; cam4's phone .13 saturates the metric at 0 dBFS with CQI 5: strong UL, weak DL).
+* App: cam0 29.6 fps / 620-1090 kbps, cam3 29.8 fps / 510-800 kbps, both 0 freezes, 0 loss. cam2 15.9 fps
+  (weak UE, 170-530 kbps). Aggregate 2.4-3.4 Mbps in the first 25 s (highest so far), 1.4-1.9 Mbps after
+  cam1 dropped out.
+* cam1 stopped at 24.6 s: receiver recv1 PeerConnection went disconnected -> failed -> closed while the
+  phone (.11) stayed attached and active in UL until the end (no RLF, no release, DL retx 6 %). An
+  ICE/DTLS-level failure on the app path, not RAN. Needs sender-cam1.log.
+* cam4 (phone .13) again: 2.9 fps, 12 freezes, the only RTP loss of the run (14 packets, 13 of them at
+  t=2.3-2.7 s during the startup shock: BSR mean 128 KB / max 700 KB in the first 10 s, i.e. ~6 s of
+  data queued in the phone) and GoogCC stuck at 65-250 kbps afterwards. Same laptop/phone pair as in
+  the two previous runs. RAN-side this UE is fine (fail 7.4 %, MCS 16-23). Open: why this pair queues
+  700 KB at start (weak DL feedback path? tethering?). Needs its tx traces.
+* Startup shock remains the dominant app-level problem now that the RF floor is gone: all UEs show BSR
+  55-700 KB in the first 10 s. Next change on the app side only: `--start-bitrate-kbps 300` (or
+  staggered starts). RAN config to be frozen here as the baseline.
+* Sender traces (results/5-ue-60s-pixel7-only-2/): cam0 / cam3 healthy end to end (0 loss, 30 fps, GoogCC
+  620-1090 / 560-780 kbps, 21-26 overuse events in 60 s, rel-OWD p90 ~30 ms, max 50-130 ms).
+  cam1: the laptop's packets stopped reaching the RAN at ~25 s (gNB PDCP UL from .11 to the relay host:
+  400-650 pkts/5 s -> 0 from t=25 s) while the phone stayed attached and the sender kept trying (RTP out
+  264 -> 50 -> 12 pkts/5 s, RTCP feedback in: none after 25 s); ICE consent then failed the
+  PeerConnection. Laptop<->phone tethering path dropped, not RAN, not GoogCC.
+  cam4: GoogCC start shock explained. At t=0 the sender emitted 1.56 Mbps (start 900 kbps + libwebrtc's
+  initial probe clusters, 2 created / 5 "successes"), the phone .13 buffered to the top BSR bucket
+  (logged 700 KB) for 4 s, RTT 1.4 -> 2.1 s, target cut to 131 kbps at t=3 s and never above ~250 kbps
+  afterwards (ALR, slow increase, further overuse at 40-45 s); OpenH264 then skipped most frames
+  (196 encoded / 1786 captured). The 14 lost packets are from that first-second overflow. gNB served the
+  UE (207 grants / 430 KB in the first second), so the overshoot is on the sender/tether side.
+  cam2: weak UE (SINR 18 dB, MCS 5-8) -> GoogCC 210-515 kbps, encoder skipping after 35 s; placement.
+* Next (app side only, RAN frozen): `--start-bitrate-kbps 300` on every sender (probes scale with the
+  start rate) and/or staggered starts; re-run 5-UE. Check the cam1 laptop's USB tethering before that.
+
+## 2026-09-28 — RAN audit of results/20260928-175503-5-UE (RX2, tx_gain 80): can the RAN be used as-is?
+Tool: analysis/exp_ran_audit.py. Window 0-60 s, 5 UEs (cam1 active only 25 s on the app side, RAN fine).
+* Health: 0 RLF, 0 UHD/PHY real-time events, 0 late HARQ, 0 failed PDCCH/UCI allocations, 0 error
+  indications, 0 UCI discards, 6 PRACH detections (= attaches). TA 0.22 us median, 1.16 us max (CP 2.34).
+  SINR per UE flat over time (+-2 dB). SR -> grant 3.0 ms median (3.1 p90) for every UE; BSR>0 -> next
+  grant 1-3 ms median, 6 ms p90, 33-63 ms max. Grant->CRC 4.1 ms flat. No scheduler starvation.
+* Slot use: 94 % of UL slots carry a grant, median 31/51 PRB, avg UL PRB utilisation 57 % for 2.4 Mbps
+  delivered. Mostly 1-2 UEs per slot (8155 / 8662 slots), 3+ in 5633. DL PRB utilisation 2 % (RTCP only).
+  UL grant efficiency: MAC PDU vs RLC payload shows 15-22 % non-payload for the two high-rate UEs
+  (cam0, cam3) but 54-56 % for the low-rate ones (cam1, cam2, cam4): grants exceed the data (BSR bucket
+  upper bounds, 5-15 % of grants issued at BSR 0). About a third of used UL PRBs carry padding. Not a
+  problem at 5 UEs (43 % free) but it caps scaling; a 20 MHz DDDSU cell at this efficiency saturates
+  around 4 Mbps delivered.
+* Reception: CRC fail 7-11 % per UE (OLLA target 10 %), new-data 3-8 %. HARQ completion p99 12-22 ms,
+  max 42-89 ms; 9-63 processes/min abandoned to RLC ARQ; t-Reassembly expiries 16-166/min (cam4 worst).
+  RAN-internal hold (MAC PDU -> PDCP delivery) 0.02 ms median for three UEs, 2.6-5 ms median / 27-33 ms
+  p99 / 50-83 ms max for the two high-rate UEs (RLC reordering after HARQ failures).
+* Near-far is now the dominant RF limit (FACT): received power per RE spans 30 dB (cam4 0 dBFS = metric
+  ceiling, cam3 -8, cam0/cam1 -16..-17, cam2 -30). In shared slots the strongest UE fails 3.6 %, UEs
+  0-10 dB below 9.2 %, 10-20 dB below 14.2 %, >= 20 dB below 23.2 %; every UE fails 2-4x more when
+  sharing than alone (0.7-4.2 % -> 8-13 %). Open-loop PC (P0 -76 dBm, alpha 1) does not equalise: cam4
+  sits at the UE minimum power next to the RX2 antenna, cam2 is power-limited far away. The weak UE
+  (cam2, MCS 5-6) takes 37 % of UL PRBs for 0.33 Mbps (Jain 0.82).
+* PUCCH: HARQ-ACK DTX 5-14 % per UE, ACK-occasion SINR 3.5 dB (cam2) / 6.2 dB (cam0) up to 17 dB;
+  p0_nominal for PUCCH is the default -90 dBm. DL retx 1-9 %, DL MCS 3-13, CQI 5-12.
+* Verdict: the RAN is usable as a baseline now (no artefacts, sub-5 ms scheduling, stable SINR, BLER at
+  target), with three things to fix or control before scaling / drawing conclusions:
+  (1) equalise received power: move cam4's phone away from the RX2 antenna and cam2 closer, and/or
+      `pusch.enable_cl_loop_pw_control: true` with `target_pusch_sinr` ~25 (default 10 dB is too low),
+      plus rx_gain 40 -> 30 for ADC headroom; (2) PUCCH power: `pucch.p0_nominal -80` (or closed-loop
+      PUCCH PC) to cut HARQ-ACK DTX; (3) account for grant padding when computing capacity.

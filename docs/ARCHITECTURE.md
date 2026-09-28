@@ -57,3 +57,8 @@ tx-events (GoogCC: delay/loss estimate, probes, ALR; ICE/DTLS)        rx-events 
 * Cross-host latencies depend on wall-clock sync.
 * Phones request their own APN name as DNN; the core subscription must list it (`core_add_dnn.sh`,
   default `oai`) or the AMF rejects the PDU session ("DNN Not Supported").
+
+## Analysis tooling
+* `analysis/exp_run_report.py` (2026-09-28): offline per-run report used in docs/NOTES.md — app per stream (fps, loss, bitrate, capture->arrival, frame span) and gNB UL link (CRC failure by MCS/slot/TB size/SINR, OLLA, HARQ completion, RLC t-Reassembly expiries, BSR, PRB use). Reason: the 4-UE/5-UE diagnosis needed a time-proximity sched_ul<->ul_crc join and cross-layer alignment that verify_run.py (completeness only) does not do. Experimental (exp_ prefix); reads results, writes nothing.
+* `analysis/exp_ran_audit.py` (2026-09-28): RAN-side audit per run (slot occupancy, grants/fairness, scheduling latency, reception stability, control channels, anomalies, RAN-internal delay, capacity). Reason: deciding whether the testbed RAN can be used as-is needed all gNB traces cross-read at once. Experimental; reads only.
+* `docs/RAN_CONFIG.md` (2026-09-28): the gNB profile explained value by value with the measurement behind each change and the known limits; README carries the summary. `run_sender.sh --start-at` and the `clock*.txt` records exist so multi-UE runs start together and cross-host timestamps carry their sync accuracy.

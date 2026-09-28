@@ -30,6 +30,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[gnb_core] run dir: $RD  (results/CURRENT -> $(basename "$RD"))"
+# ---- ADDED: clock-sync record (chrony state of the gNB PC; see docs/SETUP.md "Clock sync") ----
+{ date -u +"start_utc=%Y-%m-%dT%H:%M:%S.%NZ"; chronyc tracking 2>/dev/null || echo "chrony: not available"; } > "$RD/gnb/clock.txt"
+# ---- END ADDED ----------------
 scripts/run/start_core.sh
 nohup "$PY" ran/gnb/metrics_json_client.py --out "$RD/gnb/gnb_metrics.jsonl" > "$RD/gnb/metrics_json_client.log" 2>&1 &
 METRICS_PID=$!

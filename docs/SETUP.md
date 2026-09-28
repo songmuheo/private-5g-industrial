@@ -6,8 +6,8 @@ video_sender                                          results/<run>/gnb/        
 results/<run>/app/ (tx-*)                                                                               results/<run>/app/ (rx-*)
 ```
 
-All hosts: `git clone --recurse-submodules --shallow-submodules <repo>`; sync wall clocks with chrony
-against one server (cross-host latencies use `*_wall_ns`; record `chronyc tracking` with each run).
+All hosts: `git clone --recurse-submodules --shallow-submodules <repo>`. Clock sync and synchronised
+starts: see "Clock sync and synchronised start" below.
 
 ## Quick path: three scripts, one per terminal / machine
 
@@ -74,7 +74,12 @@ docker logs p5g_open5gs > $RD/core/open5gs.log
 Options: `P5G_GNB_PCAP=1 scripts/run/run_gnb.sh ...` also writes stock MAC / NGAP / N3 GTP-U pcaps
 (extra CPU/disk load on the gNB host, off by default). `P5G_GNB_TRACE_FLUSH_MS` (default 500).
 Profile: `ran/gnb/configs/gnb_b210_n78_tdd_20mhz.yml` (from srsRAN's `gnb_rf_b200_tdd_n78_20mhz.yml`;
-gains / `clock: external` per hardware).
+every non-default value and its reason in docs/RAN_CONFIG.md).
+
+**Antennas (B210):** one on RF A `TX/RX` (DL transmit) and one on RF A `RX2` (UL receive); RF B unused.
+Do not use one antenna on `TX/RX` with `tx_mode: same-port`: the ATR switching makes the PUSCH after
+every DL transmission fail (docs/RAN_CONFIG.md). Keep every phone >= 1-2 m from the RX2 antenna so the
+received UL powers stay within ~15 dB of each other (near-far).
 
 ## Internet host (receiver + signaling relay)
 
@@ -133,6 +138,54 @@ stock 300 kbps start -> 16 frames dropped by the encoder, mean QP 34, 620 kbps e
 `auto` (900 kbps) -> 2 frames dropped, mean QP 24, 1.37 Mbps encoded; both converge to QP 13 / 2.4 Mbps by 8 s.
 For a bandwidth-limited uplink also set `--max-bitrate-kbps` below the measured UL capacity
 (`gnb_metrics.jsonl` ul_brate, `gnb_sched_ul.csv` tbs_bytes) so `auto`'s cap follows the link, not the table.
+
+## Clock sync and synchronised start
+
+Cross-host columns (`*_wall_ns`, `abs_capture_ntp_ms`) are only comparable to the accuracy of the hosts'
+clock sync. chrony over a LAN/Wi-Fi path gives a few ms (tens of us on wired LAN); over the 5G link
+itself the UL/DL delay asymmetry biases the offset by up to ~(UL-DL)/2, i.e. 5-20 ms here, so use the
+lab LAN / Wi-Fi for NTP and the phone only for the experiment traffic.
+
+gNB PC = NTP server for the lab (it has the fixed LAN address and serves the UE subnet too):
+
+```bash
+sudo apt install -y chrony
+sudo tee /etc/chrony/conf.d/p5g-server.conf >/dev/null <<'CONF'
+allow 10.45.0.0/16        # UE laptops via the 5G path (fallback)
+allow 163.152.193.0/24    # lab LAN / Wi-Fi (preferred path)
+local stratum 8           # keep serving if the upstream is unreachable
+CONF
+sudo systemctl restart chrony && chronyc tracking
+```
+
+UE laptop (client; a second interface on the lab Wi-Fi/LAN is preferred, the phone stays the default route):
+
+```bash
+sudo apt install -y chrony
+sudo tee /etc/chrony/conf.d/p5g-client.conf >/dev/null <<'CONF'
+server 163.152.193.99 iburst minpoll 3 maxpoll 5 prefer   # gNB PC over LAN/Wi-Fi
+server 10.53.1.1 iburst minpoll 4 maxpoll 6               # gNB PC over the 5G path (fallback)
+makestep 1 3
+CONF
+sudo systemctl restart chrony; sleep 30; chronyc tracking; chronyc sources -v
+```
+
+`chronyc tracking` "System time" is the residual offset; wait until it is < 1 ms (LAN) before a run. The
+run scripts record `chronyc tracking` at start (`gnb/clock.txt`, `app/clock-<stream>.txt`).
+
+Synchronised start: type the same absolute time on every laptop, a minute ahead:
+
+```bash
+./run_sender.sh 10.53.1.1 --to recv0 --stream-id cam0 --start-at 18:30:00     # laptop 1
+./run_sender.sh 10.53.1.1 --to recv1 --stream-id cam1 --start-at 18:30:00     # laptop 2 ... 5
+```
+
+Each script waits until that second (sub-10 ms alignment once chrony reports < 1 ms), then starts
+video_sender; the actual start instant is logged in `app/clock-<stream>.txt`. Alternative without typing on
+five machines: from the gNB PC, `for h in $LAPTOPS; do ssh $h "cd private-5g-industrial && ./run_sender.sh
+10.53.1.1 --to recvK --stream-id camK --start-at $T" & done` (needs SSH access to the laptops over the
+LAN). An in-band barrier through the signaling relay (start on "N senders registered") would need a
+change in `apps/signaling` + `video_sender`; not implemented.
 
 ## Teardown
 
