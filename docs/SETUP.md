@@ -14,7 +14,7 @@ starts: see "Clock sync and synchronised start" below.
 ```bash
 ./run_gnb_core.sh [label]       # gNB PC, terminal 1: core + gNB (foreground) + JSON metrics -> results/<ts>-<label>/{gnb,core}
 ./run_receiver.sh [-n N]        # gNB PC (or internet host), terminal 2: relay :8765 + N video_receivers (recv0..) -> same run's app/ (via results/CURRENT)
-./run_sender.sh 10.53.1.1       # UE laptop, after the phone attached: video_sender -> results/<ts>-sender-<stream>/app
+./run_sender.sh 10.53.1.1       # UE laptop, after the phone attached: video_sender (Kendo view K for camK, 720p30, 300 s) -> results/<ts>-sender-<stream>/app
 ```
 
 Each script owns its run directory, so nothing depends on shell variables shared between terminals
@@ -96,7 +96,21 @@ STUN server and pass it to both sides).
 ## UE laptop (sender, USB-tethered to a Pixel registered on the cell)
 
 ```bash
-video/prepare_test_sequence.sh crowd_run 1280 720        # once: raw I420 content into video/assets/
+# once per laptop: raw I420 content into video/assets/ (git-ignored). Standard content = Nagoya "Kendo" multi-view
+# (7 synchronized cameras of one scene): laptop camK plays kendo_viewK (1280x720 30 fps, 10 s looped, 415 MB).
+# run_sender.sh maps --stream-id camK to kendo_viewK automatically; fallbacks: fade_walk > crowd_run > FourPeople > pattern.
+video/fetch_asset.sh                                      # all six views (2.5 GB) from the gNB PC over the lab LAN (rsync/scp), ~1-2 min
+video/fetch_asset.sh --cam 3                              # only view 3 (the laptop that runs --stream-id cam3)
+video/prepare_kendo.sh "0 1 2 3 4 5"                      # or: download the Kendo zip from Nagoya Univ. (1.67 GB) and transcode yourself;
+                                                          #     byte-identical to the copies (sha256 checked)
+video/fetch_asset.sh fade_walk_1280x720_30fps_300s_i420.yuv   # optional: 300 s continuous footage (12.4 GB) for no-loop runs
+video/prepare_fade_walk.sh                                # or: download the same CC-BY clip from YouTube (yt-dlp, ~270 MB) and convert; result is
+                                                          #     equivalent but not bit-identical to the copy -> use one method on all laptops.
+                                                          #     As of 2026-09-28 YouTube 403s clients without a PO token (see the script header);
+                                                          #     fetch_asset.sh is the reliable path.
+video/fetch_asset.sh --list                               # what the gNB PC has; P5G_ASSET_HOST=user@host to change the source
+video/prepare_test_sequence.sh crowd_run 1280 720        # alternative: download + convert a xiph test sequence (1.5 GB)
+video/prepare_test_sequence.sh --from file.y4m NAME 1280 720   # alternative: convert a local y4m
 build/apps/video_sender --signaling-host <receiver-public-ip> --signaling-port 8765 --session s1 \
     --stream-id cam0 --to recv0 --trace-dir $RD/app \
     --yuv video/assets/crowd_run_1280x720_30fps_i420.yuv --width 1280 --height 720 --fps 30 \

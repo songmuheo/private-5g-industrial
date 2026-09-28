@@ -12,8 +12,12 @@
 #                   T on every laptop to start all senders together; needs the laptops' clocks synced (chrony,
 #                   docs/SETUP.md "Clock sync"). The wait and the actual start time are printed and logged.
 #
-# Defaults for a fixed-resolution experiment: H264 1280x720@30, --degradation maintain_resolution,
-# --start-bitrate-kbps auto (derived from the resolution, logged), 60 s. Traces -> results/<ts>-sender-<stream>/app
+# Defaults for a fixed-resolution experiment: H264 1280x720@30 from video/assets/kendo_view<K>_1280x720_30.yuv for
+# --stream-id cam<K> (Nagoya "Kendo" multi-view: five laptops = five real camera angles of one scene, 10 s looped;
+# get it with video/fetch_asset.sh), else the first of fade_walk / crowd_run / FourPeople, else the synthetic pattern
+# with a loud warning,
+# --degradation maintain_resolution, --start-bitrate-kbps auto (= 900 kbps for 720p H264, logged), 300 s.
+# Traces -> results/<ts>-sender-<stream>/app
 # (<stream>-tx-*.csv, -tx-stats.jsonl, sender-<stream>.log). Copy that app/ next to the receiver's for `make verify`.
 #
 # Binary: $P5G_SENDER_BIN, else build/apps/video_sender under this repo, else ./video_sender next to
@@ -55,7 +59,28 @@ if [ -n "$START_AT" ]; then
   echo "[sender] started at $(date +%H:%M:%S.%N) (target $START_AT)" | tee -a "$RD/app/clock-$STREAM.txt"
 fi
 # ---- END ADDED ----------------
+# ---- EDITED: real test sequence and 300 s by default (were: synthetic pattern, 60 s) ----
+# ===================== ORIGINAL (preserved) =====================
+# "$BIN" --signaling-host "$HOST" --signaling-port 8765 --trace-dir "$RD/app" \
+#        --codec H264 --width 1280 --height 720 --fps 30 \
+#        --degradation maintain_resolution --start-bitrate-kbps auto --duration 60 "$@" 2>&1 | (trap '' INT; exec tee "$RD/app/sender-$STREAM.log")
+# ===============================================================
+# Default source: the first of these present in video/assets/ (all 1280x720 30 fps I420; video_sender loops them):
+#   fade_walk_..._300s (fetch_asset.sh copy from the gNB PC) > fade_walk-web_..._300s (prepare_fade_walk.sh, from
+#   YouTube) > crowd_run (10 s, prepare_test_sequence.sh) > FourPeople (10 s). Explicit --yuv wins.
+#   Multi-camera content first: --stream-id camK -> video/assets/kendo_viewK_1280x720_30.yuv if present (Nagoya
+#   "Kendo", 7 synchronized cameras of one scene; video/prepare_kendo.sh), so five senders play five real angles.
+YUV_ARGS=(); YUV_DEFAULT=""
+K="${STREAM//[!0-9]/}"
+[ -n "$K" ] && [ -f "$ROOT/video/assets/kendo_view${K}_1280x720_30.yuv" ] && YUV_DEFAULT="$ROOT/video/assets/kendo_view${K}_1280x720_30.yuv"
+[ -n "$YUV_DEFAULT" ] || for cand in fade_walk_1280x720_30fps_300s_i420.yuv fade_walk-web_1280x720_30fps_300s_i420.yuv crowd_run_1280x720_30fps_i420.yuv FourPeople_1280x720_30fps_i420.yuv; do
+  [ -f "$ROOT/video/assets/$cand" ] && { YUV_DEFAULT="$ROOT/video/assets/$cand"; break; }
+done
+if printf '%s\n' "$@" | grep -qx -- '--yuv\|--yuv=.*'; then :   # caller chose a source explicitly
+elif [ -n "$YUV_DEFAULT" ]; then YUV_ARGS=(--yuv "$YUV_DEFAULT"); echo "[sender] source: $YUV_DEFAULT"
+else echo "[sender] WARNING: no .yuv in $ROOT/video/assets -> synthetic pattern (run video/fetch_asset.sh on this laptop)" | tee -a "$RD/app/clock-$STREAM.txt" >&2; fi
 "$BIN" --signaling-host "$HOST" --signaling-port 8765 --trace-dir "$RD/app" \
-       --codec H264 --width 1280 --height 720 --fps 30 \
-       --degradation maintain_resolution --start-bitrate-kbps auto --duration 60 "$@" 2>&1 | (trap '' INT; exec tee "$RD/app/sender-$STREAM.log")
+       --codec H264 --width 1280 --height 720 --fps 30 "${YUV_ARGS[@]}" \
+       --degradation maintain_resolution --start-bitrate-kbps auto --duration 300 "$@" 2>&1 | (trap '' INT; exec tee "$RD/app/sender-$STREAM.log")
+# ---------------------------------------------------------------------------------------
 echo "[sender] done. traces: $RD/app"

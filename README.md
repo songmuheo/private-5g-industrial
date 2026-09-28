@@ -30,7 +30,7 @@ Docs: [docs/SETUP.md](docs/SETUP.md) (per-machine commands, clock sync, synchron
 ```bash
 ./run_gnb_core.sh [label]                    # gNB PC: Open5GS + srsRAN gNB (tracer) + JSON metrics -> results/<ts>-<label>/{gnb,core}
 ./run_receiver.sh -n 5                       # gNB PC: signaling relay + 5 video_receivers (recv0..4)  -> results/CURRENT/app (rx-*)
-./run_sender.sh 10.53.1.1 --to recv0 --stream-id cam0 [--start-at 18:30:00]   # each UE laptop -> results/<ts>-sender-cam0/app (tx-*)
+./run_sender.sh 10.53.1.1 --to recv0 --stream-id cam0 [--start-at 18:30:00]   # each UE laptop: Kendo view K for camK, 720p30, 300 s -> results/<ts>-sender-cam0/app (tx-*)
 ```
 
 `--start-at` makes every laptop start at the same wall-clock second (clocks synced with chrony, see
@@ -97,6 +97,6 @@ run_gnb_core.sh run_receiver.sh run_sender.sh   (repo root: one per terminal / m
 scripts/run/    ota_restart.sh (gNB PC one-shot, background) start_core.sh core_add_dnn.sh run_gnb.sh run_ue_sim.sh run_local_e2e.sh (last two: code test)
 analysis/       verify_run.py trace_io.py exp_run_report.py (app + gNB report) exp_ran_audit.py (RAN audit)
 docker/         libwebrtc build toolchain image
-video/          test-sequence download/convert
+video/          fetch_asset.sh (copy assets from the gNB PC), prepare_kendo.sh (Nagoya multi-view Kendo, one view per camera), prepare_fade_walk.sh (YouTube CC-BY clip via yt-dlp), prepare_test_sequence.sh (xiph sequences)
 third_party/    srsRAN_Project, srsRAN_4G (submodules, stock), libwebrtc (fetched; pinned by libwebrtc.lock)
 ```

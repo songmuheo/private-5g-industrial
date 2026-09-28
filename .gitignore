@@ -19,3 +19,5 @@ __pycache__/
 # SIM secrets (Ki/OPc) — keep local; add deliberately if you want them in the repo
 # real subscriber keys (Ki/OPc) — local only; copy subscriber_db.example.csv to subscriber_db.csv and fill in
 /ran/core/subscriber_db.csv
+# downloaded originals (Kendo zip, yt-dlp sources)
+/video/sources/
