@@ -1,4 +1,4 @@
-# plot_run.py <results/run> [bitrate|delay|all]  — graphs of one run into <run>/graphs/*.png
+# plot_run.py <results/run> [bitrate|fps|delay|all]  — graphs of one run into <run>/graphs/*.png
 #
 #   bitrate  : per UE, the bitrate the encoder is actually told to produce (tx-encoder-rates target_bps =
 #              VideoEncoder::SetRates target_bitrate sum, solid) over GoogCC's estimated bandwidth (tx-cc target_bps =
@@ -13,6 +13,11 @@
 #                  unless pushback); tx-cc stable_target_bps = LinkCapacityTracker estimate (slow-tracking capacity used
 #                  for padding/allocator hints, not what the encoder gets) -> not drawn.
 #              The 2500 kbps encoder cap is drawn as a thin reference line when any estimate exceeds it.
+#   fps      : per UE, frames per 1 s wall-clock bin at three pipeline points: captured and handed to the encoder
+#              (tx-frames to_encoder=1, thin dotted), encoder output (tx-encoded, solid) and delivered to the receiver
+#              app after decode (rx-decoded, dashed). A gap between dotted and solid = encoder/VideoStreamEncoder frame
+#              drops (bitrate-driven with MAINTAIN_RESOLUTION); a gap between solid and dashed = frames lost or not yet
+#              delivered in that second (network). Bins are on the receiver's wall clock (chrony-synced, see delay).
 #   delay    : top = per-packet one-way delay (rx log_wall_ns - tx log_wall_ns, RTP joined by (ssrc, seq),
 #              sequence-wrap aware); bottom = per-frame delay: capture -> last packet arrived (network) and
 #              capture -> delivered to the app (network + jitter buffer + decode). Absolute values are valid
@@ -107,5 +112,25 @@ def plot_delay():
     fig.text(0.01, 0.005, 'clocks: ' + '; '.join(notes), fontsize=7, color=INK2)
     fig.tight_layout(); fig.savefig(f'{OUT}/delay.png'); plt.close(fig); print(f'{OUT}/delay.png')
 
+def plot_fps():
+    fig, ax = plt.subplots(figsize=(11, 4.2), dpi=130)
+    def per_sec(ts):
+        c = collections.Counter(int(tw(t)//1) for t in ts)
+        lo, hi = (min(c), max(c)) if c else (0, 0)
+        return [(k + 0.5, c.get(k, 0)) for k in range(lo, hi + 1)]
+    for cam in cams:
+        A = f'{RD}/senders/{cam}/app'; col = PALETTE.get(cam, INK2)
+        cap = per_sec(int(r['capture_wall_ns']) for r in rows(f'{A}/{cam}-tx-frames.csv') if r['to_encoder'] == '1')
+        enc = per_sec(int(r['encode_done_wall_ns']) for r in rows(f'{A}/{cam}-tx-encoded.csv'))
+        dec = per_sec(int(r['decode_done_wall_ns']) for r in rows(f'{RD}/app/{cam}-rx-decoded.csv'))
+        if cap: ax.plot(*zip(*cap), color=col, lw=0.8, ls=':', alpha=0.9, label=f'{cam} captured')
+        if enc: ax.plot(*zip(*enc), color=col, lw=1.6, label=f'{cam} encoded')
+        if dec: ax.plot(*zip(*dec), color=col, lw=1.0, ls='--', alpha=0.9, label=f'{cam} delivered (decoded)')
+    ax.set_xlabel('time since first received frame (s)'); ax.set_ylabel('frames per second'); ax.set_ylim(bottom=0)
+    ax.set_title(f'Frame rate per UE: captured / encoded / delivered — {run_name}', loc='left', color=INK)
+    ax.legend(ncol=len(cams), fontsize=8, loc='upper center', bbox_to_anchor=(0.5, -0.18))
+    fig.tight_layout(); fig.savefig(f'{OUT}/fps.png'); plt.close(fig); print(f'{OUT}/fps.png')
+
 if WHAT in ('bitrate', 'all'): plot_bitrate()
+if WHAT in ('fps', 'all'): plot_fps()
 if WHAT in ('delay', 'all'): plot_delay()
