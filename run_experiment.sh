@@ -14,8 +14,8 @@
 # 5. When the senders end, pulls their traces (results/*-sender-camK/app) into <run>/senders/camK/, stops the
 #    receivers (traces flush), runs verify_run.py and exp_run_report.py.
 #
-# Scenario (JSON): see experiments/5ue-720p30.json. "hosts.mode" = "ssh" (laptops; user@ip_pattern with {K})
-# or "local" (smoke test on this PC: senders run here against the local relay).
+# Scenario (JSON): see experiments/5ue-720p30.json. "hosts.mode" = "ssh" (laptops; user@ip_pattern with {K},
+# repo dir under the home) or "local" (smoke test on this PC). Per camera, "host" and "repo" override the pattern.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; cd "$ROOT"
 SCEN="${1:?usage: run_experiment.sh experiments/<scenario>.json}"
@@ -34,6 +34,8 @@ sy = s.get('sync', {}); print(f"SYNC_MODE={q(str(sy.get('mode', 'auto')))}; SYNC
 r = s.get('receiver', {}); print(f"RECV_EXTRA={q(' '.join(r.get('extra_args', [])))}")
 cams = s['cams']; print(f"CAMS=({' '.join(q(c) for c in cams)})")
 for c, v in cams.items():
+    if v.get('host'): print(f"CAM_HOST_{c}={q(v['host'])}")
+    if v.get('repo'): print(f"CAM_REPO_{c}={q(v['repo'])}")
     args = [f"--width {int(v.get('width',1280))}", f"--height {int(v.get('height',720))}", f"--fps {int(v.get('fps',30))}",
             f"--start-bitrate-kbps {v.get('start_kbps','auto')}"]
     if int(v.get('max_kbps', 0)) > 0: args.append(f"--max-bitrate-kbps {int(v['max_kbps'])}")
@@ -45,11 +47,12 @@ PYEOF
 )"
 N=${#CAMS[@]}
 camK() { echo "${1//[!0-9]/}"; }
-host_of() { echo "${HOST_PATTERN//\{K\}/$(camK "$1")}"; }
+host_of() { local v="CAM_HOST_$1"; echo "${!v:-${HOST_PATTERN//\{K\}/$(camK "$1")}}"; }      # cams.camK.host overrides the pattern
+repo_of() { local v="CAM_REPO_$1"; echo "${!v:-$HOST_REPO}"; }                                 # cams.camK.repo overrides hosts.repo
 # run a command on a camera host (ssh) or locally
 on_host() { local cam="$1"; shift
   if [ "$HOST_MODE" = "local" ]; then bash -lc "cd '$ROOT' && $*"
-  else ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST_USER@$(host_of "$cam")" "cd ~/$HOST_REPO && $*"; fi; }
+  else ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST_USER@$(host_of "$cam")" "cd ~/$(repo_of "$cam") && $*"; fi; }
 
 # ---- run directory ----
 if [ "$REQUIRE_GNB" = 1 ]; then pgrep -x gnb >/dev/null || { echo "[exp] gNB is not running: start ./run_gnb_core.sh first (or set require_gnb=false for a local smoke test)" >&2; exit 1; }; fi
@@ -112,7 +115,7 @@ for c in "${CAMS[@]}"; do
     src="$(ls -td results/*-sender-$c 2>/dev/null | head -1)"; [ -n "$src" ] && cp -r "$src/app" "$RD/senders/$c/" && log "collected $c from $src"
   else
     remote="$(on_host "$c" "ls -td results/*-sender-$c 2>/dev/null | head -1" 2>/dev/null | tr -d '\r')"
-    if [ -n "$remote" ]; then rsync -aq "$HOST_USER@$(host_of "$c"):~/$HOST_REPO/$remote/app/" "$RD/senders/$c/app/" && log "collected $c from $(host_of "$c"):$remote" || log "collect $c FAILED"; fi
+    if [ -n "$remote" ]; then rsync -aq "$HOST_USER@$(host_of "$c"):~/$(repo_of "$c")/$remote/app/" "$RD/senders/$c/app/" && log "collected $c from $(host_of "$c"):$remote" || log "collect $c FAILED"; fi
   fi
 done
 
