@@ -1,12 +1,18 @@
 # plot_run.py <results/run> [bitrate|delay|all]  — graphs of one run into <run>/graphs/*.png
 #
-#   bitrate  : per UE, GoogCC target bitrate (tx-cc target_bps, solid line) drawn over the bandwidth estimate
-#              (tx-events bwe_delay a=bps, wide translucent band) and the stable target (tx-cc stable_target_bps,
-#              dotted). tx-cc's est_bandwidth_bps is deprecated in M120 (always -1), so the estimate is taken from
-#              the delay-based estimator event. The bwe_loss event is not drawn: in this build LossBasedBweV2 is
-#              bounded by the delay-based estimate and its logged value equals bwe_delay (checked on 20260929-192247:
-#              1 of 725 rows differed), so it would only overdraw the same line. Where target == estimate the band
-#              simply haloes the line; the band shows through where they differ (probe ramps, backoff lag).
+#   bitrate  : per UE, the bitrate the encoder is actually told to produce (tx-encoder-rates target_bps =
+#              VideoEncoder::SetRates target_bitrate sum, solid) over GoogCC's estimated bandwidth (tx-cc target_bps =
+#              TargetTransferRate::target_rate, dashed). Verified against libwebrtc M120 source:
+#                - tx-cc target_bps  = GoogCcNetworkController::MaybeTriggerOnNetworkChanged pushback_target_rate,
+#                  i.e. SendSideBandwidthEstimation::current_target_ (delay-based limit ∧ LossBasedBweV2 ∧ max) after
+#                  congestion-window pushback -> the final GoogCC estimate handed to BitrateAllocator.
+#                - encoder target    = that estimate × payload/(payload+RTP/UDP/IP overhead) (RtpVideoSender::
+#                  OnBitrateUpdated, ≈0.955 here) then min(encoder_max_bitrate) in VideoSendStreamImpl::OnBitrateUpdated
+#                  (2500 kbps for 720p from the SDP/stream config) -> RateControlParameters::target_bitrate.
+#                - tx-events bwe_delay a = DelayBasedBwe result; bwe_loss a = current_target_ (equal to tx-cc target
+#                  unless pushback); tx-cc stable_target_bps = LinkCapacityTracker estimate (slow-tracking capacity used
+#                  for padding/allocator hints, not what the encoder gets) -> not drawn.
+#              The 2500 kbps encoder cap is drawn as a thin reference line when any estimate exceeds it.
 #   delay    : top = per-packet one-way delay (rx log_wall_ns - tx log_wall_ns, RTP joined by (ssrc, seq),
 #              sequence-wrap aware); bottom = per-frame delay: capture -> last packet arrived (network) and
 #              capture -> delivered to the app (network + jitter buffer + decode). Absolute values are valid
@@ -43,18 +49,18 @@ def sync_ms(cam):
 run_name = os.path.basename(RD)
 
 def plot_bitrate():
-    fig, ax = plt.subplots(figsize=(11, 4.2), dpi=130)
+    fig, ax = plt.subplots(figsize=(11, 4.2), dpi=130); cap = peak = 0.0
     for cam in cams:
         A = f'{RD}/senders/{cam}/app'; col = PALETTE.get(cam, INK2)
-        ccr = rows(f'{A}/{cam}-tx-cc.csv')
-        cc = [(tw(int(r['log_wall_ns'])), int(r['target_bps'])/1e6) for r in ccr if r['target_bps'] not in ('-1', '')]
-        st = [(tw(int(r['log_wall_ns'])), int(r['stable_target_bps'])/1e6) for r in ccr if r['stable_target_bps'] not in ('-1', '')]
-        dl = [(tw(int(r['log_wall_ns'])), int(r['a'])/1e6) for r in rows(f'{A}/{cam}-tx-events.csv') if r['event'] == 'bwe_delay' and r['a'] not in ('-1', '')]
-        if dl: ax.step(*zip(*dl), where='post', color=col, lw=4.5, alpha=0.28, solid_capstyle='butt', label=f'{cam} bandwidth estimate (delay-based)')
-        if st: ax.step(*zip(*st), where='post', color=col, lw=1.0, ls=':', label=f'{cam} stable target')
-        if cc: ax.step(*zip(*cc), where='post', color=col, lw=1.4, label=f'{cam} target')
+        est = [(tw(int(r['log_wall_ns'])), int(r['target_bps'])/1e6) for r in rows(f'{A}/{cam}-tx-cc.csv') if r['target_bps'] not in ('-1', '')]
+        enc = [(tw(int(r['set_wall_ns'])), int(r['target_bps'])/1e6) for r in rows(f'{A}/{cam}-tx-encoder-rates.csv')]
+        if est: ax.step(*zip(*est), where='post', color=col, lw=1.0, ls='--', alpha=0.9, label=f'{cam} GoogCC estimated bandwidth')
+        if enc: ax.step(*zip(*enc), where='post', color=col, lw=1.8, label=f'{cam} encoder target')
+        cap = max(cap, max(v for _, v in enc)) if enc else cap
+        peak = max(peak, max(v for _, v in est)) if est else peak
+    if peak > cap: ax.axhline(cap, color=INK2, lw=0.7, ls=(0, (2, 3))); ax.text(0.2, cap, f'encoder max {cap*1000:.0f} kbps', fontsize=7, color=INK2, va='bottom')
     ax.set_xlabel('time since first received frame (s)'); ax.set_ylabel('bitrate (Mbps)'); ax.set_ylim(bottom=0)
-    ax.set_title(f'GoogCC target and estimated bitrate per UE — {run_name}', loc='left', color=INK)
+    ax.set_title(f'Encoder target vs GoogCC estimated bandwidth per UE — {run_name}', loc='left', color=INK)
     ax.legend(ncol=len(cams), fontsize=8, loc='upper center', bbox_to_anchor=(0.5, -0.18))
     fig.tight_layout(); fig.savefig(f'{OUT}/bitrate.png'); plt.close(fig); print(f'{OUT}/bitrate.png')
 
