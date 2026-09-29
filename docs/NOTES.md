@@ -506,3 +506,22 @@ Hence 2.5 Mbps flat (libwebrtc cap), 30 fps, 0 freezes: a gigabit-Ethernet resul
   writes <run>/INVALID when A2 finds a stream off the 5G path. Laptop Wi-Fi should be off during runs as well.
 * verify_run.py right after the run reported 11 failures because the gNB trace files had no footers yet (the gNB
   was still running); re-run after stopping the gNB it is PASS. The orchestrator now says so.
+
+## 2026-09-29 — second orchestrated 2-UE run (results/20260929-172846-2ue): VALID, first clean 5-minute run
+Firewall fixed; A2: cam0 selected pair 10.53.1.1, gNB PDCP UL RTP 100 % to 10.53.1.1 -> media over the 5G link.
+Senders started 0.6 ms apart (chrony 36 us on both laptops). verify PASS after the gNB was stopped.
+* cam0 (phone .15): 300 s, 29.6 fps, 1 freeze (0.2 s), 0 loss, jitter buffer 98 ms avg, 1.4-2.5 Mbps
+  (GoogCC 1.5-2.4 Mbps while two UEs shared the cell, 2.5 Mbps = libwebrtc cap once alone).
+* cam1 (phone .11): 2.5 Mbps (cap) and 30 fps for 80 s, then its link degraded (SINR 27-29 -> 21 dB, MCS 23 -> 13,
+  BSR to the top bucket, GoogCC 4.1 -> 1.2 Mbps), and at t=142 s the phone stopped answering: DL HARQ-ACK DTX
+  99 %, RLF "100 consecutive HARQ-ACK KOs" at 17:32:13, release 17:32:17; no CSI/UL/DL afterwards. Same phone
+  (.11) as the 24.6 s dropout on 2026-09-28. The laptop kept sending STUN keepalives; ICE failed at ~139 s.
+  HYPOTHESIS: phone-side (thermal throttling under sustained max-power UL, USB tether power state, or cable);
+  swap the phone / keep it cool and charging, and watch its SINR trend in the next run.
+* cam0 dipped to 0.5-1.0 Mbps at t=140-165 s (13 GoogCC overuse events at t=140) exactly while the gNB ran the
+  4 s RLF timer on ue1 and its UL grants fell to ~1000/10 s (from ~1900): HYPOTHESIS the scheduler kept
+  allocating the dead UE. Recovered to the cap within 30 s of the release.
+* RAN: UL CRC failure 10.0 % / 8.7 % (OLLA target 10 %), MCS 19-24 median, OLLA -8..-9 dB (not saturated),
+  SINR 24-29 dB; large single-UE allocations at MCS 27 fail 25-36 % (the 256QAM ceiling, handled by OLLA).
+  grant->CRC 4.1 ms flat, 0 RF events. Aggregate 4.0-4.9 Mbps with two UEs: the highest so far.
+* exp_run_report.py now spans the whole run (10 s bins beyond 90 s).
