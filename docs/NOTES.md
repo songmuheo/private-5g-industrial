@@ -543,3 +543,20 @@ and release at 19:00:04; it re-attached 47 s later. cam0 (.15) ran 300 s but its
   phones 1-2 m from the antennas in line of sight, then check the gNB table before running: CQI >= 11 and
   PHR >= 15 dB for every UE. run_experiment.sh now prints this link check (CQI / PUSCH SNR / RSRP / PHR per
   UE) in preflight and warns on PHR <= 3 dB or CQI < 9.
+
+## 2026-09-29 — 2-UE run with antennas back on RF A (results/20260929-191234-2ue): link fixed, GoogCC dynamics remain
+Cause of the previous two runs confirmed: the antennas had been moved to RF B while srsRAN's 1x1 cell drives
+channel 0 = RF A (UHD B210 subdev order A:A, A:B); the gNB was transmitting into an open TX/RX connector and
+receiving on an open RX2. Back on RF A: CQI 14-15 (was 4-7), PHR 15-24 dB (was 0), PUSCH SNR 25-31 dB,
+0 RLF, both streams 300 s over the 5G link (A2 OK), verify PASS. The slot-14 excess shrank to 10.8 % vs 7.5-7.9 %
+in the other UL slots and the odd/even-frame split vanished (21 % / 14 % before).
+* cam1 (.11): 29.7 fps, 3 freezes (0.7 s), but bitrate 0.7-1.3 Mbps most of the time with bursts to 2.2-2.6 Mbps
+  at t=140-160, 250, 290 s. cam0 (.15): PUSCH SNR 14-18 dB for the first 120 s (MCS 6-11; placement) then 27-30;
+  GoogCC 340-450 kbps -> 16 fps, 17 freezes in that phase, 1-3.6 Mbps afterwards.
+* RAN is not the bottleneck any more: UL PRB utilisation 13-45 %, HARQ completion p99 12-27 ms, MAC->PDCP hold 0,
+  RLC t-Reassembly expiries 0-19/10 s except 32-42 at t=260 s.
+* What remains is GoogCC on a shared UL: both senders probe up together (t=150-170, 250-260, 290), BSR spikes
+  to 55-150 KB (0.2-0.5 s of data), tx->rx one-way delay max 220-750 ms, 8-21 overuse events per 10 s, both
+  back off, ~90 s cycles; in between, HARQ jitter (rel-OWD p90 30-50 ms at p50 15-19 ms) still triggers 2-10
+  overuse events per 10 s and keeps the estimate well below the 2.5 Mbps cap. This is the phenomenon the
+  testbed was built to measure; the RAN and orchestration are now good enough to study it.
