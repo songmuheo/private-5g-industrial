@@ -155,37 +155,34 @@ For a bandwidth-limited uplink also set `--max-bitrate-kbps` below the measured 
 
 ## Clock sync and synchronised start
 
-Cross-host columns (`*_wall_ns`, `abs_capture_ntp_ms`) are only comparable to the accuracy of the hosts'
-clock sync. chrony over a LAN/Wi-Fi path gives a few ms (tens of us on wired LAN); over the 5G link
-itself the UL/DL delay asymmetry biases the offset by up to ~(UL-DL)/2, i.e. 5-20 ms here, so use the
-lab LAN / Wi-Fi for NTP and the phone only for the experiment traffic.
+Cross-host columns (`*_wall_ns`, `abs_capture_ntp_ms`) are only comparable to the accuracy of the hosts' clock
+sync. Do **not** sync over the 5G link: NTP assumes symmetric delay and our UL is 5-30 ms slower than the DL,
+so the offset would be biased by half of that and would drift with the load. Use a separate wired LAN.
 
-gNB PC = NTP server for the lab (it has the fixed LAN address and serves the UE subnet too):
-
-```bash
-sudo apt install -y chrony
-sudo tee /etc/chrony/conf.d/p5g-server.conf >/dev/null <<'CONF'
-allow 10.45.0.0/16        # UE laptops via the 5G path (fallback)
-allow 163.152.193.0/24    # lab LAN / Wi-Fi (preferred path)
-local stratum 8           # keep serving if the upstream is unreachable
-CONF
-sudo systemctl restart chrony && chronyc tracking
-```
-
-UE laptop (client; a second interface on the lab Wi-Fi/LAN is preferred, the phone stays the default route):
+**Sync LAN (recommended, sub-ms):** an unmanaged gigabit switch (e.g. ipTIME H6008) with the gNB PC's spare
+onboard port `enp4s0` and each laptop's wired port (onboard RJ45 or a USB Ethernet adapter). No router, no DHCP:
+static addresses 192.168.77.1 (gNB PC) and 192.168.77.1K (laptop camK). chrony over such a LAN gives tens to a
+few hundred us (software timestamps; none of our NICs has a PTP hardware clock). Wi-Fi to the same switch/AP
+works too but expect 0.5-2 ms.
 
 ```bash
-sudo apt install -y chrony
-sudo tee /etc/chrony/conf.d/p5g-client.conf >/dev/null <<'CONF'
-server 163.152.193.99 iburst minpoll 3 maxpoll 5 prefer   # gNB PC over LAN/Wi-Fi
-server 10.53.1.1 iburst minpoll 4 maxpoll 6               # gNB PC over the 5G path (fallback)
-makestep 1 3
-CONF
-sudo systemctl restart chrony; sleep 30; chronyc tracking; chronyc sources -v
+# gNB PC (once; re-run after reboot for the firewall part)
+scripts/setup/sync_lan_server.sh                 # enp4s0 = 192.168.77.1/24, chrony server, firewall on that port
+# laptops: nothing separate. run_sender.sh does it at start (P5G_SYNC=auto): the first time it calls
+#   scripts/setup/sync_lan_client.sh <K> (K from --stream-id camK; auto-detects the wired port, 192.168.77.1K,
+#   installs chrony -> gNB PC; asks for sudo once), every time it runs scripts/setup/sync_check.sh and prints GO/NO-GO.
+#   NO-GO aborts only with --start-at. P5G_SYNC_MAX_MS=0.2 tightens the bound on wired; P5G_SYNC=off disables.
 ```
 
-`chronyc tracking` "System time" is the residual offset; wait until it is < 1 ms (LAN) before a run. The
-run scripts record `chronyc tracking` at start (`gnb/clock.txt`, `app/clock-<stream>.txt`).
+Why the firewall: the receiver (libwebrtc) gathers ICE host candidates on every interface of the gNB PC, and
+the laptops can reach the sync-LAN address directly, so ICE would select that low-RTT path and the video would
+leave the 5G link. `sync_lan_server.sh` admits only NTP (UDP 123) and SSH on `enp4s0`. After a run,
+`analysis/exp_run_report.py` section "A2. ICE path" shows the selected candidate pair per stream; it must be
+`10.53.1.1 <- 10.45.x`. The apps have no interface-selection option, so this check is the guarantee.
+
+The laptops' default route must stay on the phone tether (the sync connection is created with
+`ipv4.never-default yes`; `ip route show default` must list only the tether). The run scripts record
+`chronyc tracking` at start (`gnb/clock.txt`, `app/clock-<stream>.txt`), so every run carries its own bound.
 
 Synchronised start: type the same absolute time on every laptop, a minute ahead:
 
@@ -196,10 +193,8 @@ Synchronised start: type the same absolute time on every laptop, a minute ahead:
 
 Each script waits until that second (sub-10 ms alignment once chrony reports < 1 ms), then starts
 video_sender; the actual start instant is logged in `app/clock-<stream>.txt`. Alternative without typing on
-five machines: from the gNB PC, `for h in $LAPTOPS; do ssh $h "cd private-5g-industrial && ./run_sender.sh
-10.53.1.1 --to recvK --stream-id camK --start-at $T" & done` (needs SSH access to the laptops over the
-LAN). An in-band barrier through the signaling relay (start on "N senders registered") would need a
-change in `apps/signaling` + `video_sender`; not implemented.
+five machines: from the gNB PC over the sync LAN, `for K in 0 1 2 3 4; do ssh 192.168.77.1$K "cd
+private-5g-industrial && ./run_sender.sh 10.53.1.1 --to recv$K --stream-id cam$K --start-at $T" & done`.
 
 ## Teardown
 

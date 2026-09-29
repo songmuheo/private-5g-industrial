@@ -49,6 +49,26 @@ for s in streams:
     print(f"   kbps/5s: {[round(kb[i]) for i in range(0,12)]}")
     print(f"   net OWD med/p90 (ms, offset unknown): {[f'{f0(st.median(net[i]))}/{f0(q(net[i],.9))}' for i in range(0,12) if net.get(i)]}")
     print(f"   frame span med/p90/max (ms): {[f'{f0(st.median(span[i]))}/{f0(q(span[i],.9))}/{f0(max(span[i]))}' for i in range(0,12) if span.get(i)]}")
+print("## A2. ICE path per stream: transport.selectedCandidatePairId (rx-stats) + gNB PDCP UL destination (RTP-like rows)")
+pdcp_dst=collections.defaultdict(collections.Counter)
+for r in rows(f'{RD}/gnb/gnb_pdcp_ul.csv'):
+    if r['rtp_like'] in ('1','true','True') and r['src_ip'].startswith('10.45'): pdcp_dst[r['src_ip']][r['dst_ip']]+=1
+s2ip={v:k for k,v in ip2s.items()}
+for s in streams:
+    cands={}; pairs={}; tr=None
+    for line in open(f'{RD}/app/{s}-rx-stats.jsonl'):
+        j=json.loads(line)
+        for x in j['stats']:
+            if x['type'] in ('local-candidate','remote-candidate'): cands[x['id']]=x
+            elif x['type']=='candidate-pair': pairs[x['id']]=x
+            elif x['type']=='transport': tr=x
+    sel=(tr or {}).get('selectedCandidatePairId'); p=pairs.get(sel)
+    if p:
+        l=cands.get(p['localCandidateId'],{}); r=cands.get(p['remoteCandidateId'],{})
+        ip=s2ip.get(s,'?'); dst=pdcp_dst.get(ip,{}); tot=sum(dst.values()) or 1; via5g=100*dst.get(l.get('address',''),0)/tot
+        ok=(l.get('address')=='10.53.1.1' and via5g>90)
+        print(f"  {s}: selected local {l.get('address')}:{l.get('port')}/{l.get('protocol')} <- remote {r.get('candidateType')} :{r.get('port')} (address redacted for prflx), {p.get('bytesReceived',0)/1e6:.2f} MB, RTT {1000*p.get('currentRoundTripTime',0):.0f} ms | gNB PDCP UL RTP from {ip}: {via5g:.0f}% to {l.get('address')} (n={tot}) -> {'OK: media went over the 5G link' if ok else 'WARNING: check path'}")
+    else: print(f"  {s}: no selected candidate pair in stats")
 print("## B. gNB")
 sched=rows(f'{RD}/gnb/gnb_sched_ul.csv'); crc=rows(f'{RD}/gnb/gnb_ul_crc.csv'); pd=rows(f'{RD}/gnb/gnb_pdcp_ul.csv')
 ue2ip=collections.defaultdict(collections.Counter)

@@ -95,6 +95,7 @@ patches/        srsran_gnb/ (tracer header + 6 patches), libwebrtc/ (README: no 
 scripts/build/  build_srsran_gnb.sh build_libwebrtc.sh build_apps.sh
 run_gnb_core.sh run_receiver.sh run_sender.sh   (repo root: one per terminal / machine)
 scripts/run/    ota_restart.sh (gNB PC one-shot, background) start_core.sh core_add_dnn.sh run_gnb.sh run_ue_sim.sh run_local_e2e.sh (last two: code test)
+scripts/setup/  sync_lan_server.sh sync_lan_client.sh sync_check.sh (wired clock-sync LAN: chrony + ICE firewall)
 analysis/       verify_run.py trace_io.py exp_run_report.py (app + gNB report) exp_ran_audit.py (RAN audit)
 docker/         libwebrtc build toolchain image
 video/          fetch_asset.sh (copy assets from the gNB PC), prepare_kendo.sh (Nagoya multi-view Kendo, one view per camera), prepare_fade_walk.sh (YouTube CC-BY clip via yt-dlp), prepare_test_sequence.sh (xiph sequences)

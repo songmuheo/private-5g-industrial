@@ -43,6 +43,26 @@ done
 set -- "${ARGS[@]}"
 # ---- END ADDED ----------------
 STREAM=cam0; prev=""; for a in "$@"; do [ "$prev" = "--stream-id" ] && STREAM="$a"; prev="$a"; done
+# ---- ADDED: clock sync at the start of every run (no separate setup step) ----
+# P5G_SYNC=auto (default): if this laptop is not yet on the sync LAN (no NetworkManager connection "p5g-sync"),
+#   run scripts/setup/sync_lan_client.sh <K> once (auto-detects the wired port on the switch, static
+#   192.168.77.1K, installs/configures chrony -> gNB PC; asks for sudo). Then check chrony: RMS offset must be
+#   <= P5G_SYNC_MAX_MS (default 1 ms). NO-GO only warns, except with --start-at where it aborts (the start
+#   time would be meaningless). P5G_SYNC=off skips all of this (e.g. a laptop without a wired port).
+P5G_SYNC="${P5G_SYNC:-auto}"; P5G_SYNC_MAX_MS="${P5G_SYNC_MAX_MS:-1}"
+if [ "$P5G_SYNC" != "off" ]; then
+  K="${STREAM//[!0-9]/}"
+  if ! nmcli -t -f NAME con show 2>/dev/null | grep -qx p5g-sync; then
+    if [ -n "$K" ]; then echo "[sender] sync LAN not configured on this laptop -> scripts/setup/sync_lan_client.sh $K"; scripts/setup/sync_lan_client.sh "$K" || echo "[sender] WARNING: sync-LAN setup failed; continuing without clock sync" >&2
+    else echo "[sender] WARNING: sync LAN not configured and no camera id in --stream-id $STREAM; skipping clock sync" >&2; fi
+  fi
+  if scripts/setup/sync_check.sh "$P5G_SYNC_MAX_MS" 2>/dev/null | sed 's/^/[sync] /' | grep -E "GO|NO-GO|RMS|rtt"; then :; fi
+  if ! scripts/setup/sync_check.sh "$P5G_SYNC_MAX_MS" >/dev/null 2>&1; then
+    if [ -n "${START_AT:-}" ]; then echo "[sender] clock sync NO-GO (RMS offset > $P5G_SYNC_MAX_MS ms) and --start-at given -> aborting; wait for chrony or set P5G_SYNC=off" >&2; exit 1
+    else echo "[sender] WARNING: clock sync NO-GO (RMS offset > $P5G_SYNC_MAX_MS ms); cross-host timestamps of this run are not trustworthy" >&2; fi
+  fi
+fi
+# ---- END ADDED ----------------
 RD="results/$(date +%Y%m%d-%H%M%S)-sender-$STREAM"
 mkdir -p "$RD/app"
 echo "[sender] route to $HOST: $(ip route get "$HOST" 2>/dev/null | head -1 || echo '(unknown)')"
