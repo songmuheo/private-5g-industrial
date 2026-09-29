@@ -83,6 +83,29 @@ for c in "${CAMS[@]}"; do
   log "preflight $c @ $( [ "$HOST_MODE" = local ] && echo local || host_of "$c"): ${STATUS[$c]}"
 done
 log "gNB PC HEAD $(git rev-parse --short HEAD)"
+# ---- radio link check from the live gNB table (last ~10 s of gnb_stdout.log): CQI and power headroom per UE ----
+# PHR <= 3 dB means the phone is already at maximum transmit power (no margin: RLF on any extra loss);
+# CQI < 9 means the DL is marginal (feedback path, UE out-of-sync risk). Both were seen on 2026-09-29
+# (PHR 0 dB, CQI 5-7) after re-cabling, versus 23 dB / 13-15 the day before with identical gNB settings.
+if [ "$HOST_MODE" = "ssh" ] && [ -f "$RD/gnb/gnb_stdout.log" ]; then
+  "$PY" - "$RD/gnb/gnb_stdout.log" <<'PYEOF' | tee -a "$LOG"
+import re, sys, collections, statistics as st
+rows = collections.defaultdict(list)
+for line in open(sys.argv[1]).readlines()[-400:]:
+    m = re.match(r'\s+\d+\s+([0-9a-f]{4})\s*\|\s*(\S+)\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s*\|\s*(\S+)\s+(\S+)\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(\S+)', line)
+    if m: rows[m[1]].append(m.groups()[1:])
+if not rows: print("[exp] link check: no UE rows in the gNB table yet (phones attached?)")
+for rnti, v in rows.items():
+    v = v[-10:]
+    def med(i):
+        x = [float(a[i]) for a in v if a[i] not in ('n/a', '')]; return st.median(x) if x else None
+    cqi, snr, rsrp, phr = med(0), med(1), med(2), med(3)
+    flag = []
+    if phr is not None and phr <= 3: flag.append(f"PHR {phr:.0f} dB: phone at max power, no margin")
+    if cqi is not None and cqi < 9: flag.append(f"CQI {cqi:.0f}: DL marginal")
+    print(f"[exp] link check rnti 0x{rnti}: CQI {cqi} PUSCH SNR {snr} dB RSRP {rsrp} dBFS PHR {phr} dB -> {'WARNING: ' + '; '.join(flag) + ' (check antennas/cables/phone placement; see docs/NOTES.md 2026-09-29)' if flag else 'OK'}")
+PYEOF
+fi
 
 # ---- launch ----
 T="$(awk -v n="$(date +%s.%N)" -v d="$START_DELAY" 'BEGIN{printf "%.3f", n+d}')"

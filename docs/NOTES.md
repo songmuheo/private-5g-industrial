@@ -525,3 +525,21 @@ Senders started 0.6 ms apart (chrony 36 us on both laptops). verify PASS after t
   SINR 24-29 dB; large single-UE allocations at MCS 27 fail 25-36 % (the 256QAM ceiling, handled by OLLA).
   grant->CRC 4.1 ms flat, 0 RF events. Aggregate 4.0-4.9 Mbps with two UEs: the highest so far.
 * exp_run_report.py now spans the whole run (10 s bins beyond 90 s).
+
+## 2026-09-29 — third 2-UE run (results/20260929-185428-2ue), phone swapped on SIM .11: the RADIO LINK is the problem
+Valid path (A2 OK), start 0.16 ms apart, verify PASS after gNB stop. cam1 (.11, different phone) ran 2.5 Mbps /
+30 fps for 170 s, degraded, and at t=273 s the UE stopped transmitting (UL CRC KOs, then no CSI) -> gNB RLF
+and release at 19:00:04; it re-attached 47 s later. cam0 (.15) ran 300 s but its bitrate slid from 2.9 to
+0.3 Mbps: PUSCH SNR 24 -> 11 dB, CQI 8 -> 4, UL RSRP -28 -> -35 dBFS over the run.
+* Root cause is not the phone: swapping it reproduced the dropout (24.6 s, 142 s, 273 s across three runs).
+  The gNB table shows why: **power headroom 0 dB on both UEs all run** (phones at maximum transmit power) and
+  **CQI 4-7 / DL MCS 0-3**, versus PHR 23-25 dB and CQI 12-15 on 2026-09-28 17:55 with identical gNB settings
+  (RX2, tx_gain 80). Both link directions lost ~20 dB since yesterday -> a physical change after re-cabling
+  for the sync switch: antenna/cable seating on RF A TX/RX and RX2, antenna type, or phone placement.
+  With PHR 0 the UE cannot follow any extra loss, so a small fade ends in UE-side out-of-sync -> RLF (cam1);
+  and a phone held at max power for minutes heats and backs off its TX (cam0's slide). HYPOTHESIS on the
+  exact element; FACT that the link budget is ~20 dB worse than yesterday.
+* Action: re-seat both antennas/cables, confirm the antenna on TX/RX is the DL one and covers 3.5 GHz, put the
+  phones 1-2 m from the antennas in line of sight, then check the gNB table before running: CQI >= 11 and
+  PHR >= 15 dB for every UE. run_experiment.sh now prints this link check (CQI / PUSCH SNR / RSRP / PHR per
+  UE) in preflight and warns on PHR <= 3 dB or CQI < 9.
