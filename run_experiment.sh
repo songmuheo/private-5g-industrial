@@ -70,6 +70,11 @@ cleanup() { set +e; log "stopping receivers"; kill -TERM "$RECV_PID" 2>/dev/null
 trap cleanup EXIT
 
 # ---- preflight ----
+# ICE guard: libwebrtc will move the media onto the sync LAN unless the gNB PC drops non-NTP/SSH traffic there in
+# BOTH directions (scripts/setup/sync_lan_server.sh). Refuse to run over ssh without those chains.
+if [ "$HOST_MODE" = "ssh" ] && ! sudo -n iptables -S P5G_SYNC_OUT 2>/dev/null | grep -q -- "-j DROP"; then
+  log "ABORT: sync-LAN firewall chains missing (run scripts/setup/sync_lan_server.sh; it is not persisted across reboots)"; exit 1
+fi
 declare -A STATUS
 for c in "${CAMS[@]}"; do
   var="CAM_ARGS_$c"; args="${!var}"; src="$(sed -n 's/.*--yuv \([^ ]*\).*/\1/p' <<<"$args")"
@@ -122,6 +127,13 @@ done
 # ---- stop receivers, verify, report ----
 cleanup; trap - EXIT
 "$PY" analysis/verify_run.py "$RD" 2>&1 | tail -3 | tee -a "$LOG"
+log "note: gNB trace files get their footers only when ./run_gnb_core.sh is stopped; re-run: make verify RD=$RD afterwards"
 "$PY" analysis/exp_run_report.py "$RD" 5 > "$RD/report.txt" 2>&1 && log "report: $RD/report.txt"
 sed -n '/## A\./,/## B\./p' "$RD/report.txt" | grep -E "^cam|A2|selected|^  cam" | head -20
+if grep -q "WARNING: check path" "$RD/report.txt" && [ "$HOST_MODE" = "ssh" ]; then
+  log "RESULT INVALID: at least one stream did not travel over the 5G link (report.txt section A2). Check the sync-LAN firewall and laptop Wi-Fi."
+  echo "INVALID: media not on the 5G path (see report.txt A2)" > "$RD/INVALID"
+else
+  log "media path check: all streams over the 5G link"
+fi
 log "done: $RD"

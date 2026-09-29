@@ -26,10 +26,29 @@ allow $NET
 local stratum 8
 CONF
 sudo systemctl restart chrony
-# Firewall: on the sync LAN accept only NTP (UDP 123) and SSH (TCP 22); drop the rest (ICE/STUN/RTP/signaling).
-sudo iptables -C INPUT -i "$IFACE" -p udp --dport 123 -j ACCEPT 2>/dev/null || sudo iptables -A INPUT -i "$IFACE" -p udp --dport 123 -j ACCEPT
-sudo iptables -C INPUT -i "$IFACE" -p tcp --dport 22 -j ACCEPT 2>/dev/null  || sudo iptables -A INPUT -i "$IFACE" -p tcp --dport 22 -j ACCEPT
-sudo iptables -C INPUT -i "$IFACE" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || sudo iptables -A INPUT -i "$IFACE" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-sudo iptables -C INPUT -i "$IFACE" -j DROP 2>/dev/null || sudo iptables -A INPUT -i "$IFACE" -j DROP
+# Firewall on the sync LAN, BOTH directions. Allowed: NTP (UDP 123), SSH (TCP 22, both ways: laptops -> gNB PC for
+# fetch_asset, gNB PC -> laptops for run_experiment), ICMP echo (sync_check RTT). Everything else is dropped,
+# including OUTBOUND UDP: libwebrtc's ICE sends its own connectivity checks from the gNB PC to the laptops, and
+# an INPUT-only rule set lets the replies back in as ESTABLISHED (that is how the 2026-09-29 17:00 run put the
+# video on this LAN, see docs/NOTES.md). Rules are idempotent; a dedicated chain keeps them tidy.
+sudo iptables -N P5G_SYNC_IN  2>/dev/null || sudo iptables -F P5G_SYNC_IN
+sudo iptables -N P5G_SYNC_OUT 2>/dev/null || sudo iptables -F P5G_SYNC_OUT
+sudo iptables -C INPUT  -i "$IFACE" -j P5G_SYNC_IN  2>/dev/null || sudo iptables -I INPUT  1 -i "$IFACE" -j P5G_SYNC_IN
+sudo iptables -C OUTPUT -o "$IFACE" -j P5G_SYNC_OUT 2>/dev/null || sudo iptables -I OUTPUT 1 -o "$IFACE" -j P5G_SYNC_OUT
+sudo iptables -A P5G_SYNC_IN  -p udp --dport 123 -j ACCEPT
+sudo iptables -A P5G_SYNC_IN  -p tcp --dport 22 -j ACCEPT
+sudo iptables -A P5G_SYNC_IN  -p tcp --sport 22 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+sudo iptables -A P5G_SYNC_IN  -p icmp -j ACCEPT
+sudo iptables -A P5G_SYNC_IN  -j DROP
+sudo iptables -A P5G_SYNC_OUT -p udp --sport 123 -j ACCEPT
+sudo iptables -A P5G_SYNC_OUT -p tcp --sport 22 -j ACCEPT
+sudo iptables -A P5G_SYNC_OUT -p tcp --dport 22 -j ACCEPT
+sudo iptables -A P5G_SYNC_OUT -p icmp -j ACCEPT
+sudo iptables -A P5G_SYNC_OUT -j DROP
+# remove the old INPUT-only rules from the first version, if present
+for r in "-p udp --dport 123 -j ACCEPT" "-p tcp --dport 22 -j ACCEPT" "-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT" "-j DROP"; do
+  # shellcheck disable=SC2086
+  sudo iptables -D INPUT -i "$IFACE" $r 2>/dev/null || true
+done
 sleep 2; chronyc tracking | sed 's/^/[sync-server] /'
 echo "[sync-server] laptops: scripts/setup/sync_lan_client.sh <iface> <K>   (-> ${CIDR%.*}.1K, server $IP)"

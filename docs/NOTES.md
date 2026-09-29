@@ -491,3 +491,18 @@ Tool: analysis/exp_ran_audit.py. Window 0-60 s, 5 UEs (cam1 active only 25 s on 
   pattern; single sync check); gNB YAML comments reduced to value + reason (history in docs/RAN_CONFIG.md);
   video/prepare_fade_walk.sh removed (non-functional under YouTube's PO-token policy). exp_run_report.py skips
   the gNB sections when a run has no gnb/ traces.
+
+## 2026-09-29 — first orchestrated 2-UE run (results/20260929-170043-2ue): INVALID, media took the sync LAN
+run_experiment.sh worked end to end (preflight over ssh, both senders started 0.6 ms apart, 300 s, traces
+collected, report) and its A2 check caught the problem: both streams' selected ICE pair had the gNB PC's
+sync-LAN address 192.168.77.1 as local candidate, RTT 0 ms, 96 MB each; gNB PDCP UL saw 13 / 5 RTP packets.
+Hence 2.5 Mbps flat (libwebrtc cap), 30 fps, 0 freezes: a gigabit-Ethernet result, not a 5G one.
+* Cause: the first sync-LAN firewall only filtered INPUT. libwebrtc's ICE sends connectivity checks from the gNB
+  PC to the laptops' host candidates (192.168.77.1K); the outbound UDP created conntrack state, so the replies
+  came back as ESTABLISHED and the pair succeeded with the lowest RTT of all.
+* Fix (scripts/setup/sync_lan_server.sh, applied): dedicated chains P5G_SYNC_IN/OUT on enp4s0 allowing only
+  NTP, SSH (both ways) and ICMP, dropping everything else in BOTH directions; verified ssh/ping/chrony still
+  work and outbound UDP is dropped. run_experiment.sh now refuses to launch over ssh without the DROP chain and
+  writes <run>/INVALID when A2 finds a stream off the 5G path. Laptop Wi-Fi should be off during runs as well.
+* verify_run.py right after the run reported 11 failures because the gNB trace files had no footers yet (the gNB
+  was still running); re-run after stopping the gNB it is PASS. The orchestrator now says so.
