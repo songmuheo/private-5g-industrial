@@ -560,3 +560,24 @@ in the other UL slots and the odd/even-frame split vanished (21 % / 14 % before)
   back off, ~90 s cycles; in between, HARQ jitter (rel-OWD p90 30-50 ms at p50 15-19 ms) still triggers 2-10
   overuse events per 10 s and keeps the estimate well below the 2.5 Mbps cap. This is the phenomenon the
   testbed was built to measure; the RAN and orchestration are now good enough to study it.
+
+## 2026-09-29 — 2-UE run results/20260929-192247-2ue: clean regime, then a fade-triggered collapse (analysis/exp_sender_report.py)
+Link: CQI 14-15, PHR 15-23 dB, PUSCH SNR 26-34 dB, 0 RLF, both streams over the 5G link, verify PASS, start 2.8 ms apart.
+* 0-90 s: both senders at the 2.5 Mbps encoder cap, 30 fps, UL CRC failure 0-3 % at MCS 27, 0 overuse events,
+  rel-OWD p90 30 ms / max 40-50 ms, UL PRB 28-38 %, aggregate 5.0 Mbps. MCS 27 (256QAM) decodes at ~0 % when the
+  SINR is >= 30 dB on the repaired RF path.
+* t=97-101 s: cam1's UE (.11) fades 28 -> 20 dB SINR for ~5 s. OLLA takes its MCS 23 -> 6; the scheduler gives it
+  ~300 grants/s (was 180-210) to move the same bytes; UL load jumps.
+* t=103-104 s: BOTH UEs fail 31-35 % of TBs (cam0 at 29 dB SINR too), BSR 77-108 KB, rel-OWD max 580 / 983 ms,
+  overuse 5+3 (cam0) and 6+7 (cam1) in two seconds; GoogCC 4.2 -> 0.98 Mbps (cam0) and 2.0 -> 0.49 Mbps (cam1).
+  Queues drain by t=106; link back to 0-10 % failure by t=107.
+* Recovery: GoogCC climbs ~+30 kbps/s; cam0 reaches its cap again at t=190 s, cam1 never does (1.0-1.7 Mbps for
+  the remaining 190 s, HARQ jitter p90 30-40 ms keeps producing 1-7 overuse events per 10 s). Second event at
+  t=205-215 (cam0 4.0 -> 2.0 Mbps). Aggregate 2.3-3.6 Mbps after the first event vs 5.0 before.
+* Reading: a 5 s single-UE fade becomes a 1 s cell-wide congestion pulse (link adaptation of one UE consumes the
+  shared UL), GoogCC reacts to the delay pulse with a 60-80 % cut and recovers linearly and slowly; the RAN was
+  back to normal within 3 s. HYPOTHESIS for cam0's 32-35 % failures at 29 dB SINR during the pulse: dense
+  co-scheduling with the low-MCS UE (inter-UE interference / power imbalance); to be tested with the near-far
+  breakdown in exp_run_report.py on more runs.
+* Tooling: analysis/exp_sender_report.py <run> reproduces this (tx->rx join is sequence-wrap aware; 300 s runs wrap
+  the 16-bit RTP sequence once).
