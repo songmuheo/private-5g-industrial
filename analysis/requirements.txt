@@ -1,4 +1,4 @@
 # analysis/ scripts use only the Python standard library so they run on any host with python3.
 # Optional extras for notebooks / plotting (not required by verify_run.py):
 # pandas>=2.0
-# matplotlib>=3.7
+matplotlib>=3.7   # analysis/plot_run.py (graphs under <run>/graphs/)
