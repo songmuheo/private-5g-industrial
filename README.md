@@ -35,6 +35,9 @@ sync LAN, per-camera settings from a JSON scenario, synchronised start, trace co
 ./run_experiment.sh experiments/demo-local.json    # smoke test on one PC (senders + receivers over loopback, no RAN)
 ```
 
+Laptops need a one-time preparation only (docs/SETUP.md "Laptop checklist": clone, sender binary, sync-LAN +
+chrony setup, camera asset, SSH key from the gNB PC); after that nothing is typed on them per experiment.
+
 Manual equivalent (one script per terminal / machine):
 
 ```bash

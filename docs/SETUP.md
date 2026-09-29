@@ -9,6 +9,30 @@ results/<run>/app/ (tx-*)                                                       
 All hosts: `git clone --recurse-submodules --shallow-submodules <repo>`. Clock sync and synchronised
 starts: see "Clock sync and synchronised start" below.
 
+## Laptop checklist (once per laptop, at the laptop)
+
+K = the camera id this laptop plays (`cam0` -> K=0). Do these in order, in a terminal on the laptop.
+
+```bash
+# 0. cables: USB to the Pixel (tethering on), Ethernet to the sync switch (ipTIME H6008)
+# 1. code + binaries
+git clone https://github.com/songmuheo/private-5g-industrial.git && cd private-5g-industrial      # or: git pull
+mkdir -p build/apps && scp songmu@192.168.77.1:private-5g-industrial/build/apps/video_sender build/apps/  # the sender binary (built on the gNB PC)
+# 2. clock-sync LAN + chrony (asks for sudo; must be run here, not over SSH)
+scripts/setup/sync_lan_client.sh K                 # wired port auto-detected -> 192.168.77.1K, chrony -> gNB PC
+# 3. video asset for this camera (415 MB from the gNB PC over the sync LAN)
+P5G_ASSET_HOST=songmu@192.168.77.1 video/fetch_asset.sh --cam K
+# 4. checks
+scripts/setup/sync_check.sh 0.2                    # GO (give chrony 1-2 minutes after step 2)
+ip route show default                              # exactly one line, via the phone tether
+```
+
+Then, from the gNB PC, once per laptop: `ssh-copy-id songmu@192.168.77.1K` and `ssh songmu@192.168.77.1K true`.
+
+After that a laptop needs nothing per experiment: phone attached, laptop on and awake, cable in. Everything
+else is driven from the gNB PC by run_experiment.sh. If the gNB PC's build/apps/video_sender changes (rebuild),
+repeat step 1's scp. If a laptop changes camera id, repeat steps 2-3 with the new K (and update the scenario).
+
 ## One command: run_experiment.sh
 
 ```bash
