@@ -63,4 +63,4 @@ for i in $(seq 0 $((N - 1))); do
   echo "[receiver] $RID pid=$! -> sender: ./run_sender.sh <host> --to $RID --stream-id cam$i"
 done
 echo "[receiver] run dir: $RD   (Ctrl-C to stop)"
-tail -n +1 -F "${LOGS[@]}"
+if [ "${P5G_RECEIVER_NOTAIL:-0}" = 1 ]; then wait "${PIDS[@]}"; else tail -n +1 -F "${LOGS[@]}"; fi   # NOTAIL: orchestrated by run_experiment.sh

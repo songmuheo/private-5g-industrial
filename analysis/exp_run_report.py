@@ -51,7 +51,7 @@ for s in streams:
     print(f"   frame span med/p90/max (ms): {[f'{f0(st.median(span[i]))}/{f0(q(span[i],.9))}/{f0(max(span[i]))}' for i in range(0,12) if span.get(i)]}")
 print("## A2. ICE path per stream: transport.selectedCandidatePairId (rx-stats) + gNB PDCP UL destination (RTP-like rows)")
 pdcp_dst=collections.defaultdict(collections.Counter)
-for r in rows(f'{RD}/gnb/gnb_pdcp_ul.csv'):
+for r in (rows(f'{RD}/gnb/gnb_pdcp_ul.csv') if os.path.exists(f'{RD}/gnb/gnb_pdcp_ul.csv') else []):
     if r['rtp_like'] in ('1','true','True') and r['src_ip'].startswith('10.45'): pdcp_dst[r['src_ip']][r['dst_ip']]+=1
 s2ip={v:k for k,v in ip2s.items()}
 for s in streams:
@@ -69,6 +69,8 @@ for s in streams:
         ok=(l.get('address')=='10.53.1.1' and via5g>90)
         print(f"  {s}: selected local {l.get('address')}:{l.get('port')}/{l.get('protocol')} <- remote {r.get('candidateType')} :{r.get('port')} (address redacted for prflx), {p.get('bytesReceived',0)/1e6:.2f} MB, RTT {1000*p.get('currentRoundTripTime',0):.0f} ms | gNB PDCP UL RTP from {ip}: {via5g:.0f}% to {l.get('address')} (n={tot}) -> {'OK: media went over the 5G link' if ok else 'WARNING: check path'}")
     else: print(f"  {s}: no selected candidate pair in stats")
+if not os.path.exists(f'{RD}/gnb/gnb_sched_ul.csv'):
+    print("## B. gNB: no gnb/ traces in this run (local smoke test) -> skipped"); sys.exit(0)
 print("## B. gNB")
 sched=rows(f'{RD}/gnb/gnb_sched_ul.csv'); crc=rows(f'{RD}/gnb/gnb_ul_crc.csv'); pd=rows(f'{RD}/gnb/gnb_pdcp_ul.csv')
 ue2ip=collections.defaultdict(collections.Counter)

@@ -33,32 +33,13 @@ ru_sdr:
   device_args: type=b200,num_recv_frames=64,num_send_frames=64
   srate: 23.04
   otw_format: sc12
-  # ---- REMOVED: tx_gain 65 (one run, results/20260928-174551-5-UE) ----
-  # # tx_gain: 65
-  # # Lowering the DL by 15 dB while SIB1 still announces ss-PBCH-BlockPower -16 dBm made every UE
-  # # estimate 15 dB more path loss and (alpha = 1) transmit 15 dB more: PUSCH RSRP hit 0 dBFS, the
-  # # noise+interference proxy rose from -41 to -14..-22 dBFS (clipping), PUSCH SINR 30-35 -> 10-18 dB,
-  # # DL CQI 12 -> 5-10. Back to the sample value; lower rx_gain instead if TX->RX2 leakage shows up.
-  # ---------------------------------------------------------------------
+  # 80: sample value. 65 was tried and reverted (UE open-loop power control then overdrove the receiver);
+  # history in docs/RAN_CONFIG.md.
   tx_gain: 80
   rx_gain: 40
   # clock: external                 # uncomment with a GPSDO / 10 MHz reference
-  expert_cfg:
-    # ===================== ORIGINAL (preserved) =====================
-    # # Single-antenna operation on RF A "TX/RX": TDD is half duplex, so srsRAN switches the same port
-    # # between TX and RX (radio_uhd_impl.cpp "Same port transmission mode"). Nothing is connected to RX2.
-    # tx_mode: same-port
-    # ===============================================================
-    # ---- REMOVED: same-port (2026-09-28, after results/20260928-172226-5-UE) ----
-    # # tx_mode: same-port
-    # # same-port = discontinuous TX bursts + the B210 ATR switching the TX/RX port between TX and RX at
-    # # every DL/UL boundary. Measured: PUSCH right after a DL burst fails 78 % (S-slot PDSCH) vs 9 %
-    # # without, i.e. the receiver needs ~1 ms to recover after each switch (docs/NOTES.md 2026-09-28).
-    # # Also a discontinuous mode: B210 output power varies ~5 dB with TX duty cycle (srsRAN #367).
-    # -----------------------------------------------------------------------------------------
-    # Now the srsRAN default (tx_mode continuous): TX on "TX/RX", RX on "RX2", TX chain always on
-    # (zeros in UL slots), no port switching, no extra TDD handling needed (srsRAN discussion #77,
-    # configs/gnb_rf_b200_tdd_n78_20mhz.yml). Antennas: RF A TX/RX (DL TX) and RF A RX2 (UL RX).
+  # tx_mode: default (continuous) = TX on "TX/RX", RX on "RX2", no port switching (srsRAN discussion #77 and
+  # the B200 sample). Do not set same-port: measured 78 % PUSCH failure after each DL burst (docs/RAN_CONFIG.md).
 
 cell_cfg:
   dl_arfcn: 632628                  # 3489.42 MHz (n78, GSCN-aligned SSB per the srsRAN sample)
@@ -68,28 +49,12 @@ cell_cfg:
   plmn: "00101"
   tac: 7
   pci: 1
-  # ---- ADDED: 2 DL (TX) / 2 UL (RX) antennas on RF A and RF B "TX/RX" (srsRAN default: 1 / 1) ----
-  # ---- REMOVED: 1 TX / 2 RX attempt (2026-09-28 17:12, results/20260928-171255-5-UE) ----
-  # # nof_antennas_dl: 1
-  # # nof_antennas_ul: 2
-  # # Refused at start by the UHD radio: "B2x0 devices do not support different number of transmit and
-  # # receive antennas" (radio_uhd). The ZMQ dry run had accepted it because ZMQ allows asymmetry.
-  # -----------------------------------------------------------------------------------------
-  # UL receive diversity on RF A + RF B (MRC in the PUSCH decoder) is the goal; on a B210 that forces
-  # 2 TX as well, so the DL becomes 2-port (rank adaptation up to 2 layers, PMI from CSI). Both ports
-  # are switched by the B210 ATR (same-port mode). Requires pcap.mac_type dlt (du_high_config_validator.cpp
-  # refuses >= 2 antennas with the udp pcap wrapper, even if pcap is off). To pin DL to one layer while
-  # keeping two TX ports, add `pdsch: { max_rank: 1 }` (not set: DL is not under study).
-  # ---- REMOVED: 2 TX / 2 RX same-port (2026-09-28) -> back to the srsRAN default 1 / 1 ----
-  # # nof_antennas_dl: 2
-  # # nof_antennas_ul: 2
-  # # Two antennas now sit on RF A TX/RX and RF A RX2 (separate TX and RX ports); 2x2 in this mode
-  # # would need four antennas (A/B TX/RX + A/B RX2). B2x0 requires equal TX and RX counts.
-  # ------------------------------------------------------------------------------------------
+  # ---- antennas: 1 TX (RF A TX/RX) / 1 RX (RF A RX2) = the srsRAN default ----
+  # 2x2 needs four antennas (A/B TX/RX + A/B RX2) and B2x0 refuses unequal TX/RX counts; pcap.mac_type dlt
+  # stays because the validator requires it as soon as >= 2 antennas are configured.
   nof_antennas_dl: 1
   nof_antennas_ul: 1
-  # ---- END ADDED ----------------
-  # ---- ADDED: UL link adaptation (OLLA) like a production gNB (srsRAN defaults in brackets) ----
+  # ---- UL link adaptation (OLLA) like a production gNB (srsRAN defaults in brackets) ----
   # Measured 2026-09-28 (4-UE and 5-UE runs): PUSCH SINR 30-35 dB, MCS 27 pinned, OLLA offset stuck at
   # its -5 dB floor, new-data BLER 20-32 % against a 1 % target. srsRAN's UL SNR->MCS thresholds are
   # AWGN/ZMQ-calibrated (mcs_calculator.cpp: MCS 27 = 21.7 dB, MCS 19 (top of 64QAM) = 17.1 dB), so
@@ -106,12 +71,10 @@ cell_cfg:
     olla_target_bler: 0.1
     olla_max_snr_offset: 20
     olla_snr_inc_step: 0.02
-  # ---- END ADDED ----------------
-  # ---- ADDED: TDD pattern DDDSU (2.5 ms) instead of the srsRAN default DDDDDDSUUU (5 ms) ----
+  # ---- TDD pattern DDDSU (2.5 ms) instead of the srsRAN default DDDDDDSUUU (5 ms) ----
   # Default when the key is absent (du_high_config.h tdd_ul_dl_pattern_unit_config, release_25_10):
   #   dl_ul_tx_period: 10, nof_dl_slots: 6, nof_dl_symbols: 8, nof_ul_slots: 3, nof_ul_symbols: 0
   #   = DDDDDDSUUU, 3 UL slots per 5 ms (measured in results/20260928-161259-4-UE: PUSCH in slots 7,8,9).
-  #   To go back to it, delete or comment out the tdd_ul_dl_cfg block below.
   # DDDSU: 1 UL slot per 2.5 ms -> UL opportunity every 2.5 ms instead of every 5 ms (shorter UL
   # scheduling / HARQ round trip), but UL share drops from 3/10 to 1/5 of the slots (+4 UL symbols in S).
   # Special slot 6 DL / 4 guard / 4 UL symbols: the values of srsRAN's own DDDSU e2e configuration
@@ -124,7 +87,6 @@ cell_cfg:
     nof_dl_symbols: 6
     nof_ul_slots: 1
     nof_ul_symbols: 4
-  # ---- END ADDED ----------------
 
 log:
   filename: stdout                  # run_gnb.sh overrides with --log.filename
@@ -132,7 +94,7 @@ log:
 
 pcap:
   mac_enable: false                 # set true for ground-truth MAC pcap (large; tracer covers most needs)
-  mac_type: dlt                     # ADDED 2026-09-28: required by the validator once nof_antennas_ul >= 2 (run_gnb.sh also passes it with P5G_GNB_PCAP=1)
+  mac_type: dlt                     # the validator requires dlt as soon as >= 2 antennas are configured; harmless at 1x1
   mac_filename: /tmp/gnb_mac.pcap
   ngap_enable: false
   ngap_filename: /tmp/gnb_ngap.pcap

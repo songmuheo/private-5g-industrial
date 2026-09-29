@@ -9,7 +9,23 @@ results/<run>/app/ (tx-*)                                                       
 All hosts: `git clone --recurse-submodules --shallow-submodules <repo>`. Clock sync and synchronised
 starts: see "Clock sync and synchronised start" below.
 
-## Quick path: three scripts, one per terminal / machine
+## One command: run_experiment.sh
+
+```bash
+./run_gnb_core.sh 5ue                              # terminal 1 (stays in the foreground)
+./run_experiment.sh experiments/5ue-720p30.json    # terminal 2: everything else
+```
+
+The scenario JSON holds per-camera width / height / fps / start_kbps / max_kbps / source, the hosts
+(`user@192.168.77.1{K}` over the sync LAN), the sync bound and the timing. The orchestrator copies it to
+`<run>/scenario.json`, writes `<run>/experiment.json` (resolved start time, git HEAD, host status), starts the
+receivers, checks each laptop (repo HEAD, asset, chrony offset), launches every sender with `--start-at T`
+(T = now + start_delay_s), pulls the sender traces into `<run>/senders/camK/app`, stops the receivers and runs
+verify + report. Requirements: SSH keys to the laptops (`ssh-copy-id songmu@192.168.77.1K`), laptops pulled and
+with their asset (`video/fetch_asset.sh --cam K`). `experiments/demo-local.json` runs the whole flow on one PC
+over loopback (no RAN) as a smoke test.
+
+## Manual path: three scripts, one per terminal / machine
 
 ```bash
 ./run_gnb_core.sh [label]       # gNB PC, terminal 1: core + gNB (foreground) + JSON metrics -> results/<ts>-<label>/{gnb,core}
@@ -104,10 +120,6 @@ video/fetch_asset.sh --cam 3                              # only view 3 (the lap
 video/prepare_kendo.sh "0 1 2 3 4 5"                      # or: download the Kendo zip from Nagoya Univ. (1.67 GB) and transcode yourself;
                                                           #     byte-identical to the copies (sha256 checked)
 video/fetch_asset.sh fade_walk_1280x720_30fps_300s_i420.yuv   # optional: 300 s continuous footage (12.4 GB) for no-loop runs
-video/prepare_fade_walk.sh                                # or: download the same CC-BY clip from YouTube (yt-dlp, ~270 MB) and convert; result is
-                                                          #     equivalent but not bit-identical to the copy -> use one method on all laptops.
-                                                          #     As of 2026-09-28 YouTube 403s clients without a PO token (see the script header);
-                                                          #     fetch_asset.sh is the reliable path.
 video/fetch_asset.sh --list                               # what the gNB PC has; P5G_ASSET_HOST=user@host to change the source
 video/prepare_test_sequence.sh crowd_run 1280 720        # alternative: download + convert a xiph test sequence (1.5 GB)
 video/prepare_test_sequence.sh --from file.y4m NAME 1280 720   # alternative: convert a local y4m

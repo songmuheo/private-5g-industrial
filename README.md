@@ -25,7 +25,17 @@ Docs: [docs/SETUP.md](docs/SETUP.md) (per-machine commands, clock sync, synchron
 [docs/TRACE_SCHEMA.md](docs/TRACE_SCHEMA.md) (every output file and column), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 (design and decisions), [docs/NOTES.md](docs/NOTES.md) (log).
 
-## Run (one script per terminal / machine)
+## Run
+
+One command from the gNB PC (after `./run_gnb_core.sh` is up): receivers, preflight of every laptop over the
+sync LAN, per-camera settings from a JSON scenario, synchronised start, trace collection, verify and report.
+
+```bash
+./run_experiment.sh experiments/5ue-720p30.json    # -> results/CURRENT/{scenario.json,experiment.json,app,senders/camK,report.txt}
+./run_experiment.sh experiments/demo-local.json    # smoke test on one PC (senders + receivers over loopback, no RAN)
+```
+
+Manual equivalent (one script per terminal / machine):
 
 ```bash
 ./run_gnb_core.sh [label]                    # gNB PC: Open5GS + srsRAN gNB (tracer) + JSON metrics -> results/<ts>-<label>/{gnb,core}
@@ -93,11 +103,12 @@ ran/ue_sim/     srsUE config for the code test
 ran/core/       docker-compose.yml, open5gs.env, subscriber_db.csv (git-ignored; keys) / subscriber_db.example.csv
 patches/        srsran_gnb/ (tracer header + 6 patches), libwebrtc/ (README: no patches needed)
 scripts/build/  build_srsran_gnb.sh build_libwebrtc.sh build_apps.sh
-run_gnb_core.sh run_receiver.sh run_sender.sh   (repo root: one per terminal / machine)
+run_experiment.sh (orchestrator) run_gnb_core.sh run_receiver.sh run_sender.sh   (repo root)
 scripts/run/    ota_restart.sh (gNB PC one-shot, background) start_core.sh core_add_dnn.sh run_gnb.sh run_ue_sim.sh run_local_e2e.sh (last two: code test)
 scripts/setup/  sync_lan_server.sh sync_lan_client.sh sync_check.sh (wired clock-sync LAN: chrony + ICE firewall)
 analysis/       verify_run.py trace_io.py exp_run_report.py (app + gNB report) exp_ran_audit.py (RAN audit)
 docker/         libwebrtc build toolchain image
-video/          fetch_asset.sh (copy assets from the gNB PC), prepare_kendo.sh (Nagoya multi-view Kendo, one view per camera), prepare_fade_walk.sh (YouTube CC-BY clip via yt-dlp), prepare_test_sequence.sh (xiph sequences)
+video/          fetch_asset.sh (copy assets from the gNB PC), prepare_kendo.sh (Nagoya multi-view Kendo, one view per camera), prepare_test_sequence.sh (xiph sequences)
+experiments/    scenario JSON files for run_experiment.sh (per-camera resolution / fps / bitrate / source, hosts, timing)
 third_party/    srsRAN_Project, srsRAN_4G (submodules, stock), libwebrtc (fetched; pinned by libwebrtc.lock)
 ```

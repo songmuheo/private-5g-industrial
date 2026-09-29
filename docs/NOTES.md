@@ -477,3 +477,17 @@ Tool: analysis/exp_ran_audit.py. Window 0-60 s, 5 UEs (cam1 active only 25 s on 
       `pusch.enable_cl_loop_pw_control: true` with `target_pusch_sinr` ~25 (default 10 dB is too low),
       plus rx_gain 40 -> 30 for ADC headroom; (2) PUCCH power: `pucch.p0_nominal -80` (or closed-loop
       PUCCH PC) to cut HARQ-ACK DTX; (3) account for grant padding when computing capacity.
+
+## 2026-09-29 — run_experiment.sh (one-command multi-UE runs) + cleanup
+* `./run_experiment.sh experiments/<scenario>.json` on the gNB PC: receivers, laptop preflight over the sync LAN
+  (repo HEAD, asset, chrony offset), per-camera settings from JSON, synchronised start (T = now + delay, each
+  laptop waits on its chrony clock), sender-trace collection into <run>/senders/camK, verify, report. The scenario
+  and the resolved start time / host status are archived in <run>/scenario.json and <run>/experiment.json.
+* Local smoke test (experiments/demo-local.json, 2 senders over loopback, 12 s): whole flow in 26 s, verify PASS;
+  the two senders started 0.2 ms apart, 3 ms after the target second. Found and fixed on the way: a backgrounded
+  shell ignores SIGINT, so the orchestrator stops run_receiver.sh with SIGTERM (its EXIT trap still INTs the
+  receivers so the traces get their footers).
+* Cleanup: run_sender.sh rewritten without the marker blocks (source order kendo_viewK > fade_walk > any .yuv >
+  pattern; single sync check); gNB YAML comments reduced to value + reason (history in docs/RAN_CONFIG.md);
+  video/prepare_fade_walk.sh removed (non-functional under YouTube's PO-token policy). exp_run_report.py skips
+  the gNB sections when a run has no gnb/ traces.
