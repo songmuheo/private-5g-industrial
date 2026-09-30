@@ -655,3 +655,13 @@ take the tree as a parameter.
   streaming thread -> InitFrameMetaCaps at start-up (per-frame meta allocations remain, bounded; documented).
   Re-verified: demo-local 361/361/361 and 181/181/181 (results/20260930-162048-demo-local); run-local 689/689/689,
   8012/8012 RTP through the gNB, ordered stop with no KILL fallback (results/20260930-162118-gst-review-fixes).
+* Codex passes 2 and 3 (same day): remaining PARTIALs fixed — slots elapsed during a final blocked push are recorded;
+  arrival snapshots are seqlock-coherent (writer release fence after the odd seq, reader acquire fence + re-check,
+  `--jitter-ms` capped at 800 against the 1024 ms ring); ack watchdog independent of the stats period, stats on a
+  monotonic schedule with tick = gcd(period, 1000); stream-ack bound to the exact receiver connection and a
+  handshake generation (re-registered same-id connection, stale generation and replay are dropped — unit-checked);
+  RTCP endpoint learning only from a strictly validated compound whose first packet is SR/RR with the announced
+  SSRC; P5G_CONTROL_PORT passed to the laptops over ssh. A bug introduced on the way (generation counter on the
+  wrong object) was caught by the sender's 5 s ack watchdog (run marked FAIL) before it reached a commit.
+  Re-verified: demo-local 361/361/361 + 181/181/181 (results/20260930-163242-demo-local), run-local
+  (results/20260930-163320-gst-review3).

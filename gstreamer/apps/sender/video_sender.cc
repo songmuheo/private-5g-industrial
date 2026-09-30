@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <string>
 #include <thread>
 
@@ -102,9 +103,12 @@ class Sender {
       return;
     }
     if (!stats_) return;
-    stats_tick_ms_ += tick_ms;
-    if (stats_tick_ms_ < g_cfg.stats_period_ms) return;  // sample only every stats_period_ms
-    stats_tick_ms_ = 0;
+    (void)tick_ms;
+    const int64_t now = NowMonoNs();
+    if (next_stats_mono_ns_ == 0) next_stats_mono_ns_ = now;
+    if (now < next_stats_mono_ns_) return;                       // sample on a monotonic schedule
+    next_stats_mono_ns_ += (int64_t)g_cfg.stats_period_ms * 1000000;
+    if (next_stats_mono_ns_ < now) next_stats_mono_ns_ = now;    // fell behind (long stall): resync
     GObject* session = nullptr;
     g_signal_emit_by_name(rtpbin_, "get-internal-session", 0, &session);
     std::string st = "null";
@@ -419,7 +423,7 @@ class Sender {
   bool awaiting_ack_ = false;  // control thread only
   static constexpr int64_t kAckTimeoutNs = 5LL * 1000000000LL;
   std::atomic<int64_t> ack_deadline_mono_ns_{0};
-  int stats_tick_ms_ = 0;  // main thread
+  int64_t next_stats_mono_ns_ = 0;  // main thread
   std::string dest_host_; int dest_rtp_port_ = 0, dest_rtcp_port_ = 0;
 };
 
@@ -475,9 +479,9 @@ int main(int argc, char** argv) {
   {
     p5g::Sender sender;
     if (!sender.Run()) return 1;
-    // The tick drives both the stats sample (every stats_period_ms) and the stream-ack watchdog (checked at
-    // least every second, whatever the stats period).
-    const int tick_ms = c.stats_period_ms > 0 ? std::min(c.stats_period_ms, 1000) : 1000;
+    // The tick drives both the stats sample (every stats_period_ms, on a monotonic schedule) and the
+    // stream-ack watchdog (at least every second). gcd keeps the stats period exact (1500 ms -> 500 ms tick).
+    const int tick_ms = c.stats_period_ms > 0 ? std::max(20, std::gcd(c.stats_period_ms, 1000)) : 1000;
     p5g::RunUntilShutdown(c.duration_s, [&] { sender.AppendStats(tick_ms); }, tick_ms);
     sender.Shutdown();
   }

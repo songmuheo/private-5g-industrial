@@ -15,9 +15,9 @@ plain RTP has no in-band way to negotiate, and what the edge will later push to 
   server   -> receiver: the same + "sender_host": <peer address of the sender's TCP connection>
                         (initial RTCP destination sender_host:R; the receiver switches to the endpoint
                         the sender's RTCP actually arrives from)
-  receiver -> server : {"type":"stream-ack","stream":ID,"ok":true|false[,"reason":..]}
-  server   -> sender : the same, only if it comes from the receiver that got the stream-start
-                        (the sender goes PLAYING only after ok=true)
+  receiver -> server : {"type":"stream-ack","stream":ID,"generation":G,"ok":true|false[,"reason":..]}
+  server   -> sender : the same, only if it comes from the very connection that got this stream-start
+                        (generation G echoed back); the sender goes PLAYING only after ok=true
   anyone   -> server : {"type":"profile","session":S,"stream":ID, "bitrate_kbps":N, ...}
   server   -> sender : the same (edge-issued profile; docs/SCENARIO_EDGE_PROFILES.md §4 path (1))
   anyone   -> server : {"type":"ping"}   ->  {"type":"pong","server":"p5g-gstreamer-control"}   (identity check)
@@ -35,7 +35,8 @@ class Session:
         self.name = name
         self.senders = {}    # stream id -> writer
         self.receivers = {}  # receiver id -> (writer, info dict)
-        self.pending_ack = {}  # stream id -> receiver id that was sent stream-start (the only valid ack origin)
+        self.pending_ack = {}  # stream id -> (receiver writer, generation): the one connection that may ack
+        self.generation = 0
 
 
 class ControlServer:
@@ -127,7 +128,9 @@ class ControlServer:
         out = dict(msg)
         out["stream"] = stream
         out["sender_host"] = writer.get_extra_info("peername")[0]
-        s.pending_ack[stream] = rid
+        s.generation += 1
+        s.pending_ack[stream] = (s.receivers[rid][0], s.generation)   # bound to this connection, this handshake
+        out["generation"] = s.generation
         await self.send(s.receivers[rid][0], out)
         log.info("[%s] stream-start %s -> %s (ssrc %s, %sx%s@%s %s kbps)", sname, stream, rid, msg.get("ssrc"),
                  msg.get("width"), msg.get("height"), msg.get("fps"), msg.get("bitrate_kbps"))
@@ -139,10 +142,13 @@ class ControlServer:
         sname, role, rid = self.peers[writer]
         s = self.session(sname)
         stream = msg.get("stream")
-        # Only the receiver that was handed this stream's stream-start may acknowledge it.
-        if role != "receiver" or s.pending_ack.get(stream) != rid:
-            log.warning("[%s] stream-ack for %s from %s %s is not the intended receiver (%s) -> dropped",
-                        sname, stream, role, rid, s.pending_ack.get(stream))
+        # Only the CONNECTION that was handed this stream's stream-start may acknowledge it (a re-registered
+        # receiver with the same id is a different connection and never saw the stream-start), and only
+        # for the current handshake generation.
+        pend = s.pending_ack.get(stream)
+        if role != "receiver" or pend is None or pend[0] is not writer or msg.get("generation") != pend[1]:
+            log.warning("[%s] stream-ack for %s from %s %s is not the connection/generation that got stream-start -> dropped",
+                        sname, stream, role, rid)
             return
         if stream not in s.senders:
             log.warning("[%s] stream-ack from %s for unknown stream %s", sname, rid, stream)
@@ -168,8 +174,11 @@ class ControlServer:
         if role == "sender":
             if s.senders.get(pid) is writer:
                 s.senders.pop(pid, None)
-        elif s.receivers.get(pid, (None,))[0] is writer:
-            s.receivers.pop(pid, None)
+        else:
+            if s.receivers.get(pid, (None,))[0] is writer:
+                s.receivers.pop(pid, None)
+            for st in [st for st, (w, _) in s.pending_ack.items() if w is writer]:
+                s.pending_ack.pop(st, None)   # a pending handshake dies with its connection
         log.info("[%s] %s %s disconnected", sname, role, pid)
 
 

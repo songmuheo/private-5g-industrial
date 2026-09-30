@@ -226,6 +226,37 @@ inline void FillRtcpRow(GstBuffer* b, uint8_t dir, RtcpPacketRow* r) {
   gst_buffer_unmap(b, &map);
 }
 
+// Strict validation (unlike FillRtcpRow, which is a tolerant trace parser): the whole buffer must be a
+// well-formed RTCP compound (RFC 3550 §6.1 / §6.4: version 2, headers exactly tiling the buffer), and its
+// first packet must be an SR (pt 200, >= 28 bytes: header + sender info) or RR (pt 201, >= 8 bytes)
+// whose SSRC is `ssrc`. Used before letting a packet change where RTCP reports are sent.
+inline bool IsValidRtcpCompoundFrom(GstBuffer* b, uint32_t ssrc) {
+  GstMapInfo map;
+  if (!gst_buffer_map(b, &map, GST_MAP_READ)) return false;
+  bool ok = false;
+  size_t off = 0;
+  int idx = 0;
+  while (off + 4 <= map.size) {
+    const uint8_t* p = map.data + off;
+    if ((p[0] >> 6) != 2) { ok = false; break; }
+    const size_t len = (static_cast<size_t>((p[2] << 8) | p[3]) + 1) * 4;
+    if (len < 4 || off + len > map.size) { ok = false; break; }
+    if (idx == 0) {
+      const uint8_t pt = p[1];
+      const size_t min_len = pt == 200 ? 28 : pt == 201 ? 8 : 0;
+      if (min_len == 0 || len < min_len) { ok = false; break; }
+      const uint32_t s = (uint32_t)p[4] << 24 | (uint32_t)p[5] << 16 | (uint32_t)p[6] << 8 | p[7];
+      if (s != ssrc) { ok = false; break; }
+      ok = true;
+    }
+    off += len;
+    ++idx;
+  }
+  if (off != map.size) ok = false;  // trailing bytes that are not a packet
+  gst_buffer_unmap(b, &map);
+  return ok;
+}
+
 // ---- <stream>-rx-decoded.csv : one row per frame out of the decoder ------------------------------
 struct DecodedFrameLedgerRow {
   uint32_t rtp_ts;

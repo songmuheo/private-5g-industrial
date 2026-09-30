@@ -230,7 +230,8 @@ class Receiver {
       const bool same_frame = a.key.load(std::memory_order_relaxed) == r.rtp_ts;
       // seqlock: odd seq = write in progress; readers retry / reject until it is even and unchanged
       const uint32_t seq0 = a.seq.load(std::memory_order_relaxed);
-      a.seq.store(seq0 + 1, std::memory_order_release);
+      a.seq.store(seq0 + 1, std::memory_order_relaxed);
+      std::atomic_thread_fence(std::memory_order_release);  // the odd seq is visible before any field store below
       if (same_frame) {                           // frame already open or published: extend it coherently
         a.n.store(a.n.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         a.last.store(r.log_mono_ns, std::memory_order_relaxed);
@@ -241,7 +242,7 @@ class Receiver {
         a.last.store(r.log_mono_ns, std::memory_order_relaxed);
         a.n.store(1, std::memory_order_relaxed);
       }
-      a.seq.store(seq0 + 2, std::memory_order_release);
+      a.seq.store(seq0 + 2, std::memory_order_release);      // fields visible before the even seq
     });
   }
   // Slot = rtp_ts in ms modulo 1024: adjacent frames (>= 1 ms apart) never share a slot and an entry lives
@@ -349,7 +350,7 @@ class Receiver {
       // well-formed compound whose first packet is an SR/RR carrying the announced sender SSRC may move
       // the destination (anything else on this port is ignored). Done once per new endpoint.
       const uint32_t want = ssrc_.load(std::memory_order_relaxed);
-      if (want == 0 || r.num_parts == 0 || (r.pt[0] != 200 && r.pt[0] != 201) || r.sender_ssrc != want) return;
+      if (want == 0 || !IsValidRtcpCompoundFrom(b, want)) return;
       GstNetAddressMeta* am = gst_buffer_get_net_address_meta(b);
       if (!am || !G_IS_INET_SOCKET_ADDRESS(am->addr)) return;
       GInetSocketAddress* isa = G_INET_SOCKET_ADDRESS(am->addr);
@@ -379,7 +380,8 @@ class Receiver {
       if (stream != stream_) {
         P5G_LOG_ERROR << "stream-start for a second stream '" << stream << "' on receiver " << g_cfg.receiver_id
                       << " (already serving '" << stream_ << "') -> refused";
-        ctl_.Send({{"type", "stream-ack"}, {"stream", stream}, {"ok", false}, {"reason", "receiver already serves " + stream_}});
+        ctl_.Send({{"type", "stream-ack"}, {"stream", stream}, {"generation", m.value("generation", 0)}, {"ok", false},
+                   {"reason", "receiver already serves " + stream_}});
       }
       return;
     }
@@ -404,7 +406,7 @@ class Receiver {
                  << "@" << m.value("fps", 0) << " " << m.value("bitrate_kbps", 0) << " kbps gop=" << m.value("gop", 0)
                  << "; rtcp reports -> " << sender_host << ":" << sender_rtcp << " (until learned from incoming RTCP)";
     // Traces open and SSRC published: the sender may start (it waits for this before PLAYING).
-    ctl_.Send({{"type", "stream-ack"}, {"stream", stream_}, {"ok", true}});
+    ctl_.Send({{"type", "stream-ack"}, {"stream", stream_}, {"generation", m.value("generation", 0)}, {"ok", true}});
   }
   void CloseTraces() {
     std::lock_guard<std::mutex> lk(mu_);
