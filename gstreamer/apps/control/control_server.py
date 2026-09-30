@@ -35,7 +35,7 @@ class Session:
         self.name = name
         self.senders = {}    # stream id -> writer
         self.receivers = {}  # receiver id -> (writer, info dict)
-        self.pending_ack = {}  # stream id -> (receiver writer, generation): the one connection that may ack
+        self.pending_ack = {}  # stream id -> (receiver writer, sender writer, generation): the handshake's two connections
         self.generation = 0
 
 
@@ -100,6 +100,7 @@ class ControlServer:
             if msg["stream"] in s.senders:
                 log.warning("[%s] sender %s re-registered while another connection holds that stream id "
                             "(two senders with the same --stream-id?)", s.name, msg["stream"])
+                self.drop_pending_of(s, s.senders[msg["stream"]])
             s.senders[msg["stream"]] = writer
             self.peers[writer] = (s.name, "sender", msg["stream"])
             log.info("[%s] sender %s registered (to %s)", s.name, msg["stream"], msg.get("to"))
@@ -110,6 +111,7 @@ class ControlServer:
             if rid in s.receivers:
                 log.warning("[%s] receiver %s re-registered while another connection holds that id "
                             "(two receivers with the same --receiver-id?)", s.name, rid)
+                self.drop_pending_of(s, s.receivers[rid][0])
             info = {"rtp_port": int(msg["rtp_port"]), "rtcp_port": int(msg["rtcp_port"]), "host": msg.get("host")}
             s.receivers[rid] = (writer, info)
             self.peers[writer] = (s.name, "receiver", rid)
@@ -117,6 +119,11 @@ class ControlServer:
                      info["rtcp_port"], info["host"] or "(control host)")
             for w in s.senders.values():
                 await self.send(w, self.ready_msg(rid, info))
+
+    @staticmethod
+    def drop_pending_of(s, conn):
+        for st in [st for st, (rw, sw, _) in s.pending_ack.items() if rw is conn or sw is conn]:
+            s.pending_ack.pop(st, None)
 
     async def route_stream_start(self, writer, msg):
         sname, _, stream = self.peers[writer]
@@ -129,7 +136,7 @@ class ControlServer:
         out["stream"] = stream
         out["sender_host"] = writer.get_extra_info("peername")[0]
         s.generation += 1
-        s.pending_ack[stream] = (s.receivers[rid][0], s.generation)   # bound to this connection, this handshake
+        s.pending_ack[stream] = (s.receivers[rid][0], writer, s.generation)   # bound to both connections, this handshake
         out["generation"] = s.generation
         await self.send(s.receivers[rid][0], out)
         log.info("[%s] stream-start %s -> %s (ssrc %s, %sx%s@%s %s kbps)", sname, stream, rid, msg.get("ssrc"),
@@ -146,15 +153,16 @@ class ControlServer:
         # receiver with the same id is a different connection and never saw the stream-start), and only
         # for the current handshake generation.
         pend = s.pending_ack.get(stream)
-        if role != "receiver" or pend is None or pend[0] is not writer or msg.get("generation") != pend[1]:
+        if role != "receiver" or pend is None or pend[0] is not writer or msg.get("generation") != pend[2]:
             log.warning("[%s] stream-ack for %s from %s %s is not the connection/generation that got stream-start -> dropped",
                         sname, stream, role, rid)
             return
-        if stream not in s.senders:
-            log.warning("[%s] stream-ack from %s for unknown stream %s", sname, rid, stream)
+        recv_w, send_w, _ = s.pending_ack.pop(stream)
+        # deliver only to the sender connection that started this handshake (a replacement sender never sent it)
+        if s.senders.get(stream) is not send_w:
+            log.warning("[%s] stream-ack for %s: the sender connection that started the handshake is gone -> dropped", sname, stream)
             return
-        s.pending_ack.pop(stream, None)
-        await self.send(s.senders[stream], msg)
+        await self.send(send_w, msg)
         log.info("[%s] stream-ack %s -> %s ok=%s %s", sname, rid, stream, msg.get("ok"), msg.get("reason", ""))
 
     async def route_profile(self, writer, msg):
@@ -174,11 +182,11 @@ class ControlServer:
         if role == "sender":
             if s.senders.get(pid) is writer:
                 s.senders.pop(pid, None)
-        else:
-            if s.receivers.get(pid, (None,))[0] is writer:
-                s.receivers.pop(pid, None)
-            for st in [st for st, (w, _) in s.pending_ack.items() if w is writer]:
-                s.pending_ack.pop(st, None)   # a pending handshake dies with its connection
+        elif s.receivers.get(pid, (None,))[0] is writer:
+            s.receivers.pop(pid, None)
+        # a pending handshake dies with either of its connections
+        for st in [st for st, (rw, sw, _) in s.pending_ack.items() if rw is writer or sw is writer]:
+            s.pending_ack.pop(st, None)
         log.info("[%s] %s %s disconnected", sname, role, pid)
 
 

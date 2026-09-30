@@ -665,3 +665,10 @@ take the tree as a parameter.
   wrong object) was caught by the sender's 5 s ack watchdog (run marked FAIL) before it reached a commit.
   Re-verified: demo-local 361/361/361 + 181/181/181 (results/20260930-163242-demo-local), run-local
   (results/20260930-163320-gst-review3).
+* Codex pass 4 (same day): the two remaining PARTIALs fixed — the stream-ack handshake is bound to BOTH connections
+  (receiver and sender) plus a generation, and cleared when either disconnects or is replaced (in-memory checks:
+  sender disconnect / sender replacement / receiver replacement / stale generation / replay all dropped, the intended
+  ack forwarded once); RTCP endpoint learning requires a fully valid compound per RFC 3550 §6.4.1/6.4.2 (report-count
+  sized SR/RR, padding only on the last packet with a sane count byte, known packet types, exact tiling) — 11 crafted
+  packets checked (scratchpad rtcp_valid_test.cc, not versioned): the 8-byte "RR with rc=1" and padded-not-last cases are
+  now rejected. Re-verified: demo-local 20260930-163749-demo-local, run-local 20260930-163815-gst-review4.

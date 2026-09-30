@@ -226,10 +226,12 @@ inline void FillRtcpRow(GstBuffer* b, uint8_t dir, RtcpPacketRow* r) {
   gst_buffer_unmap(b, &map);
 }
 
-// Strict validation (unlike FillRtcpRow, which is a tolerant trace parser): the whole buffer must be a
-// well-formed RTCP compound (RFC 3550 §6.1 / §6.4: version 2, headers exactly tiling the buffer), and its
-// first packet must be an SR (pt 200, >= 28 bytes: header + sender info) or RR (pt 201, >= 8 bytes)
-// whose SSRC is `ssrc`. Used before letting a packet change where RTCP reports are sent.
+// Strict validation (unlike FillRtcpRow, which is a tolerant trace parser). RFC 3550 §6.1 / §6.4.1 /
+// §6.4.2: every packet has version 2; the lengths tile the buffer exactly; padding (P bit) is allowed only
+// on the last packet of the compound and its count byte must fit; the first packet must be an SR
+// (pt 200: 8-byte header + 20-byte sender info + RC x 24-byte report blocks) or an RR (pt 201: 8 + RC x 24)
+// whose length matches its report count exactly and whose SSRC is `ssrc`. Used before letting a packet
+// change where RTCP reports are sent, so a spoofed or malformed datagram cannot redirect them.
 inline bool IsValidRtcpCompoundFrom(GstBuffer* b, uint32_t ssrc) {
   GstMapInfo map;
   if (!gst_buffer_map(b, &map, GST_MAP_READ)) return false;
@@ -238,17 +240,25 @@ inline bool IsValidRtcpCompoundFrom(GstBuffer* b, uint32_t ssrc) {
   int idx = 0;
   while (off + 4 <= map.size) {
     const uint8_t* p = map.data + off;
-    if ((p[0] >> 6) != 2) { ok = false; break; }
+    if ((p[0] >> 6) != 2) { ok = false; break; }                       // version
+    const bool padded = (p[0] & 0x20) != 0;
+    const unsigned rc = p[0] & 0x1f;                                   // RC / SC / FMT
+    const uint8_t pt = p[1];
     const size_t len = (static_cast<size_t>((p[2] << 8) | p[3]) + 1) * 4;
-    if (len < 4 || off + len > map.size) { ok = false; break; }
+    if (len < 4 || off + len > map.size) { ok = false; break; }         // must tile the buffer
+    if (padded) {                                                      // §6.4.1: only the last packet may be padded
+      if (off + len != map.size) { ok = false; break; }
+      const uint8_t pad = p[len - 1];
+      if (pad == 0 || pad > len - 4) { ok = false; break; }
+    }
     if (idx == 0) {
-      const uint8_t pt = p[1];
-      const size_t min_len = pt == 200 ? 28 : pt == 201 ? 8 : 0;
-      if (min_len == 0 || len < min_len) { ok = false; break; }
+      const size_t body = padded ? len - p[len - 1] : len;              // length without padding octets
+      const size_t want = pt == 200 ? 28 + 24 * rc : pt == 201 ? 8 + 24 * rc : 0;
+      if (want == 0 || body != want) { ok = false; break; }             // SR/RR sized exactly by its report count
       const uint32_t s = (uint32_t)p[4] << 24 | (uint32_t)p[5] << 16 | (uint32_t)p[6] << 8 | p[7];
       if (s != ssrc) { ok = false; break; }
       ok = true;
-    }
+    } else if (pt < 200 || pt > 206) { ok = false; break; }            // unknown packet type in the compound
     off += len;
     ++idx;
   }
