@@ -841,3 +841,13 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   local copies are recorded as MISSING -> INVALID (gstreamer too).
 * Re-verified: build test bad=0 (16 cases); demo-local 2 cams 0 loss with exact per-launch collection; rung switch
   at IDR 120 (298/298); `make run-local TREE=ffmpeg` 1136/1136, `decoder_held_buffers`=0.
+
+## 2026-09-30 — ffmpeg/ tree: Codex passes 3–5, review closed
+* Pass 3 (2 findings): arrival first/last/count are tracked per ASSEMBLY inside the depacketizer (`Push()` takes the
+  arrival stamp; events carry the span), so a same-timestamp sequence reset no longer merges two AUs' arrival
+  records — the receiver's per-timestamp `cur_/prev_` bookkeeping is gone; an orphan-fragment run ends at a received
+  FU end (E bit) so two discarded NALs in one AU count as 2. Pass 4 (1 Low): the run also ends at a single-NAL /
+  STAP-A boundary. Pass 5: "no finding of any severity from passes 1–4 remains open at 81aace5".
+* Test: 7 file cases + 12 synthetic cases (fu-mid/end/start, reset, two-nals-lost, nal-boundary-ends-orphan,
+  same-ts-reset-arrivals, orphans-only, bad-stap, late, misorder-bound, ts-wrap), run on every build.
+* Loopback after the changes: 361/361 both cams, rx-frames first->last packet arrival 0.05 ms median per AU.
