@@ -25,3 +25,5 @@ __pycache__/
 /ran/core/subscriber_db.csv
 # downloaded originals (Kendo zip, yt-dlp sources)
 /video/sources/
+# reference code checkouts (docs/reference_code/fetch.sh); only fetch.sh, the lock and README.md are versioned
+/docs/reference_code/*/

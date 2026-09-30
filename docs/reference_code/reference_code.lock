@@ -1,0 +1,9 @@
+# name  url  commit  (docs/reference_code/fetch.sh --pin)
+artic https://github.com/pku-netvideo/Artic.git 5d8f47a2ada4776208a68e4388ba05a7fa7f9d14
+devibench https://github.com/pku-netvideo/DeViBench.git cab75d3e96ebf35fb3b833498c20787d4e75f93f
+smec-auto-evaluation https://github.com/smec-project/auto-evaluation.git ef885cf7ff5bc6d81555131c03fb09b16f6eb1f4
+smec-client-prober https://github.com/smec-project/client-prober.git 4517d81389ec1a70d1de2d0adf207ed456f1aa1a
+smec-edge-applications https://github.com/smec-project/edge-applications.git b66409c01b126f3daec1dff12219875ea9064f92
+smec-edge-manager https://github.com/smec-project/edge-manager.git 09237685f2f350a5f06832aac4812b93b76235cb
+smec-measurement https://github.com/smec-project/smec-measurement.git ab610827faa86b5bea40b0fa98fa4b5cd83c3bd6
+smec-srsRAN_Project https://github.com/smec-project/srsRAN_Project.git 5b94d2b8a09ea06c3d4255ad613cef41f95fba92
