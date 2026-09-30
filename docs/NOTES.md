@@ -714,3 +714,27 @@ start. Preflight: chrony RMS 45 / 47 µs, link cam0 PUSCH SNR 20 dB CQI 10, cam1
 * Tooling: exp_run_report.py's last W3C-stats dependency (aggregate kbps) replaced by the RTP ledger; plot_run works on the run.
 * Next runs (one variable each): (a) same placement, cam1 at 1000 kbps / cam0 2500 (profile fitted to the link) — expect no
   queue; (b) move cam1's phone to >= 20 dB and repeat 2 x 2500; (c) 5ue-720p30.json (5 x 1000 kbps) once (a) is clean.
+
+## 2026-09-30 — rtpgccbwe (GCC) on GStreamer 1.20.3: compatible, verified on loopback
+Question: option B (docs/SCENARIO_EDGE_PROFILES.md, "fixed fps/resolution + GCC-driven bitrate" on the gstreamer tree)
+needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires GStreamer 1.22 — does the rtp plugin
+(rtpgccbwe) work on our 1.20.3?
+* FACT (crates.io metadata): every `gst-plugin-rtp` release from 0.11 to 0.15.4 is built for the GStreamer 1.20 API
+  (Cargo feature `v1_20`); only the webrtc plugin needs 1.22. 0.13.7 has MSRV Rust 1.71, so Ubuntu 22.04's apt
+  `rustc/cargo 1.75` builds it (no rustup). 0.14/0.15 need Rust 1.85+/1.92.
+* FACT (our 1.20.3 source): `gstrtpsession.c gst_rtp_session_notify_twcc` pushes the "RTPTWCCPackets" custom upstream
+  event that rtpgccbwe consumes (`gcc/imp.rs:1186`), so the feedback path exists in 1.20.
+* Built: `gstreamer/scripts/build_gst_rs.sh` (crate pinned in gstreamer.lock: gst-plugin-rtp 0.13.7) -> 49 s ->
+  `gstreamer/build/gst-plugins-rs/libgstrsrtp.so`; `gst-inspect-1.0 rtpgccbwe` OK with GST_PLUGIN_PATH.
+* Loopback check (scratchpad gcc_check.py, not versioned): videotestsrc snow 720p30 -> x264enc cbr 3000 -> rtph264pay with
+  the TWCC header extension (id 1, added via the `add-extension` signal as in gst-examples/webrtc/sendrecv) ->
+  rtpgccbwe(min 0.3, max 6 Mbps) -> rtpbin(rtp-profile=avpf) -> udpsink; receiver udpsrc with `extmap-1` in caps ->
+  rtpbin(avpf), RTCP both ways; `notify::estimated-bitrate` -> x264 `bitrate`. tc tbf 1.5 Mbit/s on lo from t=10 s
+  to 25 s. Result: estimate 3.1 -> 5.7 Mbps unconstrained (0-8 s), 5.7 -> 1.2 (t=11.5) -> 0.55 Mbps (t=13) under the
+  limit, then +8 %/s ramp to 1.3 Mbps by t=25, 4.2 Mbps by t=40 after the limit was removed; 290 estimate updates in
+  40 s. GCC behaviour as expected (undershoot on delay increase, slow multiplicative recovery). Pitfall found: in a
+  gst-launch string `rtpgccbwe ! rtpbin ! udpsink` links the wrong rtpbin pads (rtpgccbwe reported NotLinked); the
+  send session must be wired explicitly (`rtpbin.send_rtp_sink_0`, `rtpbin.send_rtp_src_0`), as our C++ does.
+* Decision: option B = the existing sender/receiver + `--cc gcc` (TWCC extension, rtpgccbwe before the send session,
+  avpf, estimate -> x264 bitrate through the same path as the `profile` message) vs `--cc profile` (default, no
+  estimator). fps/resolution stay caps-fixed in both. The laptops need libgstrsrtp.so (copy) + GST_PLUGIN_PATH.

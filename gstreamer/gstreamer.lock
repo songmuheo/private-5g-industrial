@@ -9,3 +9,8 @@ sparse:
   - subprojects/gst-plugins-base/tests/examples/app
   - subprojects/gst-plugins-good/tests/examples/rtp
   - subprojects/gst-rtsp-server/examples
+# GCC bandwidth estimator (rtpgccbwe) from gst-plugins-rs, built from the crates.io release of the rtp plugin.
+# 0.13.x targets the GStreamer 1.20 API (Cargo feature v1_20) and Rust >= 1.71 (Ubuntu 22.04's rustc 1.75 suffices);
+# the webrtc plugin of the same project needs GStreamer 1.22 and is NOT used.
+gst_plugin_rtp_crate: gst-plugin-rtp
+gst_plugin_rtp_version: 0.13.7
