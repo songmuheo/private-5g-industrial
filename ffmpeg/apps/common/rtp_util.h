@@ -266,13 +266,16 @@ class H264Depacketizer {
     bool complete = false; uint32_t rtp_ts = 0; int bytes = 0; int packets = 0; int lost_packets = 0; int lost_fragments = 0; int is_idr = 0;
     int damaged = 0;   // malformed STAP-A / buffer overflow seen in this AU
     int buffer = 0;    // index for data(k)/size(k)
+    int64_t first_arrival_ns = 0, last_arrival_ns = 0;   // of the packets that entered THIS assembly (caller's clock)
   };
   // Counters written on the receive thread, read from any thread (relaxed atomics: a sample may lag a packet).
   struct Counters { std::atomic<int64_t> late_or_dup{0}, seq_resets{0}; };
 
-  // Feed one RTP packet. Returns the number of AUs that ended (0..2), filled into out[0..n-1] in order.
+  // Feed one RTP packet (arrival_ns: the caller's arrival stamp, carried per assembly into the events so that an
+  // AU's first/last arrival is that of the packets that actually built it — also across a same-timestamp reset).
+  // Returns the number of AUs that ended (0..2), filled into out[0..n-1] in order.
   // last_accepted() tells whether the packet entered assembly (false: duplicate/late, dropped).
-  int Push(const RtpHeader& h, AuEvent out[2]) {
+  int Push(const RtpHeader& h, AuEvent out[2], int64_t arrival_ns = 0) {
     int n_out = 0;
     accepted_ = true;
     if (have_seq_) {
@@ -291,6 +294,8 @@ class H264Depacketizer {
       if (Emit(&out[n_out], false)) n_out++;
     }
     if (!have_ts_ || h.ts != cur_ts_) Reset(h.ts);
+    if (packets_ == 0) first_arrival_ = arrival_ns;
+    last_arrival_ = arrival_ns;
     if (pending_gap_) { lost_ += pending_gap_; pending_gap_ = 0; if (fu_open_) { lost_frag_++; fu_open_ = false; orphan_ = true; DropOpenFu(); } }   // within this AU (or after a marker-ended one: this AU's head); orphan_: the surviving continuations of that FU are not counted again
     packets_++;
     const uint8_t* p = h.payload; const int n = h.payload_len;
@@ -316,7 +321,7 @@ class H264Depacketizer {
           if (ntype == 5) idr_ = 1;
         }
         if (fu_open_) { Append(p + 2, n - 2); if (e) fu_open_ = false; }
-        else if (!orphan_) { orphan_ = true; lost_frag_++; }   // continuation without a start: that NAL is lost
+        else { if (!orphan_) { orphan_ = true; lost_frag_++; } if (e) orphan_ = false; }   // continuation without a start: that NAL is lost, counted once; its end fragment closes the run (RFC 6184 §5.8 E bit)
       } else {
         damaged_ = 1;                            // STAP-B / MTAP / FU-B (RFC 6184 §5.2 non-interleaved mode never sends them)
       }
@@ -337,6 +342,7 @@ class H264Depacketizer {
     out->complete = by_marker && lost_ == 0 && lost_frag_ == 0 && !damaged_ && len_ > 0;   // (a reset closes an AU with by_marker=false)
     out->rtp_ts = cur_ts_; out->bytes = len_; out->packets = packets_; out->lost_packets = lost_; out->lost_fragments = lost_frag_;
     out->is_idr = idr_; out->damaged = damaged_; out->buffer = cur_;
+    out->first_arrival_ns = first_arrival_; out->last_arrival_ns = last_arrival_;
     emitted_len_[cur_] = len_;
     cur_ = (cur_ + 1) % kBuffers;   // the emitted buffer stays untouched for the next two emissions
     len_ = 0;
@@ -353,6 +359,7 @@ class H264Depacketizer {
   int emitted_len_[kBuffers] = {0, 0, 0};
   int len_ = 0, packets_ = 0, lost_ = 0, lost_frag_ = 0, idr_ = 0, fu_start_ = 0, damaged_ = 0, pending_gap_ = 0;
   uint32_t cur_ts_ = 0; uint16_t last_seq_ = 0;
+  int64_t first_arrival_ = 0, last_arrival_ = 0;
   bool have_ts_ = false, have_seq_ = false, fu_open_ = false, orphan_ = false, accepted_ = true;
   Counters counters_;
 };

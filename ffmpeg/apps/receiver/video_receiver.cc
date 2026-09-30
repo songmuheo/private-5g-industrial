@@ -190,20 +190,12 @@ class Receiver {
       pkts_++; bytes_ += n;
       if (h.pt != pt_.load(std::memory_order_relaxed)) continue;
       H264Depacketizer::AuEvent ev[2];
-      const int n_ev = depack_->Push(h, ev);      // 0..2 AUs ended with this packet (each in its own buffer)
-      if (!depack_->last_accepted()) continue;    // duplicate / late packet: counted by the depacketizer, not part of any AU
-      // per-timestamp arrival bookkeeping of ACCEPTED packets: an AU closed by the marker is `cur`, one closed by a new
-      // timestamp is `prev` (the events of this push refer to one of the two by rtp_ts)
-      if (!have_cur_ || h.ts != cur_.ts) { prev_ = cur_; cur_ = {h.ts, arrival_mono, arrival_mono, 1}; have_cur_ = true; }
-      else { cur_.last = arrival_mono; cur_.n++; }
-      for (int k = 0; k < n_ev; ++k) {
-        const Arr& a = (ev[k].rtp_ts == cur_.ts) ? cur_ : prev_;
-        DecodeAu(ev[k], a.first, a.last, a.n);
-      }
+      const int n_ev = depack_->Push(h, ev, arrival_mono);   // 0..2 AUs ended with this packet (each in its own buffer);
+      for (int k = 0; k < n_ev; ++k) DecodeAu(ev[k]);        // each carries the arrival span/count of ITS packets
     }
   }
 
-  void DecodeAu(const H264Depacketizer::AuEvent& ev, int64_t first, int64_t last, int npk) {
+  void DecodeAu(const H264Depacketizer::AuEvent& ev) {
     if (!ev.complete) { incomplete_++; lost_frag_ += ev.lost_fragments; lost_pkts_ += ev.lost_packets; damaged_ += ev.damaged; }
     if (ev.bytes == 0) { empty_aus_++; return; }   // every byte of this AU was lost or discarded: counted, nothing to decode
     const int64_t t0 = NowMonoNs();
@@ -226,7 +218,7 @@ class Receiver {
       if (auto* t = decoded_p_.load(std::memory_order_acquire))
         t->Write(DecodedFrameLedgerRow{ts, t0, t1, w1, ev.bytes, ev.is_idr ? 3 : 4, -1, -1, -1, frame_->width, frame_->height});
       if (auto* t = frames_p_.load(std::memory_order_acquire))
-        t->Write(DecodedFrameRow{frame_idx_++, ts, -1, (int64_t)ts, 0, w1, t1, frame_->width, frame_->height, npk, first, last, ssrc_.load()});
+        t->Write(DecodedFrameRow{frame_idx_++, ts, -1, (int64_t)ts, 0, w1, t1, frame_->width, frame_->height, ev.packets, ev.first_arrival_ns, ev.last_arrival_ns, ssrc_.load()});
       av_frame_unref(frame_);
     }
   }
@@ -273,8 +265,6 @@ class Receiver {
   static constexpr int kMaxAuBytes = 4 << 20;   // one access unit (an 8 Mbps IDR is ~100 KB; generous)
   AVBufferRef* au_buf_[H264Depacketizer::kBuffers] = {nullptr, nullptr, nullptr};
   std::unique_ptr<H264Depacketizer> depack_;
-  struct Arr { uint32_t ts = 0; int64_t first = 0, last = 0; int n = 0; };
-  Arr cur_, prev_; bool have_cur_ = false;   // receive thread only
   std::atomic<uint32_t> ssrc_{0}; std::atomic<uint8_t> pt_{96};
   std::atomic<int64_t> pkts_{0}, bytes_{0}, frame_idx_{0}, incomplete_{0}, empty_aus_{0}, damaged_{0}, lost_pkts_{0}, lost_frag_{0}, decode_fail_{0}, buf_held_{0};
   std::atomic<RtpPacketTrace*> rtp_p_{nullptr}; std::atomic<RtcpPacketTrace*> rtcp_p_{nullptr};

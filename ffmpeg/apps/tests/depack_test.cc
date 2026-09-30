@@ -184,6 +184,24 @@ int main(int argc, char** argv) {
     seq = (uint16_t)(seq + 4000); n = push(mk(f3, true, seq++, ts), ev);
     CHECK(n == 2 && !ev[0].complete && ev[0].lost_fragments == 1 && ev[0].bytes == 8 && !ev[1].complete && ev[1].lost_fragments == 1 && ev[1].bytes == 0
           && d2.counters().seq_resets.load() == 1, "synthetic e: n=%d [0]{complete=%d frag=%d bytes=%d} [1]{complete=%d frag=%d bytes=%d} resets=%lld", n, ev[0].complete, ev[0].lost_fragments, ev[0].bytes, ev[1].complete, ev[1].lost_fragments, ev[1].bytes, (long long)d2.counters().seq_resets.load());
+    // (e2) two fragmented NALs in one AU, first loses its middle and second loses its start: two NALs discarded,
+    //      counted separately (the first orphan run ends at its E fragment); arrival span = of the packets that built it
+    ts += 3000; { int c2 = 0; RtpHeader h;
+      auto pa = [&](const std::vector<uint8_t>& p, int64_t arr) { CHECK(ParseRtp(p.data(), (int)p.size(), &h), "e2: bad RTP"); return d2.Push(h, ev, arr); };
+      c2 += pa(mk(f1, false, seq++, ts), 100); seq++;                  // start, middle lost
+      c2 += pa(mk(f3, false, seq++, ts), 200);                         // end: orphan run ends here
+      seq++; c2 += pa(mk(f2, false, seq++, ts), 300);                  // second NAL: start lost, middle orphan
+      c2 += pa(mk(f3, true, seq++, ts), 400);                          // its end, marker
+      CHECK(c2 == 1 && !ev[0].complete && ev[0].lost_fragments == 2 && ev[0].lost_packets == 2 && ev[0].bytes == 0 && ev[0].packets == 4
+            && ev[0].first_arrival_ns == 100 && ev[0].last_arrival_ns == 400, "synthetic e2: n=%d frag=%d lost=%d bytes=%d packets=%d arrival %lld..%lld",
+            c2, ev[0].lost_fragments, ev[0].lost_packets, ev[0].bytes, ev[0].packets, (long long)ev[0].first_arrival_ns, (long long)ev[0].last_arrival_ns); }
+    // (e3) same-timestamp reset: the two events carry their OWN arrival spans and packet counts
+    ts += 3000; { int c3 = 0; RtpHeader h;
+      auto pa = [&](const std::vector<uint8_t>& p, int64_t arr) { CHECK(ParseRtp(p.data(), (int)p.size(), &h), "e3: bad RTP"); return d2.Push(h, ev, arr); };
+      c3 += pa(mk(single, false, seq++, ts), 10); c3 += pa(mk(single, false, seq++, ts), 20);
+      seq = (uint16_t)(seq + 4000); c3 += pa(mk(single, true, seq++, ts), 30);
+      CHECK(c3 == 2 && ev[0].packets == 2 && ev[0].first_arrival_ns == 10 && ev[0].last_arrival_ns == 20 && ev[1].packets == 1 && ev[1].first_arrival_ns == 30 && ev[1].last_arrival_ns == 30 && ev[1].complete,
+            "synthetic e3: n=%d [0]{packets=%d %lld..%lld} [1]{packets=%d %lld..%lld complete=%d}", c3, ev[0].packets, (long long)ev[0].first_arrival_ns, (long long)ev[0].last_arrival_ns, ev[1].packets, (long long)ev[1].first_arrival_ns, (long long)ev[1].last_arrival_ns, ev[1].complete); }
     // (f) an AU of orphans only: bytes=0 event, still reported
     ts += 3000; n = push(mk(f2, false, seq++, ts), ev); n += push(mk(f3, true, seq++, ts), ev);
     CHECK(n == 1 && !ev[0].complete && ev[0].bytes == 0 && ev[0].packets == 2 && ev[0].lost_fragments == 1, "synthetic f: n=%d complete=%d bytes=%d packets=%d frag=%d", n, ev[0].complete, ev[0].bytes, ev[0].packets, ev[0].lost_fragments);
@@ -205,6 +223,6 @@ int main(int argc, char** argv) {
   CHECK(complete == (int)N - 5, "complete=%d, expected %zu (all but MID/TAIL/HEAD/REORDER/TWO_EVENTS)", complete, N - 5);
   CHECK(dp.counters().late_or_dup == 2, "late_or_dup=%lld, expected 2 (duplicate + reordered)", (long long)dp.counters().late_or_dup);
   CHECK(dp.counters().seq_resets == 0, "seq_resets=%lld, expected 0 (wraparound is not a reset)", (long long)dp.counters().seq_resets);
-  std::printf("aus=%zu packets=%d events=%d complete=%d file-cases={mid,tail,head,dup,reorder,two-events,seq-wrap} synthetic={fu-mid,fu-end,fu-start,reset,orphans-only,bad-stap,late,misorder-bound,ts-wrap} bad=%d\n", N, pkts, events, complete, g_bad);
+  std::printf("aus=%zu packets=%d events=%d complete=%d file-cases={mid,tail,head,dup,reorder,two-events,seq-wrap} synthetic={fu-mid,fu-end,fu-start,reset,two-nals-lost,same-ts-reset-arrivals,orphans-only,bad-stap,late,misorder-bound,ts-wrap} bad=%d\n", N, pkts, events, complete, g_bad);
   return g_bad ? 1 : 0;
 }
