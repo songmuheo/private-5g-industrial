@@ -870,3 +870,29 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   on `asset=MISSING` (it only logged it); the "all streams over the 5G link" line is not printed for an INVALID run;
   a smoke test (`require_gnb=false`) never joins `results/CURRENT` — my demo-local re-test had landed inside the
   live OTA directory `results/20260930-223304-2ue-ffmpeg` (already INVALID; its app/ now holds demo traces).
+
+## 2026-09-30 — first ffmpeg OTA run, 2 UEs (results/20260930-223304-2ue-ffmpeg): 0 loss, 41 ms median, IDRs staggered
+* Setup: MOT17-02 720p30 pre-encoded, both cams at the 2500 kbps rung (HRD-CBR: P 10417 B, IDR 14242 B), cam1
+  phase 30 slots, T-synchronised capture, 300 s. Links good this time: PUSCH SNR 21 / 24 dB, MCS median 16-19, CQI 15.
+* Result: cam0 9001/9001 frames, 116222/116222 packets; cam1 8971/8971, 115830/115830 — **zero loss on both**,
+  missed_slots 0, send_failures 0 (the gstreamer run 165543 had 4.8 % loss on cam1 at SNR 8-12 dB: link, not stack).
+  capture->app median 40.9 / 41.8 ms, p90 57 / 58, p99 68 / 76, max 107 / 127. Decomposition (all 9001 / 8971 frames
+  joined at gNB PDCP by rtp_ts): capture->last sendto 0.4 ms (no encoder), last sendto->gNB PDCP 38.4 / 39.3 ms median
+  (p99 66 / 74) = the UL air+queue part, gNB PDCP->app 2.0 ms. Packet OWD (sendto->kernel arrival) median 17.5 ms,
+  p99 57 / 63: the frame delay is dominated by waiting for the 12 packets of a frame to be granted (BSR/SR cycle),
+  not by the air time (grant->CRC 4.1 ms). IDR frames +6 ms median over P (47 vs 41; the HRD ladder keeps IDRs small).
+* IDR staggering verified on air: cam1's IDR captures are 1.000 s after cam0's throughout (151 / 150 IDRs).
+* RAN: PUSCH PRB utilisation 54-57 % (of 51 PRB x 400 UL slots/s), ~10.6 k UL grants / 30 s, rb_count median 30,
+  BLER at the 10 % OLLA target. Transient at t=260-280 s on both UEs: BSR peaks 77 / 40 KB, RLC reassembly timer
+  expirations 19 / 37 per 10 s, HARQ abandonments -> RLC AM recovered everything (still 0 app loss), p99 rose to
+  82-99 ms for that bin. Cause not identified (no phone-side data; both UEs at once suggests interference or a
+  scheduler event, not one phone's background traffic).
+* Operational mishaps, both mine, recorded for the record: (1) I edited ffmpeg/run_experiment.sh while the user's
+  run was executing — bash reads a script incrementally, so the running instance hit a syntax error at the collection
+  step; sender traces were collected by hand from results/20260930-223304-2ue-ffmpeg-223727-sender-camK on the
+  laptops. (2) My demo-local re-test (22:37:35-59) joined the live results/CURRENT and its receivers wrote into the
+  same app/ files: the rx CSVs contain a second writer's rows (demo ssrc 975103070 / 2818005170, 12 s), separable by
+  ssrc, no torn CSV lines (checked), one torn line in each rx-stats.jsonl (exp_run_report now skips such lines with a
+  warning). The OTA streams themselves were unaffected (announced first, decoded throughout; demo traffic was
+  loopback). Fixed the day before it could recur: require_gnb=false never joins CURRENT. Rule from now on: no script
+  edits and no smoke tests on the gNB PC while an OTA session is live.

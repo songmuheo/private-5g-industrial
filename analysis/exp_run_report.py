@@ -34,7 +34,8 @@ for s in streams:
     # W3C getStats lines exist only in webrtc runs; gstreamer runs carry rtpsession stats instead -> last=None
     last=None; STATS=f'{RD}/app/{s}-rx-stats.jsonl'
     for line in (open(STATS) if os.path.exists(STATS) else []):
-        j=json.loads(line)
+        try: j=json.loads(line)
+        except json.JSONDecodeError: print(f"  WARNING: unparsable line in {STATS} (skipped)"); continue   # a torn line must not hide the run
         for x in j.get('stats', []):
             if x['type']=='inbound-rtp' and x.get('kind')=='video': last=x
     # received kbps per bin from the RTP ledger itself (transport-neutral)
@@ -76,7 +77,8 @@ s2ip={v:k for k,v in ip2s.items()}
 for s in streams:
     cands={}; pairs={}; tr=None; STATS=f'{RD}/app/{s}-rx-stats.jsonl'
     for line in (open(STATS) if os.path.exists(STATS) else []):
-        j=json.loads(line)
+        try: j=json.loads(line)
+        except json.JSONDecodeError: continue   # torn line (two writers); already warned above
         for x in j.get('stats', []):
             if x['type'] in ('local-candidate','remote-candidate'): cands[x['id']]=x
             elif x['type']=='candidate-pair': pairs[x['id']]=x
