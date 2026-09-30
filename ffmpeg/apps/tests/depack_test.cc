@@ -9,6 +9,11 @@
 //   AU 18 reorder   : packets 1,2 swapped -> the late one is dropped: incomplete, lost_packets=1, late_or_dup=2 total
 //   two events      : AU N-1's marker dropped, then a hand-made one-packet AU with marker -> Push returns 2
 //   wraparound      : sequence numbers start at 65500 (muxer `seq`), so they wrap during the file: seq_resets=0
+//   lost_fragments  : for every file case, exactly 1 if the dropped packet was an FU-A (start, middle or end), else 0
+// Synthetic FU-A section (hand-built packets, so the roles are certain, RFC 6184 §5.8): middle fragment lost (one
+// discarded NAL, counted once), end lost then new timestamp (partial NAL discarded), start lost (orphans dropped,
+// counted once), sequence reset in the middle of an FU (old AU closed incomplete, the end is an orphan), an AU made
+// only of orphans (bytes=0 event), a malformed STAP-A (sticky damage), RTP timestamp wrap (0xFFFFF000 -> 0x00000BB8).
 // Run by scripts/build_apps.sh with a small test stream produced by x264 on the fly.
 #include <cstdio>
 #include <cstdlib>
@@ -63,8 +68,15 @@ int main(int argc, char** argv) {
 
   H264Depacketizer dp; int pkts = 0, events = 0, complete = 0; std::vector<int> got(N + 1, 0);   // events per AU index (N = synthetic)
   uint32_t base = 0; bool base_known = false;   // wire rtp_ts of AU i = base + i*3000 (rtpenc picks a random base)
+  std::vector<int> dropped_type(N, -1);   // NAL-unit type byte of the packet each case dropped (28 = FU-A)
   auto check_event = [&](const H264Depacketizer::AuEvent& ev, size_t i) {
     events++; got[i]++;
+    if (case_of(i) != NORMAL && case_of(i) != DUP) {
+      const int want_frag = dropped_type[i] == 28 ? 1 : 0;
+      CHECK(ev.lost_fragments == want_frag, "AU %zu: lost_fragments=%d, expected %d (dropped packet type %d)", i, ev.lost_fragments, want_frag, dropped_type[i]);
+    } else {
+      CHECK(ev.lost_fragments == 0 && ev.packets == (int)g_pkts.size(), "AU %zu: lost_fragments=%d packets=%d/%zu", i, ev.lost_fragments, ev.packets, g_pkts.size());
+    }
     if (!base_known) { base = ev.rtp_ts - (uint32_t)(i * 3000); base_known = true; }
     CHECK(ev.rtp_ts == base + (uint32_t)(i * 3000), "AU %zu: rtp_ts %u, expected base+%zu", i, ev.rtp_ts, i * 3000);
     CHECK(ev.is_idr == aus[i].is_idr, "AU %zu: idr %d vs %d", i, ev.is_idr, aus[i].is_idr);
@@ -91,9 +103,11 @@ int main(int argc, char** argv) {
     const size_t np = g_pkts.size(); const Case c = case_of(i);
     CHECK(np >= 3, "AU %zu has only %zu packets; the test stream must fragment every AU", i, np);
     std::vector<size_t> order; for (size_t k = 0; k < np; ++k) order.push_back(k);
-    if (c == MID_DROP) order.erase(order.begin() + 1);
-    if (c == TAIL_DROP || c == TWO_EVENTS) order.pop_back();
-    if (c == HEAD_DROP) order.erase(order.begin());
+    auto ptype = [&](size_t k) { return g_pkts[k][12] & 0x1f; };
+    if (c == MID_DROP) { dropped_type[i] = ptype(1); order.erase(order.begin() + 1); }
+    if (c == TAIL_DROP || c == TWO_EVENTS) { dropped_type[i] = ptype(np - 1); order.pop_back(); }
+    if (c == HEAD_DROP) { dropped_type[i] = ptype(0); order.erase(order.begin()); }
+    if (c == REORDER) dropped_type[i] = ptype(1);   // the late one is dropped
     if (c == DUP) order.insert(order.begin() + 2, 1);
     if (c == REORDER) std::swap(order[1], order[2]);
     for (size_t k : order) {
@@ -126,9 +140,71 @@ int main(int argc, char** argv) {
     }
   }
   for (size_t i = 0; i <= N; ++i) CHECK(got[i] == 1, "AU %zu: %d events, expected exactly 1", i, got[i]);
+  { int roles = 0; for (size_t i = 0; i < N; ++i) if (dropped_type[i] == 28) roles++; CHECK(roles >= 1, "no file case dropped an FU-A packet; the fixture no longer exercises fragment loss"); }
+
+  // ---- synthetic FU-A section: hand-built packets so every role is certain ----
+  {
+    H264Depacketizer d2; int64_t late0 = 0;
+    uint16_t seq = 0; uint32_t ts = 0xFFFFF000u;   // wraps to 0x00000BB8 after 2 steps of 3000... (ts += 3000 each AU)
+    auto mk = [&](std::vector<uint8_t> payload, bool marker, uint16_t sq, uint32_t t) {
+      std::vector<uint8_t> p = {0x80, (uint8_t)((marker ? 0x80 : 0) | 96), (uint8_t)(sq >> 8), (uint8_t)sq, (uint8_t)(t >> 24), (uint8_t)(t >> 16), (uint8_t)(t >> 8), (uint8_t)t, 1, 2, 3, 4};
+      p.insert(p.end(), payload.begin(), payload.end()); return p; };
+    auto push = [&](const std::vector<uint8_t>& p, H264Depacketizer::AuEvent ev[2]) { RtpHeader h; CHECK(ParseRtp(p.data(), (int)p.size(), &h), "synthetic: bad RTP"); return d2.Push(h, ev); };
+    // one AU = [single NAL type 1 (4 bytes)] + FU-A of a type-1 NAL split in 3 (S, middle, E), 5 payload bytes each
+    const std::vector<uint8_t> single = {0x41, 0xAA, 0xBB, 0xCC};
+    auto fu = [](int s, int e, std::vector<uint8_t> frag) { std::vector<uint8_t> p = {0x5c, (uint8_t)((s << 7) | (e << 6) | 1)}; p.insert(p.end(), frag.begin(), frag.end()); return p; };
+    const std::vector<uint8_t> f1 = fu(1, 0, {1, 1, 1, 1, 1}), f2 = fu(0, 0, {2, 2, 2, 2, 2}), f3 = fu(0, 1, {3, 3, 3, 3, 3});
+    const int whole = 4 + 4 + 4 + 1 + 15;   // start code + single, start code + NAL header + 3 fragments
+    H264Depacketizer::AuEvent ev[2]; int n;
+    auto au = [&](bool drop1, bool drop2, bool drop3, bool marker_on_last, uint32_t t) {   // sends [single, f1, f2, f3] with drops; seq advances for dropped ones too
+      int cnt = 0;
+      n = push(mk(single, false, seq++, t), ev); cnt += n;
+      if (drop1) seq++; else { n = push(mk(f1, false, seq++, t), ev); cnt += n; }
+      if (drop2) seq++; else { n = push(mk(f2, false, seq++, t), ev); cnt += n; }
+      if (drop3) seq++; else { n = push(mk(f3, marker_on_last, seq++, t), ev); cnt += n; }
+      return cnt; };
+    // (a) intact AU, marker
+    n = au(false, false, false, true, ts); CHECK(n == 1 && ev[0].complete && ev[0].bytes == whole && ev[0].lost_fragments == 0 && ev[0].rtp_ts == ts, "synthetic a: n=%d complete=%d bytes=%d frag=%d", n, ev[0].complete, ev[0].bytes, ev[0].lost_fragments);
+    // (b) middle fragment lost: one NAL discarded, counted exactly once; the single NAL survives
+    ts += 3000; n = au(false, true, false, true, ts);
+    CHECK(n == 1 && !ev[0].complete && ev[0].lost_packets == 1 && ev[0].lost_fragments == 1 && ev[0].bytes == 8, "synthetic b: n=%d complete=%d lost=%d frag=%d bytes=%d", n, ev[0].complete, ev[0].lost_packets, ev[0].lost_fragments, ev[0].bytes);
+    // (c) end lost, then a new timestamp: the open FU is discarded at emission; ts wraps here (0xFFFFF000+6000 -> 0x770)
+    ts += 3000; CHECK(ts < 0x1000, "ts should have wrapped (0x%x)", ts);
+    n = au(false, false, true, true, ts); CHECK(n == 0, "synthetic c: nothing should be emitted yet (n=%d)", n);
+    ts += 3000; n = push(mk(single, true, seq++, ts), ev);   // next AU: its first packet ends the previous one; its own marker ends it -> 2 events
+    CHECK(n == 2 && !ev[0].complete && ev[0].lost_packets == 1 && ev[0].lost_fragments == 1 && ev[0].bytes == 8 && ev[0].rtp_ts == ts - 3000
+          && ev[1].complete && ev[1].bytes == 8 && ev[1].rtp_ts == ts, "synthetic c: n=%d [0]{complete=%d lost=%d frag=%d bytes=%d} [1]{complete=%d bytes=%d}", n, ev[0].complete, ev[0].lost_packets, ev[0].lost_fragments, ev[0].bytes, ev[1].complete, ev[1].bytes);
+    // (d) start lost: the two continuations are orphans, counted once
+    ts += 3000; n = au(true, false, false, true, ts);
+    CHECK(n == 1 && !ev[0].complete && ev[0].lost_packets == 1 && ev[0].lost_fragments == 1 && ev[0].bytes == 8, "synthetic d: n=%d complete=%d lost=%d frag=%d bytes=%d", n, ev[0].complete, ev[0].lost_packets, ev[0].lost_fragments, ev[0].bytes);
+    // (e) sequence reset inside an FU: start at seq s, end at s+4001 (same ts): the old AU closes incomplete at the
+    //     reset, the end is an orphan of the fresh AU (never concatenated, never complete)
+    ts += 3000; n = push(mk(single, false, seq++, ts), ev); n += push(mk(f1, false, seq++, ts), ev);
+    CHECK(n == 0, "synthetic e: premature emission");
+    seq = (uint16_t)(seq + 4000); n = push(mk(f3, true, seq++, ts), ev);
+    CHECK(n == 2 && !ev[0].complete && ev[0].lost_fragments == 1 && ev[0].bytes == 8 && !ev[1].complete && ev[1].lost_fragments == 1 && ev[1].bytes == 0
+          && d2.counters().seq_resets.load() == 1, "synthetic e: n=%d [0]{complete=%d frag=%d bytes=%d} [1]{complete=%d frag=%d bytes=%d} resets=%lld", n, ev[0].complete, ev[0].lost_fragments, ev[0].bytes, ev[1].complete, ev[1].lost_fragments, ev[1].bytes, (long long)d2.counters().seq_resets.load());
+    // (f) an AU of orphans only: bytes=0 event, still reported
+    ts += 3000; n = push(mk(f2, false, seq++, ts), ev); n += push(mk(f3, true, seq++, ts), ev);
+    CHECK(n == 1 && !ev[0].complete && ev[0].bytes == 0 && ev[0].packets == 2 && ev[0].lost_fragments == 1, "synthetic f: n=%d complete=%d bytes=%d packets=%d frag=%d", n, ev[0].complete, ev[0].bytes, ev[0].packets, ev[0].lost_fragments);
+    // (g) malformed STAP-A (declared size beyond the packet): damage is sticky, the marker cannot make it complete
+    ts += 3000; n = push(mk({0x58, 0x00, 0x40, 0x41, 0x01}, false, seq++, ts), ev); n += push(mk(single, true, seq++, ts), ev);
+    CHECK(n == 1 && !ev[0].complete && ev[0].damaged == 1 && ev[0].lost_packets == 0, "synthetic g: n=%d complete=%d damaged=%d lost=%d", n, ev[0].complete, ev[0].damaged, ev[0].lost_packets);
+    // (h) duplicate and late packets are rejected (last_accepted false) and do not touch the AU
+    ts += 3000; n = au(false, false, false, false, ts); CHECK(n == 0, "synthetic h: premature emission");
+    late0 = d2.counters().late_or_dup.load();
+    n = push(mk(f2, false, (uint16_t)(seq - 2), ts), ev); CHECK(n == 0 && !d2.last_accepted(), "synthetic h: late packet must be rejected");
+    n = push(mk(single, true, seq++, ts), ev);   // marker: the AU is intact
+    CHECK(n == 1 && ev[0].complete && ev[0].packets == 5 && d2.counters().late_or_dup.load() == late0 + 1, "synthetic h: n=%d complete=%d packets=%d late=%lld", n, ev[0].complete, ev[0].packets, (long long)d2.counters().late_or_dup.load());
+    // (i) a step of exactly -kMaxMisorder is late (rejected); -kMaxMisorder-1 is a reset
+    ts += 3000; n = push(mk(single, true, seq, ts), ev); CHECK(n == 1, "synthetic i: setup");
+    n = push(mk(single, true, (uint16_t)(seq - H264Depacketizer::kMaxMisorder), ts), ev); CHECK(n == 0 && !d2.last_accepted(), "synthetic i: -kMaxMisorder must be rejected as late");
+    const int64_t r0 = d2.counters().seq_resets.load();
+    n = push(mk(single, true, (uint16_t)(seq - H264Depacketizer::kMaxMisorder - 1), ts + 3000), ev); CHECK(d2.last_accepted() && d2.counters().seq_resets.load() == r0 + 1, "synthetic i: -kMaxMisorder-1 must be a reset");
+  }
   CHECK(complete == (int)N - 5, "complete=%d, expected %zu (all but MID/TAIL/HEAD/REORDER/TWO_EVENTS)", complete, N - 5);
   CHECK(dp.counters().late_or_dup == 2, "late_or_dup=%lld, expected 2 (duplicate + reordered)", (long long)dp.counters().late_or_dup);
   CHECK(dp.counters().seq_resets == 0, "seq_resets=%lld, expected 0 (wraparound is not a reset)", (long long)dp.counters().seq_resets);
-  std::printf("aus=%zu packets=%d events=%d complete=%d cases={mid,tail,head,dup,reorder,two-events,wraparound} bad=%d\n", N, pkts, events, complete, g_bad);
+  std::printf("aus=%zu packets=%d events=%d complete=%d file-cases={mid,tail,head,dup,reorder,two-events,seq-wrap} synthetic={fu-mid,fu-end,fu-start,reset,orphans-only,bad-stap,late,misorder-bound,ts-wrap} bad=%d\n", N, pkts, events, complete, g_bad);
   return g_bad ? 1 : 0;
 }

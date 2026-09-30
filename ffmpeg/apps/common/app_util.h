@@ -157,6 +157,19 @@ inline constexpr int kLifecyclePollMs = 20;
 // Blocks until a shutdown signal arrives or duration_s elapses (duration_s <= 0: signal only).
 // on_tick runs every tick_ms on this thread (periodic stats sampling; 0 disables).
 
+// Same loop against an absolute CLOCK_REALTIME deadline (ns; 0 = none): the sender's --duration counts from the
+// shared capture epoch, so all senders of a run stop at the same wall time regardless of their start-up cost.
+inline void RunUntilWallDeadline(int64_t deadline_wall_ns, const std::function<void()>& on_tick = {}, int tick_ms = 0) {
+  using clock = std::chrono::steady_clock;
+  auto next_tick = clock::now() + std::chrono::milliseconds(tick_ms > 0 ? tick_ms : 1);
+  while (ShutdownFlag() == 0 && (deadline_wall_ns == 0 || NowWallNs() < deadline_wall_ns)) {
+    if (on_tick && tick_ms > 0 && clock::now() >= next_tick) {
+      on_tick();
+      next_tick += std::chrono::milliseconds(tick_ms);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(kLifecyclePollMs));
+  }
+}
 inline void RunUntilShutdown(int duration_s, const std::function<void()>& on_tick = {}, int tick_ms = 0) {
   using clock = std::chrono::steady_clock;
   const auto deadline =

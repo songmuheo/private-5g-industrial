@@ -815,3 +815,29 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   (10417 -> 4167 B/frame, 302/302); `make run-local TREE=ffmpeg` 1140/1140 joined, capture->app 30.5 ms median.
 * Not changed: gstreamer/run_sender.sh still waits for --start-at in the shell (its grid is app-anchored); the
   ffmpeg epoch mechanism is the model if the gstreamer tree needs cross-camera phase later.
+
+## 2026-09-30 — ffmpeg/ tree: Codex review pass 2 (14 findings) fixed and re-verified
+* Depacketizer: counters are relaxed atomics (were plain ints read from the stats thread); `last_accepted()` lets the
+  receiver keep arrival bookkeeping only for packets that entered assembly (a late packet no longer resets the
+  current AU's first/last arrival); a sequence reset (|step| beyond the A.1 thresholds) closes the open AU as
+  incomplete and restarts assembly empty (an FU spanning a reset can no longer be "completed"); the late/dup
+  boundary is inclusive (-100); a lost middle fragment is counted once (the surviving continuations are marked
+  accounted). Test: the file cases now derive the expected `lost_fragments` from the dropped packet's NAL type, and
+  a synthetic section with hand-built FU-A packets covers mid/end/start loss, reset inside an FU, an orphans-only AU
+  (bytes=0), a malformed STAP-A, late/duplicate rejection, the misorder boundary and an RTP timestamp wrap.
+* Sender: the epoch wait is sliced (100 ms) and cancellable — TERM while waiting for an epoch 60 s away exits in
+  0.5 s with footers; `--duration` is an absolute deadline T + duration (late start: 61 frames = slots 60..120 at
+  T-1.5 s with duration 4, verified); content follows the shared timeline (source frame = slot mod N) and a late
+  start enters at the next IDR slot; `to_encoder`/`tx-encoded` mean "entered the muxer", socket refusals are
+  separate (`frames_with_send_failure`, `mux_failures`); header/log work happens before the first slot is chosen.
+  Regression caught while re-verifying: with an implicit epoch the header time made slot 0 "late" and the grid
+  jumped to slot 60 (2 s skipped; run-local showed 1080 frames instead of 1140) — implicit epoch is now now+100 ms
+  and the IDR re-entry only applies when a whole slot is behind. Re-verified 1136/1136 and switch at frame 120.
+* Receiver: one pre-built AVPacket per assembly buffer holds a permanent ref (application side allocates nothing
+  per AU; libavcodec's own per-AU allocations — AVBufferRef wrapper in av_packet_ref, RBSP, frame pool — are
+  documented as inherent); padding zeroed at the AU end before each submission.
+* Scripts: manifest line committed per asset together with the rename (sha256 included) and reuse requires the
+  recorded sha256 to match; RUN_ID shell-quoted (`printf %q`) in the launch command; unreachable cameras and failed
+  local copies are recorded as MISSING -> INVALID (gstreamer too).
+* Re-verified: build test bad=0 (16 cases); demo-local 2 cams 0 loss with exact per-launch collection; rung switch
+  at IDR 120 (298/298); `make run-local TREE=ffmpeg` 1136/1136, `decoder_held_buffers`=0.

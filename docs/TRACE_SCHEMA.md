@@ -27,9 +27,13 @@ IDR 경계에서 rung 전환. **`webrtc/`(동결)**: libwebrtc M120 + GoogCC. �
 RFC 3550 A.1: 앞으로 ≤3000 = 손실, 뒤로 ≤100 = 지연/중복 → `late_or_dup_packets`, 그 외 = `seq_resets`), `lost_fragments`
 (버려진 부분 NAL: FU-A 끝 유실·시작 유실), `decode_failures`, `av_log_errors`(수신 스레드에서 억제한 libavcodec 메시지 수),
 `decoder_held_buffers`(0이어야 함); `tx-stats.jsonl`에 `rung_kbps`, `missed_slots`, `send_failures`/`rtcp_send_failures`
-(커널이 거부한 datagram: 로컬 실패이며 tx-rtp 행으로 남지 않음). `tx-encoder-rates`는 시작 + rung 전환마다 1행. 캡처 격자는
-wall-clock epoch T(`--start-at-epoch`, run_experiment.sh의 T)에 고정: 모든 호스트에서 slot k = T + k/fps, pts 0 = T, RTCP SR의
-epoch도 T(rtpenc `start_time_realtime`). 코드 테스트의 `run.json.source`는 `app/source.json`(실제 보낸 rung 목록).
+(커널이 거부한 datagram: 로컬 실패이며 tx-rtp 행으로 남지 않음), `frames_with_send_failure`, `mux_failures`(muxer가 AU를
+거부: `to_encoder=0`), `late_start_slots`(epoch보다 늦게 시작해 건너뛴 slot 수). `tx-frames.to_encoder`=AU가 muxer에 들어감
+(packetize됨); 소켓 거부는 별개(해당 tx-rtp 행 없음). `tx-encoder-rates`는 시작 + rung 전환마다 1행. 캡처 격자는 wall-clock
+epoch T(`--start-at-epoch`, run_experiment.sh의 T; 없으면 now+100 ms)에 고정: 모든 호스트에서 slot k = T + k/fps, **source
+frame = k mod N**(같은 T의 카메라는 같은 slot에 같은 프레임·IDR), pts 0 = T, RTCP SR의 epoch도 T(rtpenc `start_time_realtime`),
+`--duration`은 T 기준 절대 마감. 늦게 시작하면 공유 타임라인의 다음 IDR slot부터(`grid_slot` 열에 위상이 남음). 코드 테스트의
+`run.json.source`는 `app/source.json`(실제 보낸 rung 목록).
 어느 트리가 만든 run인지는 `run.json`의 `transport`(코드 테스트) 또는 `app/*.log`의 `config: transport=` 줄로 안다.
 
 | 파일 | gstreamer | webrtc | 차이 |

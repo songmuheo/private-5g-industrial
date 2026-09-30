@@ -122,7 +122,7 @@ declare -A LPID
 for c in "${CAMS[@]}"; do
   case "${STATUS[$c]}" in UNREACHABLE*) log "skip $c (unreachable)"; continue;; esac
   var="CAM_ARGS_$c"; K="$(camK "$c")"
-  cmd="P5G_RUN_ID=$RUN_ID P5G_SYNC=$SYNC_MODE P5G_SYNC_MAX_MS=$SYNC_MAX_MS P5G_CONTROL_PORT=${P5G_CONTROL_PORT:-8765} ./run_sender.sh $RELAY_HOST --to recv$K --stream-id $c ${!var} --duration $DURATION --start-at $T"
+  cmd="P5G_RUN_ID=$(printf %q "$RUN_ID") P5G_SYNC=$SYNC_MODE P5G_SYNC_MAX_MS=$SYNC_MAX_MS P5G_CONTROL_PORT=${P5G_CONTROL_PORT:-8765} ./run_sender.sh $RELAY_HOST --to recv$K --stream-id $c ${!var} --duration $DURATION --start-at $T"
   log "launch $c: $cmd"
   on_host "$c" "$cmd" > "$RD/senders/$c.launch.log" 2>&1 &
   LPID[$c]=$!
@@ -146,11 +146,11 @@ sleep 2
 
 # ---- collect sender traces ----
 for c in "${CAMS[@]}"; do
-  case "${STATUS[$c]}" in UNREACHABLE*) continue;; esac
+  case "${STATUS[$c]}" in UNREACHABLE*) log "$c: unreachable, no traces"; MISSING="${MISSING:-} $c(unreachable)"; continue;; esac
   mkdir -p "$RD/senders/$c"
   src="results/$RUN_ID-sender-$c"   # this launch's directory (results/ is at the repo root; on_host cd's into ffmpeg/)
   if [ "$HOST_MODE" = "local" ]; then
-    if [ -d "$src/app" ]; then cp -r "$src/app" "$RD/senders/$c/" && log "collected $c from $src"; else log "$c: no sender traces ($src missing)"; MISSING="${MISSING:-} $c"; fi
+    if [ -d "$src/app" ] && cp -r "$src/app" "$RD/senders/$c/"; then log "collected $c from $src"; else log "$c: no sender traces ($src missing or copy failed)"; MISSING="${MISSING:-} $c"; fi
   else
     if rsync -aq "$HOST_USER@$(host_of "$c"):~/$(repo_of "$c")/$src/app/" "$RD/senders/$c/app/" 2>/dev/null; then log "collected $c from $(host_of "$c"):$src"
     else log "$c: no sender traces on $(host_of "$c") ($src missing)"; MISSING="${MISSING:-} $c"; fi

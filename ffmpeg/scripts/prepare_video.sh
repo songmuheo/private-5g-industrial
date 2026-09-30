@@ -25,11 +25,17 @@ command -v ffmpeg >/dev/null || { echo "ffmpeg missing (make deps)" >&2; exit 1;
 # headers on every IDR, HRD-CBR with a two-frame VBV so the bytes per frame track the rung (bufsize = 2*kbps/fps).
 #
 # Each rung is encoded to a temporary file, checked (frame count = the source's, IDR positions = every GOP frames)
-# and only then renamed into place; a settings line goes to the manifest. An existing rung is reused only when the
-# manifest says it was made with the same settings and its frame count still matches (an interrupted or
-# differently-configured encode is redone, never silently kept).
-MANIFEST="$ASSETS/h264_ladders.txt"; NEW_MANIFEST="$ASSETS/.h264_ladders.new"; : > "$NEW_MANIFEST"
+# and only then renamed into place, and its manifest line (settings + sha256) is committed in the same step, so an
+# interruption never leaves a file whose manifest line describes another encode. An existing rung is reused only
+# when its manifest line carries the requested settings AND the file's sha256 still equals the recorded one (a
+# truncated, interrupted or differently-configured file is redone, never silently kept).
+MANIFEST="$ASSETS/h264_ladders.txt"
 manifest_line() { echo "file=$(basename "$1") gop=$GOP fps=$FPS kbps=$2 size=$3x$4 frames=$5 idr=$6"; }
+# replace the manifest's line for one file (atomic rewrite); the header lines are rewritten at the end
+manifest_commit() {  # manifest_commit <file basename> <line>
+  { [ -f "$MANIFEST" ] && grep -v "^file=$1 " "$MANIFEST" || true; echo "$2"; } > "$MANIFEST.tmp" && mv -f "$MANIFEST.tmp" "$MANIFEST"
+}
+sha() { sha256sum "$1" | cut -c1-64; }
 probe_frames() { ffprobe -v error -count_frames -select_streams v -show_entries stream=nb_read_frames -of csv=p=0 "$1" 2>/dev/null; }
 # IDR positions: frame indices of key frames (AUD-delimited stream, so pict_type/key_frame per frame is exact)
 probe_idr() { ffprobe -v error -select_streams v -show_entries frame=key_frame -of csv=p=0 "$1" 2>/dev/null | awk -F, 'NF{ if ($1==1) printf "%s%d", (n++?",":""), i; i++ } END{print ""}'; }   # NF: ffprobe emits an empty line for frame side data
@@ -39,10 +45,11 @@ encode() {  # encode <expected_frames> <input args...> -- <width> <height> <kbps
   local w="$1" h="$2" kbps="$3" out="$4" tmp="$4.tmp"
   local expect_idr; expect_idr="$(seq 0 "$GOP" $((want - 1)) | paste -sd,)"
   local line; line="$(manifest_line "$out" "$kbps" "$w" "$h" "$want" "$expect_idr")"
-  if [ -f "$out" ] && [ -f "$MANIFEST" ] && grep -qxF "$line" "$MANIFEST" && [ "$(probe_frames "$out")" = "$want" ]; then
-    echo "  reuse: $(basename "$out") (same settings, $want frames)"; echo "$line" >> "$NEW_MANIFEST"; return
+  if [ -f "$out" ] && [ -f "$MANIFEST" ]; then
+    local rec; rec="$(grep -F "$line sha256=" "$MANIFEST" | head -1 || true)"
+    if [ -n "$rec" ] && [ "${rec##* sha256=}" = "$(sha "$out")" ]; then echo "  reuse: $(basename "$out") (same settings, sha256 verified)"; return; fi
+    echo "  redo: $(basename "$out") (settings or content differ from the manifest)"
   fi
-  [ -f "$out" ] && echo "  redo: $(basename "$out") (settings or frame count differ from the manifest)"
   local bufk=$(( kbps / FPS * 2 ))   # 2 frame periods of VBV: CBR with room for the IDR (see docs/NOTES.md 2026-09-30 HRD note)
   rm -f "$tmp"
   ffmpeg -v error -y "${in[@]}" -vf "scale=${w}:${h}:flags=lanczos,format=yuv420p" -r "$FPS" \
@@ -52,7 +59,7 @@ encode() {  # encode <expected_frames> <input args...> -- <width> <height> <kbps
   local got idr; got="$(probe_frames "$tmp")"; idr="$(probe_idr "$tmp")"
   [ "$got" = "$want" ] || { echo "  FAILED: $(basename "$out") has $got frames, expected $want (left as $tmp)" >&2; exit 1; }
   [ "$idr" = "$expect_idr" ] || { echo "  FAILED: $(basename "$out") IDR positions [$idr] != every $GOP frames (left as $tmp)" >&2; exit 1; }
-  mv -f "$tmp" "$out"; echo "$line" >> "$NEW_MANIFEST"
+  mv -f "$tmp" "$out"; manifest_commit "$(basename "$out")" "$line sha256=$(sha "$out")"
   echo "  $(basename "$out"): $(stat -c %s "$out" | awk '{printf "%.1f MB", $1/1e6}'), $got frames, IDR every $GOP"
 }
 
@@ -76,14 +83,11 @@ if [ "$SOURCE" = kendo ] || [ "$SOURCE" = all ]; then
     for k in $RUNGS; do encode "$N" -f rawvideo -pix_fmt yuv420p -s 1280x720 -framerate "$FPS" -i "$yuv" -- 1280 720 "$k" "$ASSETS/${v}_1280x720_${FPS}_${k}k.h264"; done
   done
 fi
-# manifest next to the assets: provenance + one validated line per rung (lines of rungs not touched by this
-# invocation — e.g. --source kendo after mot17 — are carried over so the manifest stays complete)
+# manifest header (provenance); the per-file lines were committed one by one above. Lines of files that no longer
+# exist are dropped.
 { echo "generated_by=ffmpeg/scripts/prepare_video.sh"; echo "date=$(date -Iseconds)"; echo "last_args=source=$SOURCE gop=$GOP fps=$FPS rungs=\"$RUNGS\""
   echo "ffmpeg=$(ffmpeg -version | head -1 | awk '{print $3}') libx264=$(dpkg-query -W -f='${Version}' libx264-163 2>/dev/null)"
-  cat "$NEW_MANIFEST"
-  if [ -f "$MANIFEST" ]; then
-    while read -r l; do f="${l#file=}"; f="${f%% *}"; grep -q "^file=$f " "$NEW_MANIFEST" || { [ -f "$ASSETS/$f" ] && echo "$l"; } || true; done < <(grep '^file=' "$MANIFEST" || true)
-  fi
-} > "$MANIFEST.new"
-mv -f "$MANIFEST.new" "$MANIFEST"; rm -f "$NEW_MANIFEST"
+  while read -r l; do f="${l#file=}"; f="${f%% *}"; [ -f "$ASSETS/$f" ] && echo "$l" || true; done < <(grep '^file=' "$MANIFEST" 2>/dev/null || true)
+} > "$MANIFEST.tmp"
+mv -f "$MANIFEST.tmp" "$MANIFEST"
 echo "[prepare] done -> $ASSETS/*.h264 ($(ls "$ASSETS"/*.h264 | wc -l) files)"

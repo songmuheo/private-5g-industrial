@@ -91,12 +91,13 @@ class Receiver {
     if (next_stats_ == 0) next_stats_ = now;
     if (now < next_stats_) return;
     next_stats_ += (int64_t)g_cfg.stats_period_ms * 1000000; if (next_stats_ < now) next_stats_ = now;
-    const H264Depacketizer::Counters dc = depack_ ? depack_->counters() : H264Depacketizer::Counters{};   // written by the rx thread; read here, ±1 packet
+    const int64_t late = depack_ ? depack_->counters().late_or_dup.load(std::memory_order_relaxed) : 0;
+    const int64_t resets = depack_ ? depack_->counters().seq_resets.load(std::memory_order_relaxed) : 0;
     std::fprintf(f, "{\"mono_ns\":%lld,\"wall_ns\":%lld,\"packets\":%lld,\"bytes\":%lld,\"frames\":%lld,\"aus_incomplete\":%lld,\"aus_empty\":%lld,\"aus_damaged\":%lld,"
                     "\"lost_packets\":%lld,\"lost_fragments\":%lld,\"late_or_dup_packets\":%lld,\"seq_resets\":%lld,\"decode_failures\":%lld,\"av_log_errors\":%lld,\"decoder_held_buffers\":%lld}\n",
                  (long long)now, (long long)NowWallNs(), (long long)pkts_.load(), (long long)bytes_.load(), (long long)frame_idx_.load(),
                  (long long)incomplete_.load(), (long long)empty_aus_.load(), (long long)damaged_.load(), (long long)lost_pkts_.load(), (long long)lost_frag_.load(),
-                 (long long)dc.late_or_dup, (long long)dc.seq_resets, (long long)decode_fail_.load(), (long long)g_av_log_errors.load(), (long long)buf_held_.load());
+                 (long long)late, (long long)resets, (long long)decode_fail_.load(), (long long)g_av_log_errors.load(), (long long)buf_held_.load());
     std::fflush(f);
   }
 
@@ -108,11 +109,11 @@ class Receiver {
     if (const int64_t e = g_av_log_errors.load()) P5G_LOG_WARN << e << " libavcodec error/warning messages were suppressed on the receive thread (P5G_AV_LOG=1 prints them)";
     if (buf_held_.load()) P5G_LOG_WARN << buf_held_.load() << " AUs were still referenced by the decoder after avcodec_send_packet (unexpected; see rx-stats decoder_held_buffers)";
     P5G_LOG_INFO << "frames " << frame_idx_.load() << ", AUs incomplete " << incomplete_.load() << " (empty " << empty_aus_.load() << ", damaged " << damaged_.load()
-                 << "), lost packets " << lost_pkts_.load() << ", lost fragments " << lost_frag_.load() << ", late/dup " << (depack_ ? depack_->counters().late_or_dup : 0)
+                 << "), lost packets " << lost_pkts_.load() << ", lost fragments " << lost_frag_.load() << ", late/dup " << (depack_ ? depack_->counters().late_or_dup.load() : 0)
                  << ", decode failures " << decode_fail_.load();
     if (dec_) avcodec_free_context(&dec_);
     if (frame_) av_frame_free(&frame_);
-    if (pkt_) av_packet_free(&pkt_);
+    for (auto& p : pkt_) if (p) av_packet_free(&p);
     depack_.reset();
     for (auto& b : au_buf_) if (b) av_buffer_unref(&b);
     if (rtp_fd_ >= 0) ::close(rtp_fd_);
@@ -147,15 +148,16 @@ class Receiver {
     dec_->flags |= AV_CODEC_FLAG_LOW_DELAY;
     dec_->flags2 |= AV_CODEC_FLAG2_CHUNKS;
     if (avcodec_open2(dec_, d, nullptr) < 0) P5G_FATAL("h264 decoder open");
-    frame_ = av_frame_alloc(); pkt_ = av_packet_alloc();
-    // The depacketizer assembles straight into libavcodec-owned, padded, reference-counted buffers: the decoder
-    // takes the AU by reference (av_packet_ref -> av_buffer_ref, no copy of the AU bytes; a non-refcounted
-    // packet would be copied into a fresh allocation per AU, libavcodec/avpacket.c av_packet_ref).
+    frame_ = av_frame_alloc();
+    // The depacketizer assembles straight into libavcodec-owned, padded, reference-counted buffers, and one
+    // pre-built AVPacket per buffer holds a permanent reference: the decoder takes the AU by reference (no copy of
+    // the AU bytes; a non-refcounted packet would be copied into a fresh allocation per AU — libavcodec/avpacket.c
+    // av_packet_ref) and the application allocates nothing per AU.
     uint8_t* ptrs[H264Depacketizer::kBuffers];
     for (int k = 0; k < H264Depacketizer::kBuffers; ++k) {
       au_buf_[k] = av_buffer_alloc(kMaxAuBytes + AV_INPUT_BUFFER_PADDING_SIZE);
       if (!au_buf_[k]) P5G_FATAL("av_buffer_alloc");
-      std::memset(au_buf_[k]->data + kMaxAuBytes, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+      pkt_[k] = av_packet_alloc(); pkt_[k]->buf = av_buffer_ref(au_buf_[k]); pkt_[k]->data = au_buf_[k]->data; pkt_[k]->stream_index = 0;
       ptrs[k] = au_buf_[k]->data;
     }
     depack_ = std::make_unique<H264Depacketizer>(ptrs, kMaxAuBytes);
@@ -187,11 +189,13 @@ class Receiver {
       if (h.ssrc != ssrc_.load(std::memory_order_relaxed)) continue;   // not our announced stream
       pkts_++; bytes_ += n;
       if (h.pt != pt_.load(std::memory_order_relaxed)) continue;
-      // per-timestamp arrival bookkeeping: an AU closed by the marker is `cur`, one closed by a new timestamp is `prev`
-      if (!have_cur_ || h.ts != cur_.ts) { prev_ = cur_; cur_ = {h.ts, arrival_mono, arrival_mono, 1}; have_cur_ = true; }
-      else { cur_.last = arrival_mono; cur_.n++; }
       H264Depacketizer::AuEvent ev[2];
       const int n_ev = depack_->Push(h, ev);      // 0..2 AUs ended with this packet (each in its own buffer)
+      if (!depack_->last_accepted()) continue;    // duplicate / late packet: counted by the depacketizer, not part of any AU
+      // per-timestamp arrival bookkeeping of ACCEPTED packets: an AU closed by the marker is `cur`, one closed by a new
+      // timestamp is `prev` (the events of this push refer to one of the two by rtp_ts)
+      if (!have_cur_ || h.ts != cur_.ts) { prev_ = cur_; cur_ = {h.ts, arrival_mono, arrival_mono, 1}; have_cur_ = true; }
+      else { cur_.last = arrival_mono; cur_.n++; }
       for (int k = 0; k < n_ev; ++k) {
         const Arr& a = (ev[k].rtp_ts == cur_.ts) ? cur_ : prev_;
         DecodeAu(ev[k], a.first, a.last, a.n);
@@ -203,15 +207,18 @@ class Receiver {
     if (!ev.complete) { incomplete_++; lost_frag_ += ev.lost_fragments; lost_pkts_ += ev.lost_packets; damaged_ += ev.damaged; }
     if (ev.bytes == 0) { empty_aus_++; return; }   // every byte of this AU was lost or discarded: counted, nothing to decode
     const int64_t t0 = NowMonoNs();
-    // hand the AU to the decoder by reference (our AVBufferRef; the decoder's av_packet_ref only bumps the count)
-    pkt_->buf = av_buffer_ref(au_buf_[ev.buffer]);
-    pkt_->data = pkt_->buf->data; pkt_->size = ev.bytes; pkt_->pts = ev.rtp_ts; pkt_->dts = ev.rtp_ts;
-    pkt_->flags = ev.is_idr ? AV_PKT_FLAG_KEY : 0;
-    int ret = avcodec_send_packet(dec_, pkt_);
-    av_packet_unref(pkt_);
+    // hand the AU to the decoder by reference: pkt_[k] permanently owns a ref of buffer k (set up once), so this
+    // side allocates nothing per AU. Inside libavcodec, av_packet_ref() wraps our buffer in a new AVBufferRef
+    // (av_buffer_ref -> av_mallocz of the wrapper, libavutil/buffer.c) and the decoder allocates RBSP/frame-pool
+    // memory as it always does — per AU, independent of loss, and not avoidable with the stock decoder.
+    AVPacket* pkt = pkt_[ev.buffer];
+    std::memset(pkt->data + ev.bytes, 0, AV_INPUT_BUFFER_PADDING_SIZE);   // input-buffer contract: zeroed padding after the AU
+    pkt->size = ev.bytes; pkt->pts = ev.rtp_ts; pkt->dts = ev.rtp_ts;
+    pkt->flags = ev.is_idr ? AV_PKT_FLAG_KEY : 0;
+    int ret = avcodec_send_packet(dec_, pkt);
     // the h264 decoder copies NALs into its own RBSP buffers and releases the packet before returning; if it ever
     // held on to ours the buffer would be overwritten two AUs later — count it so that a run can be judged
-    if (av_buffer_get_ref_count(au_buf_[ev.buffer]) != 1) buf_held_++;
+    if (av_buffer_get_ref_count(au_buf_[ev.buffer]) != 2) buf_held_++;   // 2 = ours + pkt_[k]'s permanent ref
     if (ret < 0) { decode_fail_++; return; }
     while ((ret = avcodec_receive_frame(dec_, frame_)) == 0) {
       const int64_t t1 = NowMonoNs(), w1 = NowWallNs();
@@ -261,7 +268,8 @@ class Receiver {
   }
 
   int rtp_fd_ = -1, rtcp_fd_ = -1, rtp_port_ = 0, rtcp_port_ = 0;
-  AVCodecContext* dec_ = nullptr; AVFrame* frame_ = nullptr; AVPacket* pkt_ = nullptr;
+  AVCodecContext* dec_ = nullptr; AVFrame* frame_ = nullptr;
+  AVPacket* pkt_[H264Depacketizer::kBuffers] = {nullptr, nullptr, nullptr};   // one per assembly buffer, permanent ref
   static constexpr int kMaxAuBytes = 4 << 20;   // one access unit (an 8 Mbps IDR is ~100 KB; generous)
   AVBufferRef* au_buf_[H264Depacketizer::kBuffers] = {nullptr, nullptr, nullptr};
   std::unique_ptr<H264Depacketizer> depack_;

@@ -16,6 +16,7 @@
 #ifndef P5G_APPS_COMMON_RTP_UTIL_H
 #define P5G_APPS_COMMON_RTP_UTIL_H
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -243,9 +244,11 @@ inline std::vector<AccessUnit> IndexAccessUnits(const uint8_t* d, int64_t n, std
 // a half NAL only makes the decoder produce garbage). FU-A fragments without an open FU (start lost) are
 // dropped and counted once per run as a lost fragment.
 //
-// Sequence numbers follow RFC 3550 Appendix A.1: a forward step of at most kMaxDropout is progress (gap =
-// step-1 counted as lost), a backward step of at most kMaxMisorder is a duplicate/late packet (dropped and
-// counted, assembly state untouched), anything else is a sequence reset (accepted, counted, no loss).
+// Sequence numbers use the thresholds of RFC 3550 Appendix A.1 (without its probation period): a forward step
+// of at most kMaxDropout is progress (gap = step-1 counted as lost), a backward step of at most kMaxMisorder
+// is a duplicate/late packet (dropped and counted, assembly state untouched, `last_accepted()` = false),
+// anything else is a sequence reset: the open AU is closed as incomplete, assembly restarts empty (an FU
+// straddling the reset can never be completed), the packet is accepted, `seq_resets` counted.
 // AUs whose every byte was discarded are still reported (bytes=0, complete=false) so no loss goes uncounted.
 class H264Depacketizer {
  public:
@@ -264,16 +267,23 @@ class H264Depacketizer {
     int damaged = 0;   // malformed STAP-A / buffer overflow seen in this AU
     int buffer = 0;    // index for data(k)/size(k)
   };
-  struct Counters { int64_t late_or_dup = 0, seq_resets = 0; };
+  // Counters written on the receive thread, read from any thread (relaxed atomics: a sample may lag a packet).
+  struct Counters { std::atomic<int64_t> late_or_dup{0}, seq_resets{0}; };
 
   // Feed one RTP packet. Returns the number of AUs that ended (0..2), filled into out[0..n-1] in order.
+  // last_accepted() tells whether the packet entered assembly (false: duplicate/late, dropped).
   int Push(const RtpHeader& h, AuEvent out[2]) {
     int n_out = 0;
+    accepted_ = true;
     if (have_seq_) {
       const int16_t step = (int16_t)(uint16_t)(h.seq - last_seq_);
-      if (step <= 0 && step > -kMaxMisorder) { counters_.late_or_dup++; return 0; }        // duplicate or late: ignore
+      if (step <= 0 && step >= -kMaxMisorder) { counters_.late_or_dup.fetch_add(1, std::memory_order_relaxed); accepted_ = false; return 0; }   // duplicate or late
       if (step > 0 && step <= kMaxDropout) { pending_gap_ = step - 1; }
-      else { counters_.seq_resets++; pending_gap_ = 0; }                                    // far jump: sequence reset
+      else {                                                                                 // far jump: sequence reset
+        counters_.seq_resets.fetch_add(1, std::memory_order_relaxed); pending_gap_ = 0;
+        if (have_ts_) { if (Emit(&out[n_out], false)) n_out++; }                           // whatever was open ends here, incomplete
+        have_ts_ = false;                                                                    // and the reset packet opens a fresh AU
+      }
     }
     have_seq_ = true; last_seq_ = h.seq;
     if (have_ts_ && h.ts != cur_ts_) {                       // timestamp change while an AU is open: it lost its marker packet(s)
@@ -281,7 +291,7 @@ class H264Depacketizer {
       if (Emit(&out[n_out], false)) n_out++;
     }
     if (!have_ts_ || h.ts != cur_ts_) Reset(h.ts);
-    if (pending_gap_) { lost_ += pending_gap_; pending_gap_ = 0; if (fu_open_) { lost_frag_++; fu_open_ = false; DropOpenFu(); } }   // within this AU (or after a marker-ended one: this AU's head)
+    if (pending_gap_) { lost_ += pending_gap_; pending_gap_ = 0; if (fu_open_) { lost_frag_++; fu_open_ = false; orphan_ = true; DropOpenFu(); } }   // within this AU (or after a marker-ended one: this AU's head); orphan_: the surviving continuations of that FU are not counted again
     packets_++;
     const uint8_t* p = h.payload; const int n = h.payload_len;
     if (n >= 1) {
@@ -317,13 +327,14 @@ class H264Depacketizer {
   const uint8_t* data(int k) const { return buf_[k]; }
   int size(int k) const { return emitted_len_[k]; }
   const Counters& counters() const { return counters_; }
+  bool last_accepted() const { return accepted_; }
 
  private:
   void Reset(uint32_t ts) { have_ts_ = true; cur_ts_ = ts; len_ = 0; packets_ = 0; lost_ = 0; lost_frag_ = 0; idr_ = 0; damaged_ = 0; fu_open_ = false; orphan_ = false; }
   bool Emit(AuEvent* out, bool by_marker) {
     if (fu_open_) { lost_frag_++; fu_open_ = false; DropOpenFu(); }   // partial NAL: discarded, counted
     if (len_ == 0 && packets_ == 0 && lost_ == 0) return false;        // nothing happened under this timestamp
-    out->complete = by_marker && lost_ == 0 && lost_frag_ == 0 && !damaged_ && len_ > 0;
+    out->complete = by_marker && lost_ == 0 && lost_frag_ == 0 && !damaged_ && len_ > 0;   // (a reset closes an AU with by_marker=false)
     out->rtp_ts = cur_ts_; out->bytes = len_; out->packets = packets_; out->lost_packets = lost_; out->lost_fragments = lost_frag_;
     out->is_idr = idr_; out->damaged = damaged_; out->buffer = cur_;
     emitted_len_[cur_] = len_;
@@ -342,7 +353,7 @@ class H264Depacketizer {
   int emitted_len_[kBuffers] = {0, 0, 0};
   int len_ = 0, packets_ = 0, lost_ = 0, lost_frag_ = 0, idr_ = 0, fu_start_ = 0, damaged_ = 0, pending_gap_ = 0;
   uint32_t cur_ts_ = 0; uint16_t last_seq_ = 0;
-  bool have_ts_ = false, have_seq_ = false, fu_open_ = false, orphan_ = false;
+  bool have_ts_ = false, have_seq_ = false, fu_open_ = false, orphan_ = false, accepted_ = true;
   Counters counters_;
 };
 

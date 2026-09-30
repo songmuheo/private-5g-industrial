@@ -59,6 +59,7 @@ counted (`aus_empty`) and skipped. There is no RTCP RR, NACK or FEC — a lost p
 which one. A datagram the sender's kernel refused is a local failure (`send_failures`, ERROR log), not path loss.
 
 Timing contract: `run_experiment.sh` picks one wall-clock epoch T for the run; every sender connects, negotiates and
-then captures at T + k/fps (`--start-at-epoch`), so frames and IDRs of all cameras are in phase (chrony, ~50 µs) and
-pts 0 = T on every host; the RTCP SR epoch is the same T. Derived files (verify summary, report, graphs, INVALID)
+then captures at T + k/fps (`--start-at-epoch`), slot k carrying source frame k mod N, so frames and IDRs of all
+cameras are in phase (chrony, ~50 µs) and pts 0 = T on every host; the RTCP SR epoch is the same T; `--duration` ends
+at T + duration on every host. A sender that starts after T enters at the next IDR slot of that shared timeline. Derived files (verify summary, report, graphs, INVALID)
 go to `results/<run>-analysis/`, never into the run directory.
