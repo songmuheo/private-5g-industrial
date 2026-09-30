@@ -851,3 +851,12 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
 * Test: 7 file cases + 12 synthetic cases (fu-mid/end/start, reset, two-nals-lost, nal-boundary-ends-orphan,
   same-ts-reset-arrivals, orphans-only, bad-stap, late, misorder-bound, ts-wrap), run on every build.
 * Loopback after the changes: 361/361 both cams, rx-frames first->last packet arrival 0.05 ms median per AU.
+
+## 2026-09-30 — ffmpeg/: IDR staggering (`--phase-slots`)
+* With a shared epoch every camera sent its IDR in the same slot each GOP (simultaneous 2-second bursts — worst case
+  for the RAN, and unlike the earlier gstreamer OTA run where phases were random). `--phase-slots K` shifts a camera's
+  source index (slot k -> frame (k+K) mod N) while the capture instants stay aligned; scenarios give cam0 0, cam1 30
+  (GOP 60), so the IDRs alternate every second. A phased camera starts at its first IDR slot: the first attempt
+  started cam1 at slot 0 with P-frame 30 and the receiver's `av_log_errors` counter caught it (660 decoder messages);
+  now cam1 begins at slot 30 / source frame 60 (IDR), 331 frames in 12 s, 0 decoder errors. loopback: cam0 IDR slots
+  0,60,120,..., cam1 30,90,150,...

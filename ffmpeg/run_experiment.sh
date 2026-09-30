@@ -41,6 +41,7 @@ for c, v in cams.items():
     # pre-encoded rungs: cams.camK.source = name prefix in video/assets (e.g. mot17-02_1280x720_30), rungs = [kbps...],
     # kbps = the rung to start with. Missing source -> run_sender.sh picks the camera's Kendo view / MOT17 rungs.
     args = [f"--fps {int(v.get('fps',30))}", f"--bitrate-kbps {int(v.get('kbps', 2500))}"]
+    if int(v.get('phase_slots', 0)): args.append(f"--phase-slots {int(v['phase_slots'])}")   # IDR staggering: source index offset of this camera
     if v.get('source'):
         rungs = v.get('rungs') or [int(v.get('kbps', 2500))]
         args.append("--source " + ",".join(f"video/assets/{v['source']}_{int(k)}k.h264@{int(k)}" for k in rungs))
