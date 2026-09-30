@@ -227,33 +227,49 @@ class Receiver {
       if (auto* t = rtp_p_.load(std::memory_order_acquire)) t->Write(r);
       if (r.ssrc != ssrc_.load(std::memory_order_relaxed)) return;
       Arrival& a = arrivals_[ArrivalSlot(r.rtp_ts)];
-      const uint64_t key = a.key.load(std::memory_order_acquire);
-      if (key == r.rtp_ts) {                       // frame already open or published: extend it
-        a.n.fetch_add(1, std::memory_order_relaxed);
+      const bool same_frame = a.key.load(std::memory_order_relaxed) == r.rtp_ts;
+      // seqlock: odd seq = write in progress; readers retry / reject until it is even and unchanged
+      const uint32_t seq0 = a.seq.load(std::memory_order_relaxed);
+      a.seq.store(seq0 + 1, std::memory_order_release);
+      if (same_frame) {                           // frame already open or published: extend it coherently
+        a.n.store(a.n.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         a.last.store(r.log_mono_ns, std::memory_order_relaxed);
         if (r.log_mono_ns < a.first.load(std::memory_order_relaxed)) a.first.store(r.log_mono_ns, std::memory_order_relaxed);
-        return;
+      } else {                                    // new frame in this slot (an older frame's entry is recycled: 1024 ms window)
+        a.key.store(r.rtp_ts, std::memory_order_relaxed);
+        a.first.store(r.log_mono_ns, std::memory_order_relaxed);
+        a.last.store(r.log_mono_ns, std::memory_order_relaxed);
+        a.n.store(1, std::memory_order_relaxed);
       }
-      // new frame in this slot (also when the slot held an older frame: 1024 ms window)
-      a.key.store(~0ull, std::memory_order_release);
-      a.first.store(r.log_mono_ns, std::memory_order_relaxed);
-      a.last.store(r.log_mono_ns, std::memory_order_relaxed);
-      a.n.store(1, std::memory_order_relaxed);
-      a.key.store(r.rtp_ts, std::memory_order_release);
+      a.seq.store(seq0 + 2, std::memory_order_release);
     });
   }
   // Slot = rtp_ts in ms modulo 1024: adjacent frames (>= 1 ms apart) never share a slot and an entry lives
-  // ~1 s, longer than any jitter-buffer latency this receiver accepts (see --jitter-ms).
-  struct Arrival { std::atomic<uint64_t> key{~0ull}; std::atomic<int64_t> first{0}, last{0}; std::atomic<int32_t> n{0}; };
+  // ~1 s; --jitter-ms is capped at kMaxJitterMs so a frame is always looked up while its entry is alive.
+  // Single writer (udpsrc thread); readers take a seqlock snapshot: all fields atomic (no UB), the
+  // sequence counter guarantees the snapshot is one coherent write.
+  struct Arrival {
+    std::atomic<uint32_t> seq{0};
+    std::atomic<uint64_t> key{~0ull};
+    std::atomic<int64_t> first{0}, last{0};
+    std::atomic<int32_t> n{0};
+  };
   static constexpr int kArrivalRing = 1024;
+  static constexpr int kMaxJitterMs = 800;
   static int ArrivalSlot(uint32_t rtp_ts) { return static_cast<int>((rtp_ts / (kVideoClockRate / 1000)) % kArrivalRing); }
   bool LookupArrival(uint32_t ts, int64_t* first, int64_t* last, int32_t* n) {
     const Arrival& a = arrivals_[ArrivalSlot(ts)];
-    if (a.key.load(std::memory_order_acquire) != ts) return false;
-    *first = a.first.load(std::memory_order_relaxed);
-    *last = a.last.load(std::memory_order_relaxed);
-    *n = a.n.load(std::memory_order_relaxed);
-    return a.key.load(std::memory_order_acquire) == ts;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+      const uint32_t s0 = a.seq.load(std::memory_order_acquire);
+      if (s0 & 1u) continue;                                   // write in progress
+      if (a.key.load(std::memory_order_relaxed) != ts) return false;
+      *first = a.first.load(std::memory_order_relaxed);
+      *last = a.last.load(std::memory_order_relaxed);
+      *n = a.n.load(std::memory_order_relaxed);
+      std::atomic_thread_fence(std::memory_order_acquire);
+      if (a.seq.load(std::memory_order_relaxed) == s0) return true;  // coherent snapshot
+    }
+    return false;  // writer kept updating (packets of this frame still arriving): report unknown rather than torn
   }
 
   // Jitter-buffer output thread: RTP packets entering the depayloader. The marker packet completes
@@ -325,11 +341,15 @@ class Receiver {
   }
   void OnRtcpIn(GstPad*, GstPadProbeInfo* info) {
     ForEachProbeBuffer(info, [&](GstBuffer* b) {
-      if (auto* t = rtcp_p_.load(std::memory_order_acquire)) { RtcpPacketRow r; FillRtcpRow(b, 1, &r); t->Write(r); }
+      RtcpPacketRow r; FillRtcpRow(b, 1, &r);
+      if (auto* t = rtcp_p_.load(std::memory_order_acquire)) t->Write(r);
       // Symmetric RTCP (RFC 4961): reply to the endpoint the sender's RTCP actually comes from. The
       // control channel's guess (TCP peer address + the sender's local port) is wrong behind a NAT/port
-      // translation; udpsrc attaches the source address to every buffer (GstNetAddressMeta). Done once
-      // per new endpoint (a handful of times per run at most; allocates a string then).
+      // translation; udpsrc attaches the source address to every buffer (GstNetAddressMeta). Only a
+      // well-formed compound whose first packet is an SR/RR carrying the announced sender SSRC may move
+      // the destination (anything else on this port is ignored). Done once per new endpoint.
+      const uint32_t want = ssrc_.load(std::memory_order_relaxed);
+      if (want == 0 || r.num_parts == 0 || (r.pt[0] != 200 && r.pt[0] != 201) || r.sender_ssrc != want) return;
       GstNetAddressMeta* am = gst_buffer_get_net_address_meta(b);
       if (!am || !G_IS_INET_SOCKET_ADDRESS(am->addr)) return;
       GInetSocketAddress* isa = G_INET_SOCKET_ADDRESS(am->addr);
@@ -449,6 +469,7 @@ int main(int argc, char** argv) {
   c.advertise_host = a.Get("advertise-host", "");
   c.rtp_port = a.GetInt("rtp-port", 0);
   c.jitter_ms = a.GetInt("jitter-ms", c.jitter_ms);
+  if (c.jitter_ms < 0 || c.jitter_ms > 800) P5G_FATAL("--jitter-ms must be 0..800 (per-frame arrival entries live ~1 s)");
   c.drop_late = a.GetInt("drop-late", 0);
   c.stats_period_ms = a.GetInt("stats-period-ms", c.stats_period_ms);
   c.duration_s = a.GetInt("duration", 0);

@@ -116,7 +116,7 @@ declare -A LPID
 for c in "${CAMS[@]}"; do
   case "${STATUS[$c]}" in UNREACHABLE*) log "skip $c (unreachable)"; continue;; esac
   var="CAM_ARGS_$c"; K="$(camK "$c")"
-  cmd="P5G_SYNC=$SYNC_MODE P5G_SYNC_MAX_MS=$SYNC_MAX_MS ./run_sender.sh $RELAY_HOST --to recv$K --stream-id $c ${!var} --duration $DURATION --start-at $T"
+  cmd="P5G_SYNC=$SYNC_MODE P5G_SYNC_MAX_MS=$SYNC_MAX_MS P5G_CONTROL_PORT=${P5G_CONTROL_PORT:-8765} ./run_sender.sh $RELAY_HOST --to recv$K --stream-id $c ${!var} --duration $DURATION --start-at $T"
   log "launch $c: $cmd"
   on_host "$c" "$cmd" > "$RD/senders/$c.launch.log" 2>&1 &
   LPID[$c]=$!

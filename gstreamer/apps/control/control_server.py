@@ -16,7 +16,8 @@ plain RTP has no in-band way to negotiate, and what the edge will later push to 
                         (initial RTCP destination sender_host:R; the receiver switches to the endpoint
                         the sender's RTCP actually arrives from)
   receiver -> server : {"type":"stream-ack","stream":ID,"ok":true|false[,"reason":..]}
-  server   -> sender : the same (the sender goes PLAYING only after ok=true)
+  server   -> sender : the same, only if it comes from the receiver that got the stream-start
+                        (the sender goes PLAYING only after ok=true)
   anyone   -> server : {"type":"profile","session":S,"stream":ID, "bitrate_kbps":N, ...}
   server   -> sender : the same (edge-issued profile; docs/SCENARIO_EDGE_PROFILES.md §4 path (1))
   anyone   -> server : {"type":"ping"}   ->  {"type":"pong","server":"p5g-gstreamer-control"}   (identity check)
@@ -34,6 +35,7 @@ class Session:
         self.name = name
         self.senders = {}    # stream id -> writer
         self.receivers = {}  # receiver id -> (writer, info dict)
+        self.pending_ack = {}  # stream id -> receiver id that was sent stream-start (the only valid ack origin)
 
 
 class ControlServer:
@@ -125,17 +127,27 @@ class ControlServer:
         out = dict(msg)
         out["stream"] = stream
         out["sender_host"] = writer.get_extra_info("peername")[0]
+        s.pending_ack[stream] = rid
         await self.send(s.receivers[rid][0], out)
         log.info("[%s] stream-start %s -> %s (ssrc %s, %sx%s@%s %s kbps)", sname, stream, rid, msg.get("ssrc"),
                  msg.get("width"), msg.get("height"), msg.get("fps"), msg.get("bitrate_kbps"))
 
     async def route_stream_ack(self, writer, msg):
-        sname, _, rid = self.peers[writer]
+        if writer not in self.peers:
+            log.warning("stream-ack from an unregistered connection -> dropped")
+            return
+        sname, role, rid = self.peers[writer]
         s = self.session(sname)
         stream = msg.get("stream")
+        # Only the receiver that was handed this stream's stream-start may acknowledge it.
+        if role != "receiver" or s.pending_ack.get(stream) != rid:
+            log.warning("[%s] stream-ack for %s from %s %s is not the intended receiver (%s) -> dropped",
+                        sname, stream, role, rid, s.pending_ack.get(stream))
+            return
         if stream not in s.senders:
             log.warning("[%s] stream-ack from %s for unknown stream %s", sname, rid, stream)
             return
+        s.pending_ack.pop(stream, None)
         await self.send(s.senders[stream], msg)
         log.info("[%s] stream-ack %s -> %s ok=%s %s", sname, rid, stream, msg.get("ok"), msg.get("reason", ""))
 

@@ -215,6 +215,10 @@ class GridVideoSource {
       EmitSlot(slot, idx, target_us);
       ++slot;
     }
+    // Slots that elapsed while the LAST push was blocked (stop arrived during the block): still recorded,
+    // so the offered-frame denominator is exact up to the moment the grid stopped.
+    const int64_t now_us = NowMonoNs() / 1000;
+    for (; (slot + 1) * frame_interval_us_ <= now_us; ++slot) EmitMissedSlot(slot, idx);
     loop_done_ = true;
   }
 

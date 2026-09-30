@@ -24,6 +24,7 @@
 //   <stream>-tx-rtp.csv             every RTP packet out (udpsink sink pad)
 //   <stream>-tx-rtcp.csv            every RTCP compound packet out / in
 //   <stream>-tx-stats.jsonl         rtpsession stats every --stats-period-ms (0 = off)
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -94,13 +95,16 @@ class Sender {
 
   // Periodic (main thread): rtpsession stats as one JSON line. Not on a streaming thread.
   // Also the watchdog for the stream-ack handshake (a receiver that never answers must not hang the run).
-  void AppendStats() {
+  void AppendStats(int tick_ms) {
     if (!started_) {
       const int64_t dl = ack_deadline_mono_ns_.load();
       if (dl && NowMonoNs() > dl) P5G_FATAL("no stream-ack from receiver " << g_cfg.receiver_id << " within " << kAckTimeoutNs / 1000000000 << " s");
       return;
     }
     if (!stats_) return;
+    stats_tick_ms_ += tick_ms;
+    if (stats_tick_ms_ < g_cfg.stats_period_ms) return;  // sample only every stats_period_ms
+    stats_tick_ms_ = 0;
     GObject* session = nullptr;
     g_signal_emit_by_name(rtpbin_, "get-internal-session", 0, &session);
     std::string st = "null";
@@ -415,6 +419,7 @@ class Sender {
   bool awaiting_ack_ = false;  // control thread only
   static constexpr int64_t kAckTimeoutNs = 5LL * 1000000000LL;
   std::atomic<int64_t> ack_deadline_mono_ns_{0};
+  int stats_tick_ms_ = 0;  // main thread
   std::string dest_host_; int dest_rtp_port_ = 0, dest_rtcp_port_ = 0;
 };
 
@@ -470,7 +475,10 @@ int main(int argc, char** argv) {
   {
     p5g::Sender sender;
     if (!sender.Run()) return 1;
-    p5g::RunUntilShutdown(c.duration_s, [&] { sender.AppendStats(); }, c.stats_period_ms > 0 ? c.stats_period_ms : 1000);  // tick also drives the ack watchdog
+    // The tick drives both the stats sample (every stats_period_ms) and the stream-ack watchdog (checked at
+    // least every second, whatever the stats period).
+    const int tick_ms = c.stats_period_ms > 0 ? std::min(c.stats_period_ms, 1000) : 1000;
+    p5g::RunUntilShutdown(c.duration_s, [&] { sender.AppendStats(tick_ms); }, tick_ms);
     sender.Shutdown();
   }
   return 0;
