@@ -81,7 +81,7 @@ HOST_IP=10.53.1.1   # host side of the core bridge: reachable from the UE throug
 # 4) apps (receiver side = host, sender side = UE namespace for uplink) — delegated to the tree
 TOTAL=$((WARMUP + DURATION + DRAIN))
 "$APPS" start "$RD" "$UE_IP" "$HOST_IP" "$TOTAL" "$DIRECTION" "$CODEC" "$WIDTH" "$HEIGHT" "$FPS" "$YUV"
-while read -r p; do [ -n "$p" ] && PIDS+=("$p"); done < "$RD/app/pids.txt"
+while read -r p; do p="${p#*=}"; [ -n "$p" ] && PIDS+=("$p"); done < "$RD/app/pids.txt"   # lines: "role=pid" or "pid" (fallback cleanup only; the tree's stop does the ordered stop)
 
 # 5) measurement window (boundaries recorded in run.json; every log is continuous)
 sleep "$WARMUP"; WIN_START_NS=$(date +%s%N)

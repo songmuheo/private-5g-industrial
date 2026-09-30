@@ -21,12 +21,14 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
 
 #include <gio/gio.h>
 #include <gst/gst.h>
+#include <gst/net/gstnetaddressmeta.h>
 
 #include "app_util.h"
 #include "control_client.h"
@@ -69,7 +71,8 @@ class Receiver {
   }
 
   void AppendStats() {  // main thread
-    if (!stats_) return;
+    std::FILE* stats = stats_.load(std::memory_order_acquire);
+    if (!stats) return;
     GObject* session = nullptr;
     g_signal_emit_by_name(rtpbin_, "get-internal-session", 0, &session);
     std::string st = "null";
@@ -79,9 +82,9 @@ class Receiver {
       if (s) { gchar* str = gst_structure_to_string(s); st = json(std::string(str)).dump(); g_free(str); gst_structure_free(s); }
       g_object_unref(session);
     }
-    std::fprintf(stats_, "{\"mono_ns\":%lld,\"wall_ns\":%lld,\"frames\":%lld,\"rtpsession\":%s}\n", (long long)NowMonoNs(),
+    std::fprintf(stats, "{\"mono_ns\":%lld,\"wall_ns\":%lld,\"frames\":%lld,\"rtpsession\":%s}\n", (long long)NowMonoNs(),
                  (long long)NowWallNs(), (long long)frame_idx_.load(), st.c_str());
-    std::fflush(stats_);
+    std::fflush(stats);
   }
 
   void Shutdown() {
@@ -212,36 +215,44 @@ class Receiver {
   }
 
   // ---- probes (streaming threads) ----------------------------------------------------------------
-  // udpsrc thread: every packet; also the per-frame arrival summary published for the depay thread.
+  // udpsrc thread: every packet, and the per-frame arrival summary (first / last arrival, packet count)
+  // keyed by rtp_ts for the jitter-buffer thread. Single writer (this thread), readers elsewhere; every
+  // shared field is a std::atomic (relaxed stores, ordered by the release/acquire on `key`), so there is
+  // no data race in the C++ sense. A packet that belongs to an already published frame (reordering, or a
+  // packet after the marker) updates that frame's entry in place while the key still matches.
   void OnRtpIn(GstPad*, GstPadProbeInfo* info) {
     ForEachProbeBuffer(info, [&](GstBuffer* b) {
       RtpPacketRow r;
       if (!FillRtpRow(b, 1, &r)) return;
       if (auto* t = rtp_p_.load(std::memory_order_acquire)) t->Write(r);
       if (r.ssrc != ssrc_.load(std::memory_order_relaxed)) return;
-      if (cur_n_ == 0 || r.rtp_ts != cur_ts_) {
-        if (cur_n_ > 0) PublishArrival();
-        cur_ts_ = r.rtp_ts; cur_first_ = r.log_mono_ns; cur_n_ = 0;
+      Arrival& a = arrivals_[ArrivalSlot(r.rtp_ts)];
+      const uint64_t key = a.key.load(std::memory_order_acquire);
+      if (key == r.rtp_ts) {                       // frame already open or published: extend it
+        a.n.fetch_add(1, std::memory_order_relaxed);
+        a.last.store(r.log_mono_ns, std::memory_order_relaxed);
+        if (r.log_mono_ns < a.first.load(std::memory_order_relaxed)) a.first.store(r.log_mono_ns, std::memory_order_relaxed);
+        return;
       }
-      cur_last_ = r.log_mono_ns;
-      cur_n_++;
-      if (r.marker) { PublishArrival(); cur_n_ = 0; }
+      // new frame in this slot (also when the slot held an older frame: 1024 ms window)
+      a.key.store(~0ull, std::memory_order_release);
+      a.first.store(r.log_mono_ns, std::memory_order_relaxed);
+      a.last.store(r.log_mono_ns, std::memory_order_relaxed);
+      a.n.store(1, std::memory_order_relaxed);
+      a.key.store(r.rtp_ts, std::memory_order_release);
     });
   }
-  // Arrival summary ring: written by the udpsrc thread, read by the jitter-buffer thread. Seqlock-lite:
-  // fields first, then the key with release; the reader re-checks the key after reading the fields.
-  struct Arrival { std::atomic<uint64_t> key{~0ull}; int64_t first = 0, last = 0; int32_t n = 0; };
-  static constexpr int kArrivalRing = 64;
-  void PublishArrival() {
-    Arrival& a = arrivals_[cur_ts_ % kArrivalRing];
-    a.key.store(~0ull, std::memory_order_release);
-    a.first = cur_first_; a.last = cur_last_; a.n = cur_n_;
-    a.key.store(cur_ts_, std::memory_order_release);
-  }
+  // Slot = rtp_ts in ms modulo 1024: adjacent frames (>= 1 ms apart) never share a slot and an entry lives
+  // ~1 s, longer than any jitter-buffer latency this receiver accepts (see --jitter-ms).
+  struct Arrival { std::atomic<uint64_t> key{~0ull}; std::atomic<int64_t> first{0}, last{0}; std::atomic<int32_t> n{0}; };
+  static constexpr int kArrivalRing = 1024;
+  static int ArrivalSlot(uint32_t rtp_ts) { return static_cast<int>((rtp_ts / (kVideoClockRate / 1000)) % kArrivalRing); }
   bool LookupArrival(uint32_t ts, int64_t* first, int64_t* last, int32_t* n) {
-    const Arrival& a = arrivals_[ts % kArrivalRing];
+    const Arrival& a = arrivals_[ArrivalSlot(ts)];
     if (a.key.load(std::memory_order_acquire) != ts) return false;
-    *first = a.first; *last = a.last; *n = a.n;
+    *first = a.first.load(std::memory_order_relaxed);
+    *last = a.last.load(std::memory_order_relaxed);
+    *n = a.n.load(std::memory_order_relaxed);
     return a.key.load(std::memory_order_acquire) == ts;
   }
 
@@ -313,7 +324,27 @@ class Receiver {
     });
   }
   void OnRtcpIn(GstPad*, GstPadProbeInfo* info) {
-    ForEachProbeBuffer(info, [&](GstBuffer* b) { auto* t = rtcp_p_.load(std::memory_order_acquire); if (!t) return; RtcpPacketRow r; FillRtcpRow(b, 1, &r); t->Write(r); });
+    ForEachProbeBuffer(info, [&](GstBuffer* b) {
+      if (auto* t = rtcp_p_.load(std::memory_order_acquire)) { RtcpPacketRow r; FillRtcpRow(b, 1, &r); t->Write(r); }
+      // Symmetric RTCP (RFC 4961): reply to the endpoint the sender's RTCP actually comes from. The
+      // control channel's guess (TCP peer address + the sender's local port) is wrong behind a NAT/port
+      // translation; udpsrc attaches the source address to every buffer (GstNetAddressMeta). Done once
+      // per new endpoint (a handful of times per run at most; allocates a string then).
+      GstNetAddressMeta* am = gst_buffer_get_net_address_meta(b);
+      if (!am || !G_IS_INET_SOCKET_ADDRESS(am->addr)) return;
+      GInetSocketAddress* isa = G_INET_SOCKET_ADDRESS(am->addr);
+      GInetAddress* ia = g_inet_socket_address_get_address(isa);
+      if (g_inet_address_get_family(ia) != G_SOCKET_FAMILY_IPV4) return;
+      const guint16 port = g_inet_socket_address_get_port(isa);
+      uint32_t ip4; std::memcpy(&ip4, g_inet_address_to_bytes(ia), 4);       // no allocation: internal bytes
+      const uint64_t id = (static_cast<uint64_t>(ip4) << 16) | port;
+      if (rtcp_peer_id_.load(std::memory_order_acquire) == id) return;      // usual case: nothing to do
+      rtcp_peer_id_.store(id, std::memory_order_release);
+      gchar* host = g_inet_address_to_string(ia);                            // only when the endpoint changes
+      g_object_set(rtcpsink_, "host", host, "port", (gint)port, nullptr);
+      P5G_LOG_INFO << "rtcp reports -> " << host << ":" << port << " (learned from incoming RTCP)";
+      g_free(host);
+    });
   }
   void OnRtcpOut(GstPad*, GstPadProbeInfo* info) {
     ForEachProbeBuffer(info, [&](GstBuffer* b) { auto* t = rtcp_p_.load(std::memory_order_acquire); if (!t) return; RtcpPacketRow r; FillRtcpRow(b, 0, &r); t->Write(r); });
@@ -325,8 +356,11 @@ class Receiver {
     std::lock_guard<std::mutex> lk(mu_);
     const std::string stream = m.value("stream", "");
     if (!stream_.empty()) {
-      if (stream != stream_) P5G_LOG_ERROR << "stream-start for a second stream '" << stream << "' on receiver " << g_cfg.receiver_id
-                                            << " (already serving '" << stream_ << "') -> refused";
+      if (stream != stream_) {
+        P5G_LOG_ERROR << "stream-start for a second stream '" << stream << "' on receiver " << g_cfg.receiver_id
+                      << " (already serving '" << stream_ << "') -> refused";
+        ctl_.Send({{"type", "stream-ack"}, {"stream", stream}, {"ok", false}, {"reason", "receiver already serves " + stream_}});
+      }
       return;
     }
     stream_ = stream;
@@ -336,7 +370,7 @@ class Receiver {
     rtcp_ = std::make_unique<RtcpPacketTrace>(prefix + "-rtcp.csv", kRtcpPacketHeader, &FormatRtcpPacketRow, kPacketTraceCapacity / 8);
     decoded_ = std::make_unique<DecodedFrameLedgerTrace>(prefix + "-decoded.csv", kDecodedFrameLedgerHeader, &FormatDecodedFrameLedgerRow, kFrameTraceCapacity);
     frames_ = std::make_unique<DecodedFrameTrace>(prefix + "-frames.csv", kDecodedFrameHeader, &FormatDecodedFrameRow, kFrameTraceCapacity);
-    if (g_cfg.stats_period_ms > 0) stats_ = std::fopen((prefix + "-stats.jsonl").c_str(), "w");
+    if (g_cfg.stats_period_ms > 0) stats_.store(std::fopen((prefix + "-stats.jsonl").c_str(), "w"), std::memory_order_release);
     ssrc_.store(m.value("ssrc", 0u), std::memory_order_relaxed);
     // Publish to the streaming threads only after the rings exist (release / acquire pairs).
     rtp_p_.store(rtp_.get(), std::memory_order_release);
@@ -348,7 +382,9 @@ class Receiver {
     if (sender_rtcp > 0) g_object_set(rtcpsink_, "host", sender_host.c_str(), "port", sender_rtcp, nullptr);
     P5G_LOG_INFO << "stream " << stream_ << " announced: ssrc=" << ssrc_.load() << " " << m.value("width", 0) << "x" << m.value("height", 0)
                  << "@" << m.value("fps", 0) << " " << m.value("bitrate_kbps", 0) << " kbps gop=" << m.value("gop", 0)
-                 << "; rtcp reports -> " << sender_host << ":" << sender_rtcp;
+                 << "; rtcp reports -> " << sender_host << ":" << sender_rtcp << " (until learned from incoming RTCP)";
+    // Traces open and SSRC published: the sender may start (it waits for this before PLAYING).
+    ctl_.Send({{"type", "stream-ack"}, {"stream", stream_}, {"ok", true}});
   }
   void CloseTraces() {
     std::lock_guard<std::mutex> lk(mu_);
@@ -356,8 +392,7 @@ class Receiver {
     if (rtcp_) rtcp_->Close();
     if (decoded_) decoded_->Close();
     if (frames_) frames_->Close();
-    if (stats_) std::fclose(stats_);
-    stats_ = nullptr;
+    if (std::FILE* f = stats_.exchange(nullptr)) std::fclose(f);
   }
 
   GstElement* pipeline_ = nullptr;
@@ -371,9 +406,8 @@ class Receiver {
   int rtp_port_ = 0, rtcp_port_ = 0;
   std::atomic<bool> linked_{false};
   std::atomic<uint32_t> ssrc_{0};
-  // udpsrc-thread state (per-frame arrival aggregation)
-  uint32_t cur_ts_ = 0; int64_t cur_first_ = 0, cur_last_ = 0; int32_t cur_n_ = 0;
-  Arrival arrivals_[kArrivalRing];
+  std::atomic<uint64_t> rtcp_peer_id_{0};
+  Arrival arrivals_[kArrivalRing];  // written by the udpsrc thread, read by the jitter-buffer thread
   // jitter-buffer-thread state
   uint32_t au_ts_ = 0;
   int32_t dec_w_ = 0, dec_h_ = 0;
@@ -387,7 +421,7 @@ class Receiver {
   std::unique_ptr<RtcpPacketTrace> rtcp_;
   std::unique_ptr<DecodedFrameLedgerTrace> decoded_;
   std::unique_ptr<DecodedFrameTrace> frames_;
-  std::FILE* stats_ = nullptr;
+  std::atomic<std::FILE*> stats_{nullptr};  // written on the control thread, read on the main thread
   std::string stream_;
   std::mutex mu_;  // control-thread state (never taken on a streaming thread)
   ControlClient ctl_;
@@ -420,6 +454,7 @@ int main(int argc, char** argv) {
   c.duration_s = a.GetInt("duration", 0);
 
   gst_init(nullptr, nullptr);
+  p5g::InitFrameMetaCaps();
   P5G_LOG_INFO << "config: transport=gstreamer receiver_id=" << c.receiver_id << " session=" << c.session << " control="
                << c.control_host << ":" << c.control_port << " rtp_port=" << c.rtp_port << " jitter_ms=" << c.jitter_ms
                << " drop_late=" << c.drop_late << " stats_period_ms=" << c.stats_period_ms << " " << p5g::GstProvenance();

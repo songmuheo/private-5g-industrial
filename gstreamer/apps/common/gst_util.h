@@ -9,8 +9,12 @@
 //     no lookup table between the depayloader and the app sink,
 //   * provenance (GStreamer core and plugin versions) for the run's config line.
 //
-// Everything here runs on GStreamer streaming threads: no allocation, no lock, no I/O (rule 2 in
-// CLAUDE.md). Rows are POD copies into TraceRing.
+// Streaming-thread rules (rule 2 in CLAUDE.md): the packet-rate paths (RTP/RTCP probes) do no allocation,
+// lock or I/O — rows are POD copies into TraceRing. The frame-rate paths add up to 7 small metas per
+// frame (gst_buffer_add_reference_timestamp_meta: one GstMeta allocation each, on the jitter-buffer and
+// decoder threads). That is bounded (<= 7 x 30/s per stream) and small next to the decoder's own per-frame
+// output-buffer allocation (1.4 MB at 720p); the reference caps are created once at start-up
+// (InitFrameMetaCaps), never lazily on a streaming thread.
 #ifndef P5G_APPS_COMMON_GST_UTIL_H
 #define P5G_APPS_COMMON_GST_UTIL_H
 
@@ -45,15 +49,21 @@ inline uint32_t RtpTsFromRunningTime(GstClockTime running_time_ns) {
 // and the app sink.
 enum class FrameMeta { kRtpTs, kNumPackets, kFirstPktMonoNs, kLastPktMonoNs, kDecodeStartMonoNs, kInputBytes, kIsKey, kCount };
 
-inline GstCaps* FrameMetaCaps(FrameMeta k) {
+inline GstCaps** FrameMetaCapsTable() {
   static GstCaps* caps[static_cast<int>(FrameMeta::kCount)] = {};
+  return caps;
+}
+// Call once after gst_init(), before the pipeline starts: creates the reference caps so the streaming
+// threads never allocate them. (Never freed: process lifetime.)
+inline void InitFrameMetaCaps() {
   static const char* names[] = {"timestamp/x-p5g-rtpts", "timestamp/x-p5g-npkts", "timestamp/x-p5g-firstpkt",
                                 "timestamp/x-p5g-lastpkt", "timestamp/x-p5g-decstart", "timestamp/x-p5g-inbytes",
                                 "timestamp/x-p5g-iskey"};
-  const int i = static_cast<int>(k);
-  if (!caps[i]) caps[i] = gst_caps_new_empty_simple(names[i]);  // created once at start-up, never freed
-  return caps[i];
+  GstCaps** caps = FrameMetaCapsTable();
+  for (int i = 0; i < static_cast<int>(FrameMeta::kCount); ++i)
+    if (!caps[i]) caps[i] = gst_caps_new_empty_simple(names[i]);
 }
+inline GstCaps* FrameMetaCaps(FrameMeta k) { return FrameMetaCapsTable()[static_cast<int>(k)]; }
 inline void SetFrameMeta(GstBuffer* b, FrameMeta k, uint64_t value) {
   gst_buffer_add_reference_timestamp_meta(b, FrameMetaCaps(k), static_cast<GstClockTime>(value), GST_CLOCK_TIME_NONE);
 }
@@ -85,15 +95,16 @@ struct EncodedFrameRow {
   int64_t ntp_time_ms;      // -1
   int32_t codec;            // 4 = H264 (webrtc VideoCodecType numbering, kept for analysis/)
   int32_t is_idr;           // 1 for key frames (x264enc emits IDR at every key frame)
+  int32_t at_target_quality;// -1: not reported by x264enc (column kept for the webrtc schema)
 };
 inline constexpr const char* kEncodedFrameHeader =
     "rtp_ts,encode_done_mono_ns,encode_done_wall_ns,bytes,width,height,frame_type,qp,temporal_idx,"
-    "spatial_idx,simulcast_idx,capture_time_ms,ntp_time_ms,codec,is_idr";
+    "spatial_idx,simulcast_idx,capture_time_ms,ntp_time_ms,codec,is_idr,at_target_quality";
 inline void FormatEncodedFrameRow(std::FILE* f, const EncodedFrameRow& r) {
-  std::fprintf(f, "%u,%lld,%lld,%d,%d,%d,%d,%d,%d,%d,%d,%lld,%lld,%d,%d\n", r.rtp_ts,
+  std::fprintf(f, "%u,%lld,%lld,%d,%d,%d,%d,%d,%d,%d,%d,%lld,%lld,%d,%d,%d\n", r.rtp_ts,
                (long long)r.encode_done_mono_ns, (long long)r.encode_done_wall_ns, r.bytes, r.width, r.height,
                r.frame_type, r.qp, r.temporal_idx, r.spatial_idx, r.simulcast_idx, (long long)r.capture_time_ms,
-               (long long)r.ntp_time_ms, r.codec, r.is_idr);
+               (long long)r.ntp_time_ms, r.codec, r.is_idr, r.at_target_quality);
 }
 using EncodedFrameTrace = TraceRing<EncodedFrameRow>;
 

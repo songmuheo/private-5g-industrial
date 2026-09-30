@@ -42,16 +42,22 @@ Working directory of every script is the repo root (`results/`, `video/assets`, 
 | | mechanism | check |
 |---|---|---|
 | resolution | `appsrc` caps pin WxH; the encoder is reconfigured only on a caps change (none during a run) | `tx-encoded.width/height` constant |
-| fps | the capture grid defines the frame times; nothing downstream drops (`qos` off everywhere, `videorate` not used, `appsrc block=true` makes an overloaded encoder visible as grid gaps instead of silent drops) | `tx-frames` rows == `tx-encoded` rows (± the last frame at shutdown) |
+| fps | the capture grid defines the frame times; nothing downstream drops (`qos` off everywhere, `videorate` not used). If the encoder cannot keep up, `appsrc block=true` stalls the grid and every missed slot is still written as a `tx-frames` row with `to_encoder=0` and counted at shutdown — overload is visible, never a silently lower fps | `tx-frames` rows == `tx-encoded` rows and all `to_encoder=1` |
 | bitrate | x264 `pass=cbr bitrate=N vbv-buf-capacity=V`: a target ceiling the content may stay under; changeable while PLAYING (`profile` message) | `tx-encoder-rates`, `tx-encoded.bytes` |
 | GOP | `key-int-max=G` + `scenecut=0:min-keyint=G` → one IDR every G frames, never content-triggered | `tx-encoded.is_idr` |
 | burst shape | no pacer: an access unit leaves as one burst of RTP packets right after encoding | `tx-rtp` first→last packet of a frame |
 | frame identity | `rtph264pay timestamp-offset=0` → wire `rtp_ts = PTS × 90 kHz`, computed by the grid thread before the push; sender, gNB PDCP rows and receiver log the same number (no per-SSRC offset) | join `tx-frames`/`gnb_pdcp_ul`/`rx-frames` on `rtp_ts` |
 
 Control flow: receiver registers its RTP/RTCP ports → server tells the sender (`receiver-ready`) → sender
-announces `stream-start` (SSRC, profile) → receiver opens its traces → sender goes PLAYING. The receiver's
-RTCP reports go to the sender's RTCP source port (symmetric, RFC 4961). Limit: the sender address the server
-sees must be the one the receiver can reach (true on the testbed: receivers on the gNB PC, UE pool routed).
+announces `stream-start` (SSRC, profile) → receiver opens its traces and answers `stream-ack` → sender goes
+PLAYING (5 s watchdog). The receiver's RTCP reports go to the endpoint the sender's RTCP actually arrives from
+(symmetric RTCP, RFC 4961; learned from `GstNetAddressMeta`, so a NAT / port translation on the sender side is
+handled). Shutdown: grid stops → EOS through appsrc (releases a blocked push) → EOS seen → NULL → join; the
+last captured frame is encoded and sent. `--drop-late 1` on the receiver is opt-in; even with it off, a jitter
+buffer discards a packet that arrives after its frame was already pushed (inherent; does not occur on the
+in-order RLC AM path). Accepted frame sizes: width % 4 == 0 and height % 2 == 0 (tightly packed I420 ==
+GStreamer's default layout); others are refused at start-up. Control port: `P5G_CONTROL_PORT` (default 8765);
+`run_receiver.sh` refuses a foreign listener on it (`ping`/`pong` identity check).
 
 Not in this tree (by design): NACK/RTX, FEC, header extensions, network-adaptive bitrate. If a RAN-aware or
 GCC-like controller is wanted as an experimental condition, it sets the same `bitrate` property through the

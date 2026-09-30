@@ -9,7 +9,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0>=1.20 gstreamer-app-1.0 gstreamer-rtp-1.0 gstreamer-video-1.0 gio-2.0)
+pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0>=1.20 gstreamer-app-1.0 gstreamer-rtp-1.0 gstreamer-video-1.0 gstreamer-net-1.0 gio-2.0)
 find_package(Threads REQUIRED)
 
 set(P5G_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/common)

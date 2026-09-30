@@ -641,3 +641,17 @@ take the tree as a parameter.
   was pushed (to_encoder=1) and then the pipeline went to NULL before x264enc emitted it. The sender now sends
   EOS through appsrc after stopping the grid and waits (<= 2 s) for EOS on the bus before NULL: demo-local
   re-run results/20260930-155332-demo-local gives captured = encoded = delivered (361/361/361, 181/181/181).
+* Codex review (same day, static) found and the following were fixed: (H) missed capture slots after a blocked push
+  were skipped silently -> now one `to_encoder=0` row per missed slot + count at shutdown; (H) Arrival ring had plain
+  fields shared between threads -> all-atomic entries, ms-keyed 1024 slots (was rtp_ts % 64: only 8 slots at 30 fps),
+  late/reordered packets update their frame's entry; (H) media started before the receiver had opened its traces ->
+  `stream-ack` handshake + 5 s watchdog; (H) shutdown joined a thread that could be blocked in
+  gst_app_src_push_buffer -> RequestStop / bounded WaitStopped / EOS / NULL / Join order; (M) I420 sizes with
+  width % 4 != 0 would have been mis-read -> refused at start-up (GstVideoInfo check); (M) tx-encoded lacked
+  `at_target_quality` -> added (-1); (M) receiver `stats_` FILE* race -> atomic; (M) RTCP destination behind port
+  translation -> learned from incoming RTCP (GstNetAddressMeta); (M) local_apps.sh stop killed every video_sender
+  on the host -> run-scoped labelled pids, ordered TERM + wait, sudo for both sides; (M) run_receiver.sh reused any
+  listener on 8765 -> ping/pong identity check, P5G_CONTROL_PORT; (L) meta reference caps were created lazily on a
+  streaming thread -> InitFrameMetaCaps at start-up (per-frame meta allocations remain, bounded; documented).
+  Re-verified: demo-local 361/361/361 and 181/181/181 (results/20260930-162048-demo-local); run-local 689/689/689,
+  8012/8012 RTP through the gNB, ordered stop with no KILL fallback (results/20260930-162118-gst-review-fixes).

@@ -13,12 +13,13 @@ plain RTP has no in-band way to negotiate, and what the edge will later push to 
   sender   -> server : {"type":"stream-start","to":RID,"stream":ID,"ssrc":..,"pt":..,"clock_rate":..,
                         "rtcp_port_local":R, ...profile fields...}
   server   -> receiver: the same + "sender_host": <peer address of the sender's TCP connection>
-                        (where the receiver sends its RTCP reports: sender_host:R)
+                        (initial RTCP destination sender_host:R; the receiver switches to the endpoint
+                        the sender's RTCP actually arrives from)
+  receiver -> server : {"type":"stream-ack","stream":ID,"ok":true|false[,"reason":..]}
+  server   -> sender : the same (the sender goes PLAYING only after ok=true)
   anyone   -> server : {"type":"profile","session":S,"stream":ID, "bitrate_kbps":N, ...}
   server   -> sender : the same (edge-issued profile; docs/SCENARIO_EDGE_PROFILES.md §4 path (1))
-
-Limits: sender_host is the address the server sees, which equals the address the receiver sees only
-when both run on the same host (the testbed's relay host 10.53.1.1) or no NAT sits between them.
+  anyone   -> server : {"type":"ping"}   ->  {"type":"pong","server":"p5g-gstreamer-control"}   (identity check)
 """
 import argparse
 import asyncio
@@ -74,8 +75,12 @@ class ControlServer:
             await self.register(writer, msg)
         elif t == "stream-start":
             await self.route_stream_start(writer, msg)
+        elif t == "stream-ack":
+            await self.route_stream_ack(writer, msg)
         elif t == "profile":
             await self.route_profile(writer, msg)
+        elif t == "ping":
+            await self.send(writer, {"type": "pong", "server": "p5g-gstreamer-control"})
         else:
             log.warning("unknown message type %r", t)
 
@@ -123,6 +128,16 @@ class ControlServer:
         await self.send(s.receivers[rid][0], out)
         log.info("[%s] stream-start %s -> %s (ssrc %s, %sx%s@%s %s kbps)", sname, stream, rid, msg.get("ssrc"),
                  msg.get("width"), msg.get("height"), msg.get("fps"), msg.get("bitrate_kbps"))
+
+    async def route_stream_ack(self, writer, msg):
+        sname, _, rid = self.peers[writer]
+        s = self.session(sname)
+        stream = msg.get("stream")
+        if stream not in s.senders:
+            log.warning("[%s] stream-ack from %s for unknown stream %s", sname, rid, stream)
+            return
+        await self.send(s.senders[stream], msg)
+        log.info("[%s] stream-ack %s -> %s ok=%s %s", sname, rid, stream, msg.get("ok"), msg.get("reason", ""))
 
     async def route_profile(self, writer, msg):
         s = self.session(msg.get("session", self.peers.get(writer, ("s1",))[0]))

@@ -93,8 +93,14 @@ class Sender {
   }
 
   // Periodic (main thread): rtpsession stats as one JSON line. Not on a streaming thread.
+  // Also the watchdog for the stream-ack handshake (a receiver that never answers must not hang the run).
   void AppendStats() {
-    if (!stats_ || !started_) return;
+    if (!started_) {
+      const int64_t dl = ack_deadline_mono_ns_.load();
+      if (dl && NowMonoNs() > dl) P5G_FATAL("no stream-ack from receiver " << g_cfg.receiver_id << " within " << kAckTimeoutNs / 1000000000 << " s");
+      return;
+    }
+    if (!stats_) return;
     GObject* session = nullptr;
     g_signal_emit_by_name(rtpbin_, "get-internal-session", 0, &session);
     std::string st = "null";
@@ -115,17 +121,32 @@ class Sender {
     std::fflush(stats_);
   }
 
-  // Ordered teardown: control -> capture thread -> drain (EOS through encoder and payloader, so the
-  // last captured frame is encoded and sent: tx-frames == tx-encoded) -> pipeline NULL -> traces.
+  // Ordered teardown: control -> grid stops offering -> EOS through appsrc (this also releases a push
+  // blocked on a full queue) -> wait for EOS at the sink (<= 2 s: the last captured frame is encoded and
+  // sent, tx-frames == tx-encoded) -> pipeline NULL (releases anything still blocked) -> join the grid
+  // thread -> traces. The join comes last on purpose: joining a thread blocked in gst_app_src_push_buffer
+  // would deadlock if downstream had stopped consuming.
   void Shutdown() {
     ctl_.Stop();
-    if (source_) source_->Stop();
+    if (source_) {
+      source_->RequestStop();
+      // up to 3 frame intervals for the loop to leave its current slot (a push blocked on a full queue
+      // does not finish here; EOS below releases it)
+      if (!source_->WaitStopped(3 * 1000 / (g_cfg.video.fps > 0 ? g_cfg.video.fps : 30) + 5))
+        P5G_LOG_WARN << "grid thread still pushing at shutdown (blocked push?); sending EOS anyway";
+    }
     if (pipeline_ && started_) {
       gst_app_src_end_of_stream(GST_APP_SRC(src_));
       for (int i = 0; i < 200 && !eos_seen_.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));  // <= 2 s
       if (!eos_seen_.load()) P5G_LOG_WARN << "EOS not seen within 2 s; frames still in the encoder are lost";
     }
     if (pipeline_) gst_element_set_state(pipeline_, GST_STATE_NULL);
+    if (source_) {
+      source_->Join();
+      if (source_->skipped_slots() > 0)
+        P5G_LOG_WARN << source_->skipped_slots() << " capture slots were missed while a push was blocked (encoder overloaded):"
+                     << " logged as to_encoder=0 in tx-frames.csv";
+    }
     if (frames_) frames_->Close();
     if (encoded_) encoded_->Close();
     if (rates_) rates_->Close();
@@ -269,7 +290,7 @@ class Sender {
   struct ProbeCtx { Sender* self; ProbeFn fn; };
   void AddProbe(GstElement* e, const char* pad_name, ProbeFn fn) {
     GstPad* pad = gst_element_get_static_pad(e, pad_name);
-    auto* ctx = new ProbeCtx{this, fn};  // lives as long as the process
+    auto* ctx = new ProbeCtx{this, fn};  // lives as long as the process (set-up time, not a streaming thread)
     gst_pad_add_probe(pad, kBufferProbes,
                       [](GstPad* p, GstPadProbeInfo* info, gpointer ud) -> GstPadProbeReturn {
                         auto* c = static_cast<ProbeCtx*>(ud);
@@ -299,6 +320,7 @@ class Sender {
       r.ntp_time_ms = -1;
       r.codec = 4;
       r.is_idr = key ? 1 : 0;
+      r.at_target_quality = -1;
       encoded_->Write(r);
     });
   }
@@ -319,15 +341,26 @@ class Sender {
       if (m.value("receiver", "") != g_cfg.receiver_id) return;
       std::lock_guard<std::mutex> lk(mu_);
       if (started_) return;
-      const std::string host = m.value("host", g_cfg.control_host);  // receiver on the control host unless it says otherwise
-      const int rtp_port = m.at("rtp_port").get<int>();
-      const int rtcp_port = m.at("rtcp_port").get<int>();
-      g_object_set(rtpsink_, "host", host.c_str(), "port", rtp_port, nullptr);
-      g_object_set(rtcpsink_, "host", host.c_str(), "port", rtcp_port, nullptr);
-      // Tell the receiver what is coming BEFORE the first packet leaves (it opens its traces on this).
+      if (awaiting_ack_) return;
+      dest_host_ = m.value("host", g_cfg.control_host);  // receiver on the control host unless it says otherwise
+      dest_rtp_port_ = m.at("rtp_port").get<int>();
+      dest_rtcp_port_ = m.at("rtcp_port").get<int>();
+      g_object_set(rtpsink_, "host", dest_host_.c_str(), "port", dest_rtp_port_, nullptr);
+      g_object_set(rtcpsink_, "host", dest_host_.c_str(), "port", dest_rtcp_port_, nullptr);
+      // Tell the receiver what is coming and wait for its `stream-ack` (traces opened, SSRC published)
+      // BEFORE the first packet leaves, so no packet is missed by the receiver's ledgers.
       ctl_.Send({{"type", "stream-start"}, {"to", g_cfg.receiver_id}, {"stream", g_cfg.stream_id}, {"ssrc", g_cfg.ssrc}, {"pt", g_cfg.pt},
                  {"clock_rate", kVideoClockRate}, {"rtcp_port_local", rtcp_port_local_}, {"width", g_cfg.video.width},
                  {"height", g_cfg.video.height}, {"fps", g_cfg.video.fps}, {"bitrate_kbps", bitrate_kbps_.load()}, {"gop", gop_}});
+      awaiting_ack_ = true;
+      ack_deadline_mono_ns_ = NowMonoNs() + kAckTimeoutNs;
+      return;  // continues when the `stream-ack` message arrives (same control thread)
+    } else if (type == "stream-ack") {
+      if (m.value("stream", "") != g_cfg.stream_id) return;
+      std::lock_guard<std::mutex> lk(mu_);
+      if (started_ || !awaiting_ack_) return;
+      awaiting_ack_ = false;
+      if (!m.value("ok", true)) P5G_FATAL("receiver refused the stream: " << m.value("reason", "?"));
       if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) P5G_FATAL("pipeline PLAYING failed");
       // Running time 0 of the pipeline = its base time on the (monotonic) system clock; the grid's PTS
       // are relative to it, so rtp_ts = PTS * 90 kHz is what rtph264pay puts on the wire.
@@ -335,7 +368,7 @@ class Sender {
       rates_->Write(EncoderRateRow{NowMonoNs(), NowWallNs(), (int64_t)bitrate_kbps_ * 1000, (int64_t)bitrate_kbps_ * 1000, -1, (double)g_cfg.video.fps, 1});
       source_->Start(base);
       started_ = true;
-      P5G_LOG_INFO << "streaming " << g_cfg.stream_id << " -> " << host << ":" << rtp_port << " (rtcp " << rtcp_port
+      P5G_LOG_INFO << "streaming " << g_cfg.stream_id << " -> " << dest_host_ << ":" << dest_rtp_port_ << " (rtcp " << dest_rtcp_port_
                    << ", ours " << rtcp_port_local_ << ") ssrc=" << g_cfg.ssrc << " base_mono_ns=" << base;
     } else if (type == "profile") {
       // Edge-issued profile change (docs/SCENARIO_EDGE_PROFILES.md §6.2). Bitrate is the only knob that
@@ -379,6 +412,10 @@ class Sender {
   ControlClient ctl_;
   std::mutex mu_;  // control-thread state (never taken on a streaming thread)
   std::atomic<bool> started_{false};
+  bool awaiting_ack_ = false;  // control thread only
+  static constexpr int64_t kAckTimeoutNs = 5LL * 1000000000LL;
+  std::atomic<int64_t> ack_deadline_mono_ns_{0};
+  std::string dest_host_; int dest_rtp_port_ = 0, dest_rtcp_port_ = 0;
 };
 
 }  // namespace p5g
@@ -420,6 +457,7 @@ int main(int argc, char** argv) {
   if (c.bitrate_kbps <= 0 || c.video.fps <= 0 || c.video.width <= 0 || c.video.height <= 0) P5G_FATAL("bad profile (width/height/fps/bitrate)");
 
   gst_init(nullptr, nullptr);
+  p5g::InitFrameMetaCaps();
   // One provenance line per run: the flags that shape the stream and the library versions.
   P5G_LOG_INFO << "config: transport=gstreamer stream_id=" << c.stream_id << " to=" << c.receiver_id << " session=" << c.session
                << " control=" << c.control_host << ":" << c.control_port << " codec=H264 " << c.video.width << "x" << c.video.height
@@ -432,7 +470,7 @@ int main(int argc, char** argv) {
   {
     p5g::Sender sender;
     if (!sender.Run()) return 1;
-    p5g::RunUntilShutdown(c.duration_s, [&] { sender.AppendStats(); }, c.stats_period_ms);
+    p5g::RunUntilShutdown(c.duration_s, [&] { sender.AppendStats(); }, c.stats_period_ms > 0 ? c.stats_period_ms : 1000);  // tick also drives the ack watchdog
     sender.Shutdown();
   }
   return 0;

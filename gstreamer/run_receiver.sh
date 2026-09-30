@@ -12,7 +12,8 @@
 #              --receiver-id may be given to rename the single receiver.
 #
 # One receiver process per stream is a design rule (one RTP port pair and trace set per process); this script
-# only saves the N terminals. The control server is started unless something already listens on 8765. The receivers'
+# only saves the N terminals. The control server is started unless this tree's server already listens on
+# the port (P5G_CONTROL_PORT, default 8765; a foreign listener is an error, not silently reused). The receivers'
 # output is shown live (tail -F of their logs). Ctrl-C stops the receivers first (their traces flush and
 # get their footer), then the relay.
 # Layout: this script lives in gstreamer/ (active transport tree); results/ is shared at the repo root.
@@ -49,17 +50,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ss -ltn | grep -q ':8765 '; then
-  echo "[receiver] control server already listening on :8765 (reusing it)"
+PORT="${P5G_CONTROL_PORT:-8765}"
+if ss -ltn | grep -q ":$PORT "; then
+  # Something listens already: reuse it only if it is THIS tree's control server (the webrtc signaling
+  # relay uses the same default port and a different protocol).
+  if printf '{"type":"ping"}\n' | timeout 2 nc -q1 127.0.0.1 "$PORT" 2>/dev/null | grep -q '"p5g-gstreamer-control"'; then
+    echo "[receiver] gstreamer control server already listening on :$PORT (reusing it)"
+  else
+    echo "[receiver] port $PORT is taken by something that is not the gstreamer control server (webrtc relay?). Stop it or set P5G_CONTROL_PORT." >&2; exit 1
+  fi
 else
-  nohup python3 "$TREE/apps/control/control_server.py" --host 0.0.0.0 --port 8765 > "$RD/app/control.log" 2>&1 &
+  nohup python3 "$TREE/apps/control/control_server.py" --host 0.0.0.0 --port "$PORT" > "$RD/app/control.log" 2>&1 &
   RELAY_PID=$!
   sleep 1
 fi
 for i in $(seq 0 $((N - 1))); do
   RID="recv$i"; [ "$N" -eq 1 ] && [ -n "$RID_SINGLE" ] && RID="$RID_SINGLE"
   LOG="$RD/app/receiver-$RID.log"
-  "$TREE/build/apps/video_receiver" --control-host 127.0.0.1 --control-port 8765 --trace-dir "$RD/app" \
+  "$TREE/build/apps/video_receiver" --control-host 127.0.0.1 --control-port "$PORT" --trace-dir "$RD/app" \
       --receiver-id "$RID" "${ARGS[@]}" > "$LOG" 2>&1 &
   PIDS+=($!); LOGS+=("$LOG")
   echo "[receiver] $RID pid=$! -> sender: ./run_sender.sh <host> --to $RID --stream-id cam$i"

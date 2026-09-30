@@ -3,7 +3,7 @@
 #
 #   ./run_sender.sh <receiver-host> [--start-at T] [video_sender args...]
 #
-#   receiver-host : where ./run_receiver.sh runs (control channel on TCP 8765; RTP goes to the same host unless
+#   receiver-host : where ./run_receiver.sh runs (control channel on TCP $P5G_CONTROL_PORT, default 8765; RTP goes to the same host unless
 #                   the receiver advertises another). On the testbed that is the gNB PC's
 #                   core-bridge address 10.53.1.1, reachable from the UE through the UPF.
 #   --start-at T  : wait until wall-clock time T before starting (HH:MM:SS today, or a UNIX epoch with fraction).
@@ -90,7 +90,7 @@ if [ -n "$START_AT" ]; then
   echo "[sender] started at $(date +%H:%M:%S.%N) (target $START_AT)" | tee -a "$RD/app/clock-$STREAM.txt"
 fi
 
-"$BIN" --control-host "$HOST" --control-port 8765 --trace-dir "$RD/app" \
+"$BIN" --control-host "$HOST" --control-port "${P5G_CONTROL_PORT:-8765}" --trace-dir "$RD/app" \
        --width 1280 --height 720 --fps 30 "${YUV_ARGS[@]}" \
        --bitrate-kbps 2500 --duration 300 "$@" 2>&1 | (trap '' INT; exec tee "$RD/app/sender-$STREAM.log")
 echo "[sender] done. traces: $RD/app"

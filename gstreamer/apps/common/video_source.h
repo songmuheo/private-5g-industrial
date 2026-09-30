@@ -2,9 +2,12 @@
 // capture grid, pushed into an `appsrc` element.
 //
 // Based on: subprojects/gst-plugins-base/tests/examples/app/appsrc-stream.c @ GStreamer 1.20.3
-//           (appsrc in push mode, format=time, is-live) — our variant drives the push from its own
-//           real-time thread instead of need-data/idle callbacks, because the grid is the experiment's
-//           clock and must not depend on the pipeline's scheduling.
+//           (appsrc in push mode: gst_app_src_push_buffer / end-of-stream). That example streams a file
+//           from need-data/idle callbacks and is not live; the live, format=time, self-timestamped use
+//           here follows the appsrc API documentation (gst-plugins-base/gst-libs/gst/app/gstappsrc.c,
+//           "is-live", "format", "block", "max-bytes") — our variant drives the push from its own
+//           real-time thread because the grid is the experiment's clock and must not depend on the
+//           pipeline's scheduling.
 // Local modifications: absolute-time capture grid (clock_nanosleep TIMER_ABSTIME), zero-copy
 //           buffers wrapping the mmap'ed source, one trace row per slot, rtp_ts precomputed with the
 //           payloader's arithmetic (gst_util.h RtpTsFromRunningTime).
@@ -17,6 +20,15 @@
 //      frames is a constant of the run,
 //   5. pushes it (gst_app_src_push_buffer, takes ownership; blocks if `block=true` and the queue is full).
 //
+// Overload: if a push blocked long enough that whole grid slots passed, those slots are NOT silently
+// skipped — one row per missed slot is written with to_encoder=0 and the count is reported at stop
+// (`skipped_slots()`), so the offered-frame denominator stays fps x duration and an encoder that cannot
+// keep up shows up in tx-frames.csv instead of as a lower fps. Nothing else in this stack drops frames.
+//
+// Frame layout: tightly packed I420 (Y then U then V, no padding), which is GStreamer's default I420
+// layout only when width % 4 == 0 and height % 2 == 0 (GstVideoInfo strides are rounded up to 4);
+// other sizes are refused at start-up rather than mis-read.
+//
 // Frame identity: the payloader puts rtp_ts = PTS * 90 kHz on the wire (timestamp-offset 0), so the
 // value logged here is the wire timestamp of the frame, and the receiver logs the same number. Pixels
 // are never modified for identification. fps and resolution are fixed by construction: the grid
@@ -25,6 +37,7 @@
 #define P5G_APPS_COMMON_VIDEO_SOURCE_H
 
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -40,6 +53,7 @@
 
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
+#include <gst/video/video-info.h>
 
 #include "app_util.h"
 #include "gst_util.h"
@@ -129,6 +143,15 @@ class GridVideoSource {
  public:
   GridVideoSource(const VideoSourceConfig& cfg, GstAppSrc* appsrc, CaptureFrameTrace* trace)
       : cfg_(cfg), frame_interval_us_(cfg.fps > 0 ? 1000000 / cfg.fps : 33333), appsrc_(appsrc), trace_(trace) {
+    // Our tightly packed frames must be exactly what downstream expects for these caps.
+    GstVideoInfo info;
+    gst_video_info_init(&info);
+    if (!gst_video_info_set_format(&info, GST_VIDEO_FORMAT_I420, cfg.width, cfg.height))
+      P5G_FATAL("unsupported video size " << cfg.width << "x" << cfg.height);
+    const size_t packed = static_cast<size_t>(cfg.width) * cfg.height * 3 / 2;
+    if (info.size != packed || cfg.width % 4 != 0 || cfg.height % 2 != 0)
+      P5G_FATAL("I420 " << cfg.width << "x" << cfg.height << " is not tightly packed in GStreamer's default layout (size "
+                        << info.size << " vs " << packed << "); use width % 4 == 0 and height % 2 == 0");
     frames_ = cfg.yuv_path.empty() ? MakePatternFrames(cfg.width, cfg.height) : OpenYuvFile(cfg.yuv_path, cfg.width, cfg.height);
     P5G_LOG_INFO << "video source: " << (cfg.yuv_path.empty() ? "synthetic pattern" : cfg.yuv_path) << " " << cfg.width
                  << "x" << cfg.height << "@" << cfg.fps << " frames=" << frames_->count;
@@ -147,11 +170,26 @@ class GridVideoSource {
     running_ = true;
     thread_ = std::thread([this] { Loop(); });
   }
-  void Stop() {
-    running_ = false;
+  // Two-step stop: RequestStop() only raises the flag (the thread may be blocked inside
+  // gst_app_src_push_buffer when the queue is full; appsrc releases it on end-of-stream or when the
+  // pipeline leaves PLAYING), Join() is called by the owner after the pipeline was drained / set to NULL.
+  void RequestStop() { running_ = false; }
+  // Waits (bounded) until the grid loop has left its last slot, so that an end-of-stream sent afterwards
+  // comes after the last real push instead of racing it. Returns false if the thread is still inside a
+  // (blocked) push after the timeout.
+  bool WaitStopped(int timeout_ms) {
+    for (int i = 0; i < timeout_ms; ++i) {
+      if (loop_done_.load()) return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return loop_done_.load();
+  }
+  void Join() {
     if (thread_.joinable()) thread_.join();
   }
+  void Stop() { RequestStop(); Join(); }
   int64_t frames_pushed() const { return pushed_.load(); }
+  int64_t skipped_slots() const { return skipped_.load(); }
 
  private:
   static void SleepUntilMonoUs(int64_t target_us) {
@@ -169,13 +207,26 @@ class GridVideoSource {
       int64_t target_us = slot * frame_interval_us_;
       SleepUntilMonoUs(target_us);
       const int64_t now_us = NowMonoNs() / 1000;
-      if (now_us >= (slot + 1) * frame_interval_us_) {  // fell behind (blocked push): realign to the grid
-        slot = now_us / frame_interval_us_;               // (visible in tx-frames.csv as a gap in grid_slot)
+      if (now_us >= (slot + 1) * frame_interval_us_) {  // fell behind (blocked push): the missed slots are
+        const int64_t resume = now_us / frame_interval_us_;  // recorded (to_encoder=0), then realign
+        for (; slot < resume && running_; ++slot) EmitMissedSlot(slot, idx);
         target_us = slot * frame_interval_us_;
       }
       EmitSlot(slot, idx, target_us);
       ++slot;
     }
+    loop_done_ = true;
+  }
+
+  // A slot that passed while the previous push was blocked: no buffer, one row, counted.
+  void EmitMissedSlot(int64_t slot, int64_t& idx) {
+    const int64_t target_us = slot * frame_interval_us_;
+    const GstClockTime pts = static_cast<GstClockTime>(target_us * 1000 - start_mono_ns_);
+    if (trace_)
+      trace_->Write(CaptureFrameRow{idx, slot, idx % frames_->count, RtpTsFromRunningTime(pts), NowWallNs(), NowMonoNs(),
+                                    cfg_.width, cfg_.height, 0});
+    ++idx;
+    skipped_++;
   }
 
   void EmitSlot(int64_t slot, int64_t& idx, int64_t target_us) {
@@ -207,8 +258,10 @@ class GridVideoSource {
   std::shared_ptr<SourceFrames> frames_;
   int64_t start_mono_ns_ = 0;
   std::atomic<int64_t> pushed_{0};
+  std::atomic<int64_t> skipped_{0};
   std::thread thread_;
   std::atomic<bool> running_{false};
+  std::atomic<bool> loop_done_{false};
 };
 
 }  // namespace p5g

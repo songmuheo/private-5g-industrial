@@ -23,8 +23,8 @@ GStreamer 1.20 + x264, 순수 RTP, 혼잡 제어 없음. **`webrtc/`(동결)**: 
 
 | 파일 | gstreamer | webrtc | 차이 |
 |---|---|---|---|
-| `-tx-frames.csv` | ○ | ○ | `to_encoder`: gstreamer에서는 appsrc push 성공 여부(항상 1이어야 함; 0이면 파이프라인 정지). `rtp_ts`는 전선값 그 자체 |
-| `-tx-encoded.csv` | ○ | ○ | gstreamer: `qp=-1`, `temporal/spatial/simulcast_idx=-1`, `ntp_time_ms=-1`, `codec=4`(H264), `capture_time_ms`=PTS(ms) |
+| `-tx-frames.csv` | ○ | ○ | `to_encoder`: gstreamer에서는 1 = appsrc가 받음, 0 = **놓친 슬롯**(앞선 push가 큐 가득으로 막혀 슬롯이 지나감 = 인코더 과부하; 슬롯마다 행을 남겨 분모를 유지) 또는 종료 직후 거부. 정상 run은 전부 1. `rtp_ts`는 전선값 그 자체 |
+| `-tx-encoded.csv` | ○ | ○ | 컬럼 동일(`at_target_quality` 포함). gstreamer: `qp=-1`, `temporal/spatial/simulcast_idx=-1`, `ntp_time_ms=-1`, `at_target_quality=-1`, `codec=4`(H264), `capture_time_ms`=PTS(ms) |
 | `-tx-encoder-rates.csv` | ○ | ○ | gstreamer: 시작 시 1행 + `profile` 메시지마다 1행. `bandwidth_allocation_bps=-1` |
 | `-tx-rtp.csv`, `-rx-rtp.csv` | ○ | ○ | 동일. gstreamer `probe_cluster_id=-1`, `has_ext=0` |
 | `-tx-rtcp.csv`, `-rx-rtcp.csv` | ○ | ○ | 동일(SR/RR/SDES만; NACK/PLI/TWCC 없음) |
@@ -38,7 +38,11 @@ GStreamer 1.20 + x264, 순수 RTP, 혼잡 제어 없음. **`webrtc/`(동결)**: 
 **직접** 성립한다(webrtc의 SSRC별 랜덤 오프셋 K와 `sender_rtp_ts_est` 추정이 필요 없다). 검증: `results/20260930-120754-gst-first`
 837 프레임 전부 세 파일에서 같은 `rtp_ts`로 join(NOTES 2026-09-30).
 
-**기록 지점(gstreamer).** 모두 pad probe(streaming thread, ring에 POD 복사만):
+**시작 순서(gstreamer).** 수신기 등록 → 서버가 송신기에 `receiver-ready`(포트) → 송신기 `stream-start`(SSRC·프로파일) → 수신기가
+trace를 열고 SSRC를 공개한 뒤 `stream-ack` → 송신기 PLAYING. 그래서 수신 ledger가 첫 패킷부터 빠짐없이 기록한다.
+수신기의 RTCP 목적지는 서버가 알려준 값으로 시작해 **실제 들어온 RTCP의 출발 endpoint로 갱신**한다(NAT/포트 변환 대비).
+
+**기록 지점(gstreamer).** 모두 pad probe(streaming thread; 패킷 단위 경로는 ring에 POD 복사만, 프레임 단위 경로는 프레임당 meta 몇 개 할당 — gst_util.h 머리말):
 `tx-frames` = 격자 스레드(appsrc push 직전), `tx-encoded` = `x264enc` src pad(PTS→running time→rtp_ts 변환: 인코더가 출력 PTS에 상수
 오프셋을 더하고 segment도 같이 옮기므로 running time으로 되돌려야 한다), `tx-rtp` = RTP `udpsink` sink pad(buffer list 포함),
 `tx/rx-rtcp` = RTCP udpsink/udpsrc pad, `rx-rtp` = RTP `udpsrc` src pad(커널 소켓 읽기 직후, jitter buffer 이전),

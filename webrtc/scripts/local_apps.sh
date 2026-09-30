@@ -7,7 +7,8 @@
 #   <tree>/scripts/local_apps.sh stop  <run_dir>
 #
 # start: launch the tree's relay/receiver/sender (sender in the UE namespace for uplink), record their
-#        PIDs in <run_dir>/app/pids.txt and the build provenance in <run_dir>/app/build_info.json, return.
+#        PIDs in <run_dir>/app/pids.txt (one per line, "pid" or "role=pid") and the build provenance in
+#        <run_dir>/app/build_info.json, return.
 # stop : graceful stop in flush order (sender, receiver, relay) so every trace gets its footer.
 # Extracted unchanged from the former run_local_e2e.sh step 4 (libwebrtc M120 sender/receiver).
 set -euo pipefail
