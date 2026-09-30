@@ -770,3 +770,20 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   rtpgccbwe on the laptop and aborts the run if a gcc camera cannot; (L) build_gst_rs.sh keeps --locked (the
   crates.io tarball ships Cargo.lock); (L) the "no pacing" remark corrected (rtpgccbwe paces; start-up decline is a
   hypothesis). tx-cc.csv now starts with the start value so it is never empty. run-local gcc: 20260930-183121-gst-gcc2.
+
+## 2026-09-30 — ffmpeg/ tree (SMEC-style pre-encoded RTP) built and verified locally
+* Design: docs/ARCHITECTURE.md entry + ffmpeg/README.md. Sources: MOT17-02 (MOTChallenge MOT17.zip 5.9 GB, 600 frames,
+  the SMEC/ARMA sequence) and the six Kendo views, each as rungs 500/1000/1500/2500/4000 kbps at 1280x720@30 (+ MOT17
+  1920x1080 8000k like SMEC's 8 Mbps), x264 HRD-CBR with a 2-frame VBV: the 2500k rung is 10417 B per P-frame, the 1000k rung
+  4167 B (bytes per frame = rate/fps exactly; docs/NOTES.md 2026-09-30 HRD note).
+* Depacketizer round trip (build-time test): 60 AUs -> 247 packets -> 59/59 byte-identical AUs, a dropped FU-A fragment
+  flagged incomplete. Loopback demo (results/20260930-193200-demo-local): 361/361/361 and 181/181/181, capture->app
+  2.7 ms median (no encoder), 12 packets/frame at 2500k. Rung switch on a `profile` message: switched at the next IDR
+  (frame 120), decoder continued (301/301). srsUE code test (results/20260930-193237-ffmpeg-first): 840/840/840,
+  10241/10241 RTP, every frame joined sender -> gNB PDCP -> receiver by rtp_ts (wire base learned from the first packet),
+  capture->gNB 27.7 ms / capture->app 30.4 ms median (gstreamer: 31.7 / 32.3 with its 2-3 ms encode).
+* Observations: FFmpeg's rtpenc packs the AUD/SPS/PPS into STAP-A and fragments slices with FU-A at packet_size 1200;
+  it emits an RTCP SR at the first packet and ~every 5 s (logged, forwarded to the receiver's RTCP port; the receiver
+  sends nothing back, as SMEC). rtpenc's RTP timestamp base is random and not settable — the sender reads it off its
+  first packet, so tx-frames carries wire values.
+* Not yet: OTA run; laptops need `ffmpeg/scripts/prepare_client.sh K` (packages, build, rungs over the sync LAN).

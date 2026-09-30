@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Receiver host (the gNB PC or an internet host): control server + N ffmpeg-tree video_receiver processes.
+#
+#   ./run_receiver.sh [run_dir] [-n N] [extra video_receiver args...]
+#
+#   -n N     : number of receivers (default 1), one per UE, ids recv0 .. recv<N-1>. Each sender picks
+#              its receiver with --to recvK and its own --stream-id (see run_sender.sh).
+#   run_dir  : default = the run published by ./run_gnb_core.sh (results/CURRENT), else a new
+#              results/<timestamp>-receiver. All receivers write into <run_dir>/app:
+#              <stream>-rx-*.csv, <stream>-rx-stats.jsonl, receiver-recvK.log, control.log.
+#   extra    : passed to every receiver (e.g. --advertise-host A --stats-period-ms 500). With -n 1 a
+#              --receiver-id may be given to rename the single receiver.
+#
+# One receiver process per stream is a design rule (one RTP port pair and trace set per process); this script
+# only saves the N terminals. The control server is started unless this tree's server already listens on
+# the port (P5G_CONTROL_PORT, default 8765; a foreign listener is an error, not silently reused). The receivers'
+# output is shown live (tail -F of their logs). Ctrl-C stops the receivers first (their traces flush and
+# get their footer), then the relay.
+# Layout: this script lives in ffmpeg/ (SMEC-style transport tree); results/ is shared at the repo root.
+set -euo pipefail
+TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$TREE/.." && pwd)"
+cd "$ROOT"
+RD=""; N=1; RID_SINGLE=""; ARGS=()
+if [ $# -gt 0 ] && [[ "$1" != -* ]]; then RD="$1"; shift; fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--count) N="$2"; shift 2;;
+    --receiver-id) RID_SINGLE="$2"; shift 2;;
+    *) ARGS+=("$1"); shift;;
+  esac
+done
+[[ "$N" =~ ^[1-9][0-9]*$ ]] || { echo "-n must be a positive integer" >&2; exit 1; }
+[ "$N" -eq 1 ] || [ -z "$RID_SINGLE" ] || { echo "--receiver-id only makes sense with -n 1 (ids are recv0..recv$((N-1)))" >&2; exit 1; }
+if [ -z "$RD" ]; then
+  if [ -L results/CURRENT ]; then RD="results/$(readlink results/CURRENT)"; else RD="results/$(date +%Y%m%d-%H%M%S)-receiver"; fi
+fi
+mkdir -p "$RD/app"
+[ -x "$TREE/build/apps/video_receiver" ] || { echo "ffmpeg/build/apps/video_receiver missing (make build-apps TREE=ffmpeg)" >&2; exit 1; }
+
+RELAY_PID=""; PIDS=(); LOGS=()
+cleanup() {
+  set +e
+  trap - INT TERM
+  echo; echo "[receiver] stopping ${#PIDS[@]} receiver(s)..."
+  for p in "${PIDS[@]}"; do kill -INT "$p" 2>/dev/null; done
+  for p in "${PIDS[@]}"; do for i in $(seq 1 100); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done; kill -KILL "$p" 2>/dev/null; done
+  [ -n "$RELAY_PID" ] && kill -TERM "$RELAY_PID" 2>/dev/null
+  echo "[receiver] stopped. traces: $RD/app"
+}
+trap cleanup EXIT
+
+PORT="${P5G_CONTROL_PORT:-8765}"
+if ss -ltn | grep -q ":$PORT "; then
+  # Something listens already: reuse it only if it is THIS tree's control server (the webrtc signaling
+  # relay uses the same default port and a different protocol).
+  if printf '{"type":"ping"}\n' | timeout 2 nc -q1 127.0.0.1 "$PORT" 2>/dev/null | grep -q '"p5g-ffmpeg-control"'; then
+    echo "[receiver] ffmpeg control server already listening on :$PORT (reusing it)"
+  else
+    echo "[receiver] port $PORT is taken by something that is not the ffmpeg control server (gstreamer/webrtc?). Stop it or set P5G_CONTROL_PORT." >&2; exit 1
+  fi
+else
+  nohup python3 "$TREE/apps/control/control_server.py" --host 0.0.0.0 --port "$PORT" > "$RD/app/control.log" 2>&1 &
+  RELAY_PID=$!
+  sleep 1
+fi
+for i in $(seq 0 $((N - 1))); do
+  RID="recv$i"; [ "$N" -eq 1 ] && [ -n "$RID_SINGLE" ] && RID="$RID_SINGLE"
+  LOG="$RD/app/receiver-$RID.log"
+  "$TREE/build/apps/video_receiver" --control-host 127.0.0.1 --control-port "$PORT" --trace-dir "$RD/app" \
+      --receiver-id "$RID" "${ARGS[@]}" > "$LOG" 2>&1 &
+  PIDS+=($!); LOGS+=("$LOG")
+  echo "[receiver] $RID pid=$! -> sender: ./run_sender.sh <host> --to $RID --stream-id cam$i"
+done
+echo "[receiver] run dir: $RD   (Ctrl-C to stop)"
+if [ "${P5G_RECEIVER_NOTAIL:-0}" = 1 ]; then wait "${PIDS[@]}"; else tail -n +1 -F "${LOGS[@]}"; fi   # NOTAIL: orchestrated by run_experiment.sh

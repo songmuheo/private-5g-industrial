@@ -7,6 +7,7 @@
 # GStreamer upstream examples (reference only, fetched by gstreamer/scripts/fetch_gst_examples.sh)
 /gstreamer/gstreamer-src/
 /gstreamer/build/
+/ffmpeg/build/
 # experiment results
 /results/
 # video assets (downloaded / converted)

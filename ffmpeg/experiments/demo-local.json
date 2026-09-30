@@ -1,0 +1,33 @@
+{
+  "name": "demo-local",
+  "duration_s": 12,
+  "start_delay_s": 6,
+  "relay_host": "127.0.0.1",
+  "require_gnb": false,
+  "hosts": {
+    "mode": "local"
+  },
+  "sync": {
+    "mode": "off"
+  },
+  "cams": {
+    "cam0": {
+      "fps": 30,
+      "source": "kendo_view0_1280x720_30",
+      "rungs": [
+        1000,
+        2500
+      ],
+      "kbps": 2500
+    },
+    "cam1": {
+      "fps": 30,
+      "source": "kendo_view1_1280x720_30",
+      "rungs": [
+        500,
+        1000
+      ],
+      "kbps": 1000
+    }
+  }
+}

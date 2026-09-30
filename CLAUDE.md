@@ -6,11 +6,12 @@ Private-5G (srsRAN gNB + Open5GS + USRP B210 + Pixel UEs) video-transmission tes
 cross-layer tracing. Roles: **gNB PC** (`ran/`, `patches/srsran_gnb`, `scripts/run/`), **UE laptop**
 (`<tree>/apps/sender`), **receiver host** (`<tree>/apps/receiver` + control channel). Raw logs go to `results/<run>/`.
 
-Transport trees: **`gstreamer/`** is the active stack (fixed-profile camera model, GStreamer + x264, plain
-RTP), **`webrtc/`** is the frozen libwebrtc stack (excluded from the default build and run path; kept
-runnable, tag `webrtc-baseline-2026-09-30`). **They share no code** — only the run-directory / trace-file
-contract in `docs/TRACE_SCHEMA.md`, the RAN scripts and `analysis/`. Rules 1–7 apply to the active tree;
-a change to `webrtc/` is recorded in `webrtc/README.md`.
+Transport trees: **`gstreamer/`** (live x264 camera model: fixed fps/resolution, bitrate from the edge profile or
+`--cc gcc`), **`ffmpeg/`** (SMEC-style: pre-encoded H.264 rungs sent as RTP/UDP, bit-identical frames, rung switch
+by `profile`) and **`webrtc/`** (frozen libwebrtc stack, excluded from the default build and run path; tag
+`webrtc-baseline-2026-09-30`). **They share no code** — only the run-directory / trace-file contract in
+`docs/TRACE_SCHEMA.md`, the control-message protocol, the RAN scripts and `analysis/`. Rules 1–7 apply to
+gstreamer/ and ffmpeg/; a change to `webrtc/` is recorded in `webrtc/README.md`.
 
 1. **Third-party stays stock.** `third_party/*`, the distribution's GStreamer and (frozen tree) the
    libwebrtc checkout are never edited; changes are build-time patches under `patches/<component>/` applied
@@ -36,7 +37,7 @@ a change to `webrtc/` is recorded in `webrtc/README.md`.
 7. **Verify with real data** and log experiments (incl. negative results) in `docs/NOTES.md`.
 
 ```
-make deps | submodules | build-gnb | build-apps [TREE=gstreamer|webrtc] | build-ue-sim | core-up | core-down | run-local [TREE=] | verify RD=
+make deps | submodules | build-gnb | build-apps [TREE=gstreamer|ffmpeg|webrtc] | build-ue-sim | core-up | core-down | run-local [TREE=] | verify RD=
 make webrtc-build-libwebrtc | webrtc-build-apps            (frozen tree only)
 <tree>/run_experiment.sh <tree>/experiments/<scenario>.json (gNB PC; senders on the laptops via ssh)
 scripts/run/run_gnb.sh b210_n78_tdd_20mhz <trace_dir>      (P5G_GNB_PCAP=1 adds stock pcaps)

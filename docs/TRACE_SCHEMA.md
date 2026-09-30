@@ -16,9 +16,14 @@ results/<run>/
 
 ## 0-a. 두 전송 트리와 파일 계약 (2026-09-30)
 
-송신·수신 앱은 두 트리 중 하나에서 나온다. **`gstreamer/`(활성)**: 고정 프로파일(해상도·fps·bitrate를 밖에서 정함),
-GStreamer 1.20 + x264, 순수 RTP, 혼잡 제어 없음. **`webrtc/`(동결)**: libwebrtc M120 + GoogCC. 두 트리는 코드를
-공유하지 않으며, 이 문서의 **파일 이름·컬럼이 둘 사이의 유일한 계약**이다. `analysis/`는 둘 다 읽는다.
+송신·수신 앱은 세 트리 중 하나에서 나온다. **`gstreamer/`**: 실시간 x264, 고정 fps/해상도, bitrate는 edge 프로파일
+또는 `--cc gcc`. **`ffmpeg/`**: SMEC식 — 사전 인코딩된 H.264 사다리(rung)를 RTP/UDP로, 인코더 없음, `profile`로
+IDR 경계에서 rung 전환. **`webrtc/`(동결)**: libwebrtc M120 + GoogCC. 트리들은 코드를 공유하지 않으며, 이 문서의
+**파일 이름·컬럼이 유일한 계약**이다. `analysis/`는 전부 읽는다. ffmpeg 트리의 컬럼 값 차이: `tx-encoded`의
+`encode_done_*`는 AU를 muxer에 넘긴 시각(인코더 없음), `bytes`는 파일의 AU 크기; `rx-rtp.log_*_ns`는 **커널 도착
+시각**(`SO_TIMESTAMPNS`, wall→mono는 읽는 순간의 오프셋으로 환산); `rx-frames.first/last_pkt_mono_ns`도 커널 도착;
+`tx-cc`/`tx-events`/`rx-events` 없음; `rx-stats.jsonl`에 `aus_incomplete`, `lost_packets`, `lost_fragments`,
+`decode_failures`; `tx-stats.jsonl`에 `rung_kbps`, `missed_slots`. `tx-encoder-rates`는 시작 + rung 전환마다 1행.
 어느 트리가 만든 run인지는 `run.json`의 `transport`(코드 테스트) 또는 `app/*.log`의 `config: transport=` 줄로 안다.
 
 | 파일 | gstreamer | webrtc | 차이 |

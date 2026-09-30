@@ -1,0 +1,47 @@
+{
+  "duration_s": 300,
+  "start_delay_s": 20,
+  "relay_host": "10.53.1.1",
+  "require_gnb": true,
+  "hosts": {
+    "mode": "ssh",
+    "user": "songmu",
+    "ip_pattern": "192.168.77.1{K}",
+    "repo": "private-5g-industrial"
+  },
+  "sync": {
+    "mode": "auto",
+    "max_ms": 1
+  },
+  "receiver": {
+    "extra_args": []
+  },
+  "name": "2ue-720p30-fit",
+  "_note": "profile fitted to the links (docs/NOTES.md 2026-09-30 OTA): cam0 2500, cam1 1000 kbps",
+  "cams": {
+    "cam0": {
+      "fps": 30,
+      "source": "mot17-02_1280x720_30",
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2500,
+        4000
+      ],
+      "kbps": 2500
+    },
+    "cam1": {
+      "fps": 30,
+      "source": "mot17-02_1280x720_30",
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2500,
+        4000
+      ],
+      "kbps": 1000
+    }
+  }
+}
