@@ -6,12 +6,12 @@
 # binary that depends only on glibc and X11 runtime libraries of the build host, so building on
 # Ubuntu 22.04 produces binaries that run on any 22.04+ machine (the UE laptops).
 #
-# libwebrtc location: $P5G_LIBWEBRTC_DIR or third_party/libwebrtc (a symlink is fine).
-# Output: build/apps/video_sender, build/apps/video_receiver
+# libwebrtc location: $P5G_LIBWEBRTC_DIR or webrtc/libwebrtc (a symlink is fine).
+# Output: webrtc/build/apps/video_sender, webrtc/build/apps/video_receiver
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-LW="${P5G_LIBWEBRTC_DIR:-$ROOT/third_party/libwebrtc}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # webrtc/ (the frozen libwebrtc stack)
+LW="${P5G_LIBWEBRTC_DIR:-$ROOT/libwebrtc}"
 SRC="$LW/src"
 REL="$SRC/out/Release"
 OUT="$ROOT/build/apps"

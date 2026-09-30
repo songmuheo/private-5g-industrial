@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # CODE-TEST TOOL: exercise the whole chain on one PC without radios.
-#   Open5GS + srsRAN gNB (ZeroMQ profile, tracer on) + srsUE (netns ue1) + video_sender in the UE
-#   namespace -> video_receiver on the host (uplink; --direction dl swaps the two apps).
+#   Open5GS + srsRAN gNB (ZeroMQ profile, tracer on) + srsUE (netns ue1) + the transport tree's sender
+#   in the UE namespace -> its receiver on the host (uplink; --direction dl swaps the two apps).
 # Every component is started exactly as on the real testbed (same binaries, same scripts); only the
 # radio is replaced by the ZeroMQ baseband loopback and the UE by srsUE.
 #
-#   scripts/run/run_local_e2e.sh [--duration S] [--codec H264] [--width W --height H --fps F]
-#                                [--yuv FILE] [--label NAME] [--direction ul|dl]
+#   scripts/run/run_local_e2e.sh [--tree gstreamer|webrtc] [--duration S] [--codec H264]
+#                                [--width W --height H --fps F] [--yuv FILE] [--label NAME] [--direction ul|dl]
+#
+# The RAN part here is transport-independent; the app part is delegated to <tree>/scripts/local_apps.sh
+# (start/stop contract documented there). P5G_TREE or --tree selects the tree (default: gstreamer).
 #
 # Output: results/<timestamp>-<label>/{gnb,ue,app,core}/ + run.json, then analysis/verify_run.py.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 DURATION=30; CODEC=H264; WIDTH=1280; HEIGHT=720; FPS=30; YUV=""; LABEL="local"; DIRECTION="ul"
+TREE_NAME="${P5G_TREE:-gstreamer}"
 WARMUP=5; DRAIN=3
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -24,6 +28,7 @@ while [ $# -gt 0 ]; do
     --yuv) YUV="$2"; shift 2;;
     --label) LABEL="$2"; shift 2;;
     --direction) DIRECTION="$2"; shift 2;;
+    --tree) TREE_NAME="$2"; shift 2;;
     *) echo "unknown arg $1" >&2; exit 1;;
   esac
 done
@@ -32,8 +37,9 @@ RUN_ID="$(date +%Y%m%d-%H%M%S)-${LABEL}"
 RD="$ROOT/results/$RUN_ID"
 mkdir -p "$RD/gnb" "$RD/ue" "$RD/app" "$RD/core"
 echo "[e2e] run dir: $RD"
-SENDER="$ROOT/build/apps/video_sender"; RECEIVER="$ROOT/build/apps/video_receiver"
-[ -x "$SENDER" ] && [ -x "$RECEIVER" ] || { echo "apps not built (scripts/build/build_apps.sh)" >&2; exit 1; }
+TREE="$ROOT/$TREE_NAME"; APPS="$TREE/scripts/local_apps.sh"
+[ -x "$APPS" ] || { echo "unknown transport tree '$TREE_NAME' ($APPS missing)" >&2; exit 1; }
+echo "[e2e] transport tree: $TREE_NAME"
 PY="$ROOT/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 
 PIDS=()
@@ -72,24 +78,10 @@ echo "[e2e] UE attached: $UE_IP"
 sudo ip netns exec ue1 ip route replace default dev tun_srsue
 HOST_IP=10.53.1.1   # host side of the core bridge: reachable from the UE through the UPF
 
-# 4) signaling relay + apps (receiver side = host, sender side = UE namespace for uplink)
-python3 "$ROOT/apps/signaling/signaling_server.py" --host 0.0.0.0 --port 8765 > "$RD/app/signaling.log" 2>&1 &
-PIDS+=($!)
-sleep 1
-APP=(--session s1 --signaling-port 8765 --trace-dir "$RD/app")
-VID=(--codec "$CODEC" --width "$WIDTH" --height "$HEIGHT" --fps "$FPS"); [ -n "$YUV" ] && VID+=(--yuv "$YUV")
+# 4) apps (receiver side = host, sender side = UE namespace for uplink) — delegated to the tree
 TOTAL=$((WARMUP + DURATION + DRAIN))
-if [ "$DIRECTION" = "ul" ]; then
-  "$RECEIVER" "${APP[@]}" --signaling-host 127.0.0.1 --receiver-id recv0 --duration $((TOTAL + 5)) > "$RD/app/receiver.log" 2>&1 &
-  PIDS+=($!); sleep 1
-  sudo -E ip netns exec ue1 "$SENDER" "${APP[@]}" "${VID[@]}" --signaling-host "$HOST_IP" --stream-id cam0 --to recv0 --duration "$TOTAL" > "$RD/app/sender.log" 2>&1 &
-  PIDS+=($!)
-else
-  sudo -E ip netns exec ue1 "$RECEIVER" "${APP[@]}" --signaling-host "$HOST_IP" --receiver-id recv0 --duration $((TOTAL + 5)) > "$RD/app/receiver.log" 2>&1 &
-  PIDS+=($!); sleep 1
-  "$SENDER" "${APP[@]}" "${VID[@]}" --signaling-host 127.0.0.1 --stream-id cam0 --to recv0 --duration "$TOTAL" > "$RD/app/sender.log" 2>&1 &
-  PIDS+=($!)
-fi
+"$APPS" start "$RD" "$UE_IP" "$HOST_IP" "$TOTAL" "$DIRECTION" "$CODEC" "$WIDTH" "$HEIGHT" "$FPS" "$YUV"
+while read -r p; do [ -n "$p" ] && PIDS+=("$p"); done < "$RD/app/pids.txt"
 
 # 5) measurement window (boundaries recorded in run.json; every log is continuous)
 sleep "$WARMUP"; WIN_START_NS=$(date +%s%N)
@@ -98,21 +90,20 @@ sleep "$DURATION"; WIN_END_NS=$(date +%s%N)
 sleep "$DRAIN"
 
 # 6) stop: apps first (flush), then RAN, then collect the core log
-sudo pkill -TERM -x video_sender || true; sleep 2
-pkill -TERM -x video_receiver || true; sleep 2
+"$APPS" stop "$RD"
 cleanup; trap - EXIT
 docker logs p5g_open5gs > "$RD/core/open5gs.log" 2>&1 || true
 
 cat > "$RD/run.json" <<EOF
 {
-  "run_id": "$RUN_ID", "mode": "local_zmq_codetest", "direction": "$DIRECTION",
+  "run_id": "$RUN_ID", "mode": "local_zmq_codetest", "direction": "$DIRECTION", "transport": "$TREE_NAME",
   "duration_s": $DURATION, "warmup_s": $WARMUP, "drain_s": $DRAIN,
   "window_start_wall_ns": $WIN_START_NS, "window_end_wall_ns": $WIN_END_NS,
   "codec": "$CODEC", "width": $WIDTH, "height": $HEIGHT, "fps": $FPS, "source": "${YUV:-pattern}",
   "ue_ip": "$UE_IP",
   "srsran_project": "$(git -C "$ROOT/third_party/srsRAN_Project" describe --tags --always)",
   "srsran_4g": "$(git -C "$ROOT/third_party/srsRAN_4G" describe --tags --always)",
-  "libwebrtc": "$(grep libwebrtc_commit "$ROOT/build/apps/BUILD_INFO.txt" | cut -d= -f2)"
+  "apps": $(cat "$RD/app/build_info.json")
 }
 EOF
 "$PY" "$ROOT/analysis/verify_run.py" "$RD" || true

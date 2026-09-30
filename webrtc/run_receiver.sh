@@ -15,8 +15,10 @@
 # saves the N terminals. The relay is started unless something already listens on 8765. The receivers'
 # output is shown live (tail -F of their logs). Ctrl-C stops the receivers first (their traces flush and
 # get their footer), then the relay.
+# Layout: this script lives in webrtc/ (frozen libwebrtc stack); results/ is shared at the repo root.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$TREE/.." && pwd)"
 cd "$ROOT"
 RD=""; N=1; RID_SINGLE=""; ARGS=()
 if [ $# -gt 0 ] && [[ "$1" != -* ]]; then RD="$1"; shift; fi
@@ -33,7 +35,7 @@ if [ -z "$RD" ]; then
   if [ -L results/CURRENT ]; then RD="results/$(readlink results/CURRENT)"; else RD="results/$(date +%Y%m%d-%H%M%S)-receiver"; fi
 fi
 mkdir -p "$RD/app"
-[ -x build/apps/video_receiver ] || { echo "build/apps/video_receiver missing (make build-apps)" >&2; exit 1; }
+[ -x "$TREE/build/apps/video_receiver" ] || { echo "webrtc/build/apps/video_receiver missing (make webrtc-build-apps)" >&2; exit 1; }
 
 RELAY_PID=""; PIDS=(); LOGS=()
 cleanup() {
@@ -50,14 +52,14 @@ trap cleanup EXIT
 if ss -ltn | grep -q ':8765 '; then
   echo "[receiver] signaling relay already listening on :8765 (reusing it)"
 else
-  nohup python3 apps/signaling/signaling_server.py --host 0.0.0.0 --port 8765 > "$RD/app/signaling.log" 2>&1 &
+  nohup python3 "$TREE/apps/signaling/signaling_server.py" --host 0.0.0.0 --port 8765 > "$RD/app/signaling.log" 2>&1 &
   RELAY_PID=$!
   sleep 1
 fi
 for i in $(seq 0 $((N - 1))); do
   RID="recv$i"; [ "$N" -eq 1 ] && [ -n "$RID_SINGLE" ] && RID="$RID_SINGLE"
   LOG="$RD/app/receiver-$RID.log"
-  build/apps/video_receiver --signaling-host 127.0.0.1 --signaling-port 8765 --trace-dir "$RD/app" \
+  "$TREE/build/apps/video_receiver" --signaling-host 127.0.0.1 --signaling-port 8765 --trace-dir "$RD/app" \
       --receiver-id "$RID" "${ARGS[@]}" > "$LOG" 2>&1 &
   PIDS+=($!); LOGS+=("$LOG")
   echo "[receiver] $RID pid=$! -> sender: ./run_sender.sh <host> --to $RID --stream-id cam$i"

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Fetch and build a STOCK libwebrtc (M120) into third_party/libwebrtc using Chromium's depot_tools,
+# Fetch and build a STOCK libwebrtc (M120) into webrtc/libwebrtc using Chromium's depot_tools,
 # inside the p5g/libwebrtc-builder container (Ubuntu 24.04: depot_tools needs Python >= 3.11).
 #
-# Pinned by third_party/libwebrtc.lock (webrtc_commit, depot_tools_commit). First run: ~25 GB and
-# 1-3 hours. Output: third_party/libwebrtc/src/out/Release/obj/libwebrtc.a (+ headers, bundled
+# Pinned by webrtc/libwebrtc.lock (webrtc_commit, depot_tools_commit). First run: ~25 GB and
+# 1-3 hours. Output: webrtc/libwebrtc/src/out/Release/obj/libwebrtc.a (+ headers, bundled
 # clang/libc++ used by scripts/build/build_apps.sh).
 #
 # If a pristine checkout already exists elsewhere (e.g. another project on the same machine), point
-# P5G_LIBWEBRTC_DIR or a symlink third_party/libwebrtc at it instead of re-fetching; build_apps.sh
+# P5G_LIBWEBRTC_DIR or a symlink webrtc/libwebrtc at it instead of re-fetching; build_apps.sh
 # records the commit and dirtiness of whatever it links.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-LW="${P5G_LIBWEBRTC_DIR:-$ROOT/third_party/libwebrtc}"
-LOCK="$ROOT/third_party/libwebrtc.lock"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # webrtc/ (the frozen libwebrtc stack)
+LW="${P5G_LIBWEBRTC_DIR:-$ROOT/libwebrtc}"
+LOCK="$ROOT/libwebrtc.lock"
 IMG="p5g/libwebrtc-builder:24.04"
 
 WEBRTC_COMMIT="$(grep '^webrtc_commit:' "$LOCK" | awk '{print $2}')"

@@ -17,8 +17,10 @@
 # Scenario (JSON): see experiments/5ue-720p30.json. "hosts.mode" = "ssh" (laptops; user@ip_pattern with {K},
 # repo dir under the home) or "local" (smoke test on this PC). Per camera, "host" and "repo" override the pattern.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; cd "$ROOT"
-SCEN="${1:?usage: run_experiment.sh experiments/<scenario>.json}"
+# Layout: this script lives in webrtc/ (frozen libwebrtc stack). results/, analysis/, video/assets and
+# scripts/setup are shared at the repo root (working directory); receivers/senders come from webrtc/.
+TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(cd "$TREE/.." && pwd)"; cd "$ROOT"
+SCEN="${1:?usage: run_experiment.sh webrtc/experiments/<scenario>.json}"
 [ -f "$SCEN" ] || { echo "no such scenario: $SCEN" >&2; exit 1; }
 PY="$ROOT/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 
@@ -51,8 +53,8 @@ host_of() { local v="CAM_HOST_$1"; echo "${!v:-${HOST_PATTERN//\{K\}/$(camK "$1"
 repo_of() { local v="CAM_REPO_$1"; echo "${!v:-$HOST_REPO}"; }                                 # cams.camK.repo overrides hosts.repo
 # run a command on a camera host (ssh) or locally
 on_host() { local cam="$1"; shift
-  if [ "$HOST_MODE" = "local" ]; then bash -lc "cd '$ROOT' && $*"
-  else ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST_USER@$(host_of "$cam")" "cd ~/$(repo_of "$cam") && $*"; fi; }
+  if [ "$HOST_MODE" = "local" ]; then bash -lc "cd '$TREE' && $*"
+  else ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST_USER@$(host_of "$cam")" "cd ~/$(repo_of "$cam")/webrtc && $*"; fi; }
 
 # ---- run directory ----
 if [ "$REQUIRE_GNB" = 1 ]; then pgrep -x gnb >/dev/null || { echo "[exp] gNB is not running: start ./run_gnb_core.sh first (or set require_gnb=false for a local smoke test)" >&2; exit 1; }; fi
@@ -62,7 +64,7 @@ LOG="$RD/experiment.log"; log() { echo "[exp $(date +%H:%M:%S)] $*" | tee -a "$L
 log "scenario $NAME: $N cams, ${DURATION}s, start in ${START_DELAY}s, hosts=$HOST_MODE, relay=$RELAY_HOST -> $RD"
 
 # ---- receivers ----
-P5G_RECEIVER_NOTAIL=1 ./run_receiver.sh "$RD" -n "$N" $RECV_EXTRA > "$RD/app/run_receiver.log" 2>&1 &
+P5G_RECEIVER_NOTAIL=1 "$TREE/run_receiver.sh" "$RD" -n "$N" $RECV_EXTRA > "$RD/app/run_receiver.log" 2>&1 &
 RECV_PID=$!; sleep 2
 kill -0 "$RECV_PID" 2>/dev/null || { cat "$RD/app/run_receiver.log"; echo "[exp] receivers failed to start" >&2; exit 1; }
 log "receivers up (pid $RECV_PID): $(grep -c 'pid=' "$RD/app/run_receiver.log") of $N"
@@ -77,8 +79,8 @@ if [ "$HOST_MODE" = "ssh" ] && ! sudo -n iptables -S P5G_SYNC_OUT 2>/dev/null | 
 fi
 declare -A STATUS
 for c in "${CAMS[@]}"; do
-  var="CAM_ARGS_$c"; args="${!var}"; src="$(sed -n 's/.*--yuv \([^ ]*\).*/\1/p' <<<"$args")"
-  out="$(on_host "$c" "git rev-parse --short HEAD 2>/dev/null; [ -z '$src' ] || { [ -f '$src' ] && echo asset=ok || echo asset=MISSING; }; chronyc tracking 2>/dev/null | awk '/RMS offset/{print \"rms_ms=\" \$4*1000}' || echo chrony=none" 2>&1 | tr '\n' ' ')" \
+  var="CAM_ARGS_$c"; args="${!var}"; src="$(sed -n 's/.*--yuv \([^ ]*\).*/\1/p' <<<"$args")"   # repo-relative; on_host cd's into webrtc/ -> ../
+  out="$(on_host "$c" "git rev-parse --short HEAD 2>/dev/null; [ -z '$src' ] || { [ -f '../$src' ] && echo asset=ok || echo asset=MISSING; }; chronyc tracking 2>/dev/null | awk '/RMS offset/{print \"rms_ms=\" \$4*1000}' || echo chrony=none" 2>&1 | tr '\n' ' ')" \
     && STATUS[$c]="ok: $out" || STATUS[$c]="UNREACHABLE: $out"
   log "preflight $c @ $( [ "$HOST_MODE" = local ] && echo local || host_of "$c"): ${STATUS[$c]}"
 done
@@ -142,7 +144,7 @@ for c in "${CAMS[@]}"; do
   if [ "$HOST_MODE" = "local" ]; then
     src="$(ls -td results/*-sender-$c 2>/dev/null | head -1)"; [ -n "$src" ] && cp -r "$src/app" "$RD/senders/$c/" && log "collected $c from $src"
   else
-    remote="$(on_host "$c" "ls -td results/*-sender-$c 2>/dev/null | head -1" 2>/dev/null | tr -d '\r')"
+    remote="$(on_host "$c" "cd .. && ls -td results/*-sender-$c 2>/dev/null | head -1" 2>/dev/null | tr -d '\r')"   # results/ is at the repo root, on_host cd's into webrtc/
     if [ -n "$remote" ]; then rsync -aq "$HOST_USER@$(host_of "$c"):~/$(repo_of "$c")/$remote/app/" "$RD/senders/$c/app/" && log "collected $c from $(host_of "$c"):$remote" || log "collect $c FAILED"; fi
   fi
 done

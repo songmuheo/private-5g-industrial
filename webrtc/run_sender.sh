@@ -21,14 +21,18 @@
 # chrony -> gNB PC; asks for sudo). Every run then checks chrony: RMS offset must be <= P5G_SYNC_MAX_MS (1).
 # NO-GO is a warning, but aborts with --start-at. P5G_SYNC=off skips all of it.
 #
-# Binary: $P5G_SENDER_BIN, else build/apps/video_sender, else ./video_sender next to this script.
+# Binary: $P5G_SENDER_BIN, else webrtc/build/apps/video_sender, else ./video_sender next to this script.
+#
+# Layout: this script lives in webrtc/ (the frozen libwebrtc stack); results/, video/assets and
+# scripts/setup are shared at the repo root, so the working directory is the repo root.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$TREE/.." && pwd)"
 cd "$ROOT"
 HOST="${1:?usage: run_sender.sh <receiver-host> [--start-at T] [video_sender args...]}"; shift
 BIN="${P5G_SENDER_BIN:-}"
-[ -n "$BIN" ] || for c in build/apps/video_sender ./video_sender; do [ -x "$c" ] && { BIN="$c"; break; }; done
-[ -n "$BIN" ] || { echo "video_sender binary not found (P5G_SENDER_BIN, build/apps/, or next to this script)" >&2; exit 1; }
+[ -n "$BIN" ] || for c in "$TREE/build/apps/video_sender" "$TREE/video_sender"; do [ -x "$c" ] && { BIN="$c"; break; }; done
+[ -n "$BIN" ] || { echo "video_sender binary not found (P5G_SENDER_BIN, webrtc/build/apps/, or next to this script)" >&2; exit 1; }
 
 # script-only options; everything else goes to video_sender
 START_AT=""; ARGS=(); EXPLICIT_YUV=0

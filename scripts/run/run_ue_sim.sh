@@ -2,7 +2,7 @@
 # Run srsUE (ZeroMQ) inside network namespace `ue1` — CODE-TEST TOOL ONLY (no radio).
 #   scripts/run/run_ue_sim.sh <log_dir>
 # The UE tunnel (tun_srsue, 10.45.x.y) appears inside `ue1`; run the sender with
-#   sudo ip netns exec ue1 build/apps/video_sender ...
+#   sudo ip netns exec ue1 <tree>/build/apps/video_sender ...
 # Stock srsUE outputs: ue.log, 1 s metrics CSV (rsrp, dl/ul mcs, brate, bler, ta, ul buffer), MAC-NR pcap.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

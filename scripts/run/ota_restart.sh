@@ -2,8 +2,9 @@
 # gNB-PC convenience: (re)start the whole gNB side for an over-the-air session and keep it running.
 #   scripts/run/ota_restart.sh [label]      -> results/<timestamp>-<label>/{gnb,app,core}
 #   scripts/run/ota_restart.sh stop         -> stop gNB, receiver, signaling relay, metrics client, core
-# Starts: Open5GS (+ P5G_UE_DNNS), gNB (b210 profile, tracer on), JSON metrics client, signaling relay
-# and video_receiver (recv0, waits for a sender). PIDs are kept in <run>/pids so stop is exact.
+# Starts: Open5GS (+ P5G_UE_DNNS), gNB (b210 profile, tracer on), JSON metrics client, and the transport
+# tree's receivers (<tree>/run_receiver.sh -n P5G_RECEIVERS, default 1; P5G_TREE selects gstreamer|webrtc).
+# PIDs are kept in <run>/pids so stop is exact.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
@@ -39,13 +40,12 @@ echo $! > "$RD/pids/gnb.pid"
 PY="$ROOT/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 nohup "$PY" ran/gnb/metrics_json_client.py --out "$RD/gnb/gnb_metrics.jsonl" > "$RD/gnb/metrics_json_client.log" 2>&1 &
 echo $! > "$RD/pids/metrics.pid"
-nohup python3 apps/signaling/signaling_server.py --host 0.0.0.0 --port 8765 > "$RD/app/signaling.log" 2>&1 &
-echo $! > "$RD/pids/signaling.pid"
-sleep 1
-nohup build/apps/video_receiver --signaling-host 127.0.0.1 --signaling-port 8765 --session s1 \
-    --receiver-id recv0 --trace-dir "$RD/app" > "$RD/app/receiver.log" 2>&1 &
+TREE="$ROOT/${P5G_TREE:-gstreamer}"
+[ -x "$TREE/run_receiver.sh" ] || { echo "unknown transport tree ${P5G_TREE:-gstreamer} ($TREE/run_receiver.sh missing)" >&2; exit 1; }
+P5G_RECEIVER_NOTAIL=1 nohup "$TREE/run_receiver.sh" "$RD" -n "${P5G_RECEIVERS:-1}" > "$RD/app/run_receiver.log" 2>&1 &
 echo $! > "$RD/pids/receiver.pid"
+sleep 2
 
 until grep -q "gNB started" "$RD/gnb/gnb_stdout.log" 2>/dev/null || grep -q "srsRAN ERROR" "$RD/gnb/gnb_stdout.log" 2>/dev/null; do sleep 2; done
 grep -E "Operating over|Cell pci|N2:|gNB started|ERROR" "$RD/gnb/gnb_stdout.log" | cut -c1-120
-echo "[ota] run dir: $RD  (sender: video_sender --signaling-host 10.53.1.1 --to recv0 ...)"
+echo "[ota] run dir: $RD  (sender: $TREE/run_sender.sh 10.53.1.1 --to recv0 ...)"

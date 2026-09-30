@@ -1,8 +1,12 @@
 # build outputs (srsRAN gNB/UE builds, patched source mirror, app binaries)
 /build/
-# libwebrtc checkout (20+ GB, fetched by scripts/build/build_libwebrtc.sh) — may be a symlink
-/third_party/libwebrtc
-/third_party/libwebrtc/
+# libwebrtc checkout (20+ GB, fetched by webrtc/scripts/build_libwebrtc.sh) — may be a symlink
+/webrtc/libwebrtc
+/webrtc/libwebrtc/
+/webrtc/build/
+# GStreamer upstream examples (reference only, fetched by gstreamer/scripts/fetch_gst_examples.sh)
+/gstreamer/gstreamer-src/
+/gstreamer/build/
 # experiment results
 /results/
 # video assets (downloaded / converted)

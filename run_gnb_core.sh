@@ -5,7 +5,7 @@
 #
 # Runs the gNB in the foreground (its stdout metrics table on screen and in gnb/gnb_stdout.log).
 # Ctrl-C stops the gNB (traces flush), saves the core log, and takes the core down.
-# The run directory is published in results/CURRENT so ./run_receiver.sh on this PC writes into
+# The run directory is published in results/CURRENT so <tree>/run_receiver.sh on this PC writes into
 # the same run without any shared shell variables.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,8 +38,8 @@ nohup "$PY" ran/gnb/metrics_json_client.py --out "$RD/gnb/gnb_metrics.jsonl" > "
 METRICS_PID=$!
 cat <<MSG
 [gnb_core] next, in other terminals:
-  receiver (this PC):   ./run_receiver.sh                # relay :8765 + video_receiver -> $RD/app
-  sender (UE laptop):   ./run_sender.sh 10.53.1.1        # after the phone is attached
+  receiver (this PC):   <tree>/run_receiver.sh            # gstreamer/ (active) or webrtc/ (frozen) -> $RD/app
+  sender (UE laptop):   <tree>/run_sender.sh 10.53.1.1    # after the phone is attached
   stop:                 Ctrl-C here
 MSG
 # tee ignores SIGINT: Ctrl-C goes to the gNB, which flushes its traces and exits; only then does the pipe close.
