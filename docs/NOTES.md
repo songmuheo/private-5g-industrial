@@ -860,3 +860,13 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   started cam1 at slot 0 with P-frame 30 and the receiver's `av_log_errors` counter caught it (660 decoder messages);
   now cam1 begins at slot 30 / source frame 60 (IDR), 331 frames in 12 s, 0 decoder errors. loopback: cam0 IDR slots
   0,60,120,..., cam1 30,90,150,...
+
+## 2026-09-30 — first ffmpeg OTA attempt failed on operator error; scripts now refuse it
+* `./gstreamer/run_experiment.sh ffmpeg/experiments/2ue-720p30.json` was run: the gstreamer orchestrator translated
+  the ffmpeg scenario into gstreamer arguments (`--yuv video/assets/mot17-02_1280x720_30`), both laptops' gstreamer
+  senders died with "cannot open yuv", the run was marked INVALID (the pass-1 fix for exact per-launch collection
+  did its job: the failure was visible, not a stale run's traces). Fixes: every scenario now carries `"tree"`, every
+  `run_experiment.sh` aborts on a scenario of another tree (verified both ways, rc=1); the gstreamer preflight aborts
+  on `asset=MISSING` (it only logged it); the "all streams over the 5G link" line is not printed for an INVALID run;
+  a smoke test (`require_gnb=false`) never joins `results/CURRENT` — my demo-local re-test had landed inside the
+  live OTA directory `results/20260930-223304-2ue-ffmpeg` (already INVALID; its app/ now holds demo traces).

@@ -1,4 +1,5 @@
 {
+  "tree": "gstreamer",
   "name": "demo-local",
   "duration_s": 12,
   "start_delay_s": 6,

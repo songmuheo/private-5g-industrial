@@ -1,14 +1,37 @@
 {
+  "tree": "webrtc",
   "name": "2ue-720p30",
   "duration_s": 300,
   "start_delay_s": 20,
   "relay_host": "10.53.1.1",
   "require_gnb": true,
-  "hosts": { "mode": "ssh", "user": "songmu", "ip_pattern": "192.168.77.1{K}", "repo": "private-5g-industrial" },
-  "sync": { "mode": "auto", "max_ms": 1 },
-  "receiver": { "extra_args": [] },
+  "hosts": {
+    "mode": "ssh",
+    "user": "songmu",
+    "ip_pattern": "192.168.77.1{K}",
+    "repo": "private-5g-industrial"
+  },
+  "sync": {
+    "mode": "auto",
+    "max_ms": 1
+  },
+  "receiver": {
+    "extra_args": []
+  },
   "cams": {
-    "cam0": { "width": 1280, "height": 720, "fps": 30, "start_kbps": 300, "source": "kendo_view0_1280x720_30.yuv" },
-    "cam1": { "width": 1280, "height": 720, "fps": 30, "start_kbps": 300, "source": "kendo_view1_1280x720_30.yuv" }
+    "cam0": {
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "start_kbps": 300,
+      "source": "kendo_view0_1280x720_30.yuv"
+    },
+    "cam1": {
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "start_kbps": 300,
+      "source": "kendo_view1_1280x720_30.yuv"
+    }
   }
 }

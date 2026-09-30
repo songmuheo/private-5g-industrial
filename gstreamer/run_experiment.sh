@@ -29,6 +29,7 @@ eval "$("$PY" - "$SCEN" <<'PYEOF'
 import json, sys, shlex
 s = json.load(open(sys.argv[1]))
 q = shlex.quote
+if s.get('tree', 'gstreamer') != 'gstreamer': sys.exit(f"ABORT: scenario is for the {s['tree']} tree; run {s['tree']}/run_experiment.sh (this is gstreamer/)")
 print(f"NAME={q(s['name'])}; DURATION={int(s.get('duration_s', 300))}; START_DELAY={int(s.get('start_delay_s', 20))}")
 print(f"RELAY_HOST={q(s.get('relay_host', '10.53.1.1'))}; REQUIRE_GNB={'1' if s.get('require_gnb', True) else '0'}")
 h = s.get('hosts', {}); print(f"HOST_MODE={q(h.get('mode', 'ssh'))}; HOST_USER={q(h.get('user', 'songmu'))}; HOST_PATTERN={q(h.get('ip_pattern', '192.168.77.1{K}'))}; HOST_REPO={q(h.get('repo', 'private-5g-industrial'))}")
@@ -53,6 +54,7 @@ for c, v in cams.items():
     print(f"CAM_ARGS_{c}={q(' '.join(args))}")
 PYEOF
 )"
+[ -n "${NAME:-}" ] || exit 1   # the scenario parser aborted (wrong tree / bad JSON)
 N=${#CAMS[@]}
 camK() { echo "${1//[!0-9]/}"; }
 host_of() { local v="CAM_HOST_$1"; echo "${!v:-${HOST_PATTERN//\{K\}/$(camK "$1")}}"; }      # cams.camK.host overrides the pattern
@@ -64,7 +66,8 @@ on_host() { local cam="$1"; shift
 
 # ---- run directory ----
 if [ "$REQUIRE_GNB" = 1 ]; then pgrep -x gnb >/dev/null || { echo "[exp] gNB is not running: start ./run_gnb_core.sh first (or set require_gnb=false for a local smoke test)" >&2; exit 1; }; fi
-if [ -L results/CURRENT ] && pgrep -x gnb >/dev/null; then RD="results/$(readlink results/CURRENT)"; else RD="results/$(date +%Y%m%d-%H%M%S)-$NAME"; fi
+# join the live gNB run only for a RAN experiment; a loopback smoke test (require_gnb=false) always gets its own directory
+if [ "$REQUIRE_GNB" = 1 ] && [ -L results/CURRENT ] && pgrep -x gnb >/dev/null; then RD="results/$(readlink results/CURRENT)"; else RD="results/$(date +%Y%m%d-%H%M%S)-$NAME"; fi
 mkdir -p "$RD/app" "$RD/senders"; cp "$SCEN" "$RD/scenario.json"
 LOG="$RD/experiment.log"; log() { echo "[exp $(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
 log "scenario $NAME: $N cams, ${DURATION}s, start in ${START_DELAY}s, hosts=$HOST_MODE, relay=$RELAY_HOST -> $RD"
@@ -91,6 +94,7 @@ for c in "${CAMS[@]}"; do
     && STATUS[$c]="ok: $out" || STATUS[$c]="UNREACHABLE: $out"
   log "preflight $c @ $( [ "$HOST_MODE" = local ] && echo local || host_of "$c"): ${STATUS[$c]}"
   case "${STATUS[$c]}" in *rtpgccbwe=MISSING*) log "ABORT: $c uses --cc gcc but rtpgccbwe does not load on its host (run: make build-gst-rs there)"; exit 1;; esac
+  case "${STATUS[$c]}" in *asset=MISSING*) log "ABORT: $c: YUV source missing on its host (video/fetch_asset.sh --cam K there)"; exit 1;; esac
 done
 log "gNB PC HEAD $(git rev-parse --short HEAD)"
 # ---- radio link check from the live gNB table (last ~10 s of gnb_stdout.log): CQI and power headroom per UE ----
@@ -175,6 +179,8 @@ sed -n '/## A\./,/## B\./p' "$AN/report.txt" | grep -E "^cam|A2|selected|^  cam"
 if grep -q "WARNING: check path" "$AN/report.txt" && [ "$HOST_MODE" = "ssh" ]; then
   log "RESULT INVALID: at least one stream did not travel over the 5G link (report.txt section A2). Check the sync-LAN firewall and laptop Wi-Fi."
   echo "INVALID: media not on the 5G path (see report.txt A2)" > "$AN/INVALID"
+elif [ -n "${MISSING:-}" ]; then
+  log "media path check skipped: run is INVALID (missing/failed senders)"
 else
   log "media path check: all streams over the 5G link"
 fi
