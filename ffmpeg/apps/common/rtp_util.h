@@ -301,10 +301,10 @@ class H264Depacketizer {
     const uint8_t* p = h.payload; const int n = h.payload_len;
     if (n >= 1) {
       const int type = p[0] & 0x1f;
-      if (type >= 1 && type <= 23) {            // single NAL unit
-        AppendNal(p, n);
+      if (type >= 1 && type <= 23) {            // single NAL unit (a definite NAL boundary: ends any orphan run)
+        AppendNal(p, n); orphan_ = false;
       } else if (type == 24) {                  // STAP-A: 1 byte header, then (2-byte size, NAL)*
-        int off = 1;
+        orphan_ = false; int off = 1;
         while (off < n) {
           if (off + 2 > n) { damaged_ = 1; break; }
           const int sz = (p[off] << 8) | p[off + 1]; off += 2;

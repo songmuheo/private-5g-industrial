@@ -195,6 +195,14 @@ int main(int argc, char** argv) {
       CHECK(c2 == 1 && !ev[0].complete && ev[0].lost_fragments == 2 && ev[0].lost_packets == 2 && ev[0].bytes == 0 && ev[0].packets == 4
             && ev[0].first_arrival_ns == 100 && ev[0].last_arrival_ns == 400, "synthetic e2: n=%d frag=%d lost=%d bytes=%d packets=%d arrival %lld..%lld",
             c2, ev[0].lost_fragments, ev[0].lost_packets, ev[0].bytes, ev[0].packets, (long long)ev[0].first_arrival_ns, (long long)ev[0].last_arrival_ns); }
+    // (e2b) A-start, [A-end lost], single NAL, [B-start lost], B-end: the single NAL is a definite boundary, so B is a
+    //       second discarded NAL (lost_fragments=2); the single NAL is delivered
+    ts += 3000; { int c = 0; RtpHeader h;
+      auto pa = [&](const std::vector<uint8_t>& p) { CHECK(ParseRtp(p.data(), (int)p.size(), &h), "e2b: bad RTP"); return d2.Push(h, ev, 0); };
+      c += pa(mk(f1, false, seq++, ts)); seq++;            // A start, A end lost
+      c += pa(mk(single, false, seq++, ts));               // boundary
+      seq++; c += pa(mk(f3, true, seq++, ts));             // B start lost, B end (orphan), marker
+      CHECK(c == 1 && !ev[0].complete && ev[0].lost_fragments == 2 && ev[0].lost_packets == 2 && ev[0].bytes == 8, "synthetic e2b: n=%d frag=%d lost=%d bytes=%d", c, ev[0].lost_fragments, ev[0].lost_packets, ev[0].bytes); }
     // (e3) same-timestamp reset: the two events carry their OWN arrival spans and packet counts
     ts += 3000; { int c3 = 0; RtpHeader h;
       auto pa = [&](const std::vector<uint8_t>& p, int64_t arr) { CHECK(ParseRtp(p.data(), (int)p.size(), &h), "e3: bad RTP"); return d2.Push(h, ev, arr); };
@@ -223,6 +231,6 @@ int main(int argc, char** argv) {
   CHECK(complete == (int)N - 5, "complete=%d, expected %zu (all but MID/TAIL/HEAD/REORDER/TWO_EVENTS)", complete, N - 5);
   CHECK(dp.counters().late_or_dup == 2, "late_or_dup=%lld, expected 2 (duplicate + reordered)", (long long)dp.counters().late_or_dup);
   CHECK(dp.counters().seq_resets == 0, "seq_resets=%lld, expected 0 (wraparound is not a reset)", (long long)dp.counters().seq_resets);
-  std::printf("aus=%zu packets=%d events=%d complete=%d file-cases={mid,tail,head,dup,reorder,two-events,seq-wrap} synthetic={fu-mid,fu-end,fu-start,reset,two-nals-lost,same-ts-reset-arrivals,orphans-only,bad-stap,late,misorder-bound,ts-wrap} bad=%d\n", N, pkts, events, complete, g_bad);
+  std::printf("aus=%zu packets=%d events=%d complete=%d file-cases={mid,tail,head,dup,reorder,two-events,seq-wrap} synthetic={fu-mid,fu-end,fu-start,reset,two-nals-lost,nal-boundary-ends-orphan,same-ts-reset-arrivals,orphans-only,bad-stap,late,misorder-bound,ts-wrap} bad=%d\n", N, pkts, events, complete, g_bad);
   return g_bad ? 1 : 0;
 }
