@@ -36,6 +36,8 @@ CODEC="${7:?codec}"; WIDTH="${8:?W}"; HEIGHT="${9:?H}"; FPS="${10:?fps}"; YUV="$
 PORT="${P5G_CONTROL_PORT:-8765}"
 APP=(--session s1 --control-port "$PORT" --trace-dir "$RD/app")
 VID=(--width "$WIDTH" --height "$HEIGHT" --fps "$FPS"); [ -n "$YUV" ] && VID+=(--yuv "$YUV")
+# P5G_CC=gcc runs the code test in the GCC condition (sender --cc gcc, receiver --cc gcc); default: fixed profile
+CC="${P5G_CC:-profile}"; VID+=(--cc "$CC"); APP+=(--cc "$CC")
 if [ "$DIRECTION" = "ul" ]; then
   # control server + receiver on the host (reachable from the UE at HOST_IP through the UPF)
   python3 "$TREE/apps/control/control_server.py" --host 0.0.0.0 --port "$PORT" > "$RD/app/control.log" 2>&1 &

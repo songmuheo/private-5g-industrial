@@ -25,6 +25,7 @@ K = the camera id this laptop plays (`cam0` -> K=0). Do these in order, in a ter
 git clone https://github.com/songmuheo/private-5g-industrial.git && cd private-5g-industrial      # or: git pull
 make deps                                          # GStreamer 1.20 dev/plugins (+ srsRAN deps; harmless on a laptop)
 make build-apps                                    # -> gstreamer/build/apps/video_sender (runs the RTCP validator test)
+make build-gst-rs                                  # only for --cc gcc scenarios: rtpgccbwe (Rust, ~1 min) -> gstreamer/build/gst-plugins-rs/
 gstreamer/build/apps/video_sender --help           # sanity: prints usage
 # 2. clock-sync LAN + chrony (asks for sudo; must be run here, not over SSH)
 scripts/setup/sync_lan_client.sh K                 # wired port auto-detected -> 192.168.77.1K, chrony -> gNB PC

@@ -46,6 +46,13 @@ struct ReceiverConfig {
   std::string advertise_host;  // address senders should send to; empty = they use the control host
   int rtp_port = 0;            // 0 = ephemeral (reported to the control server); RTCP = separate socket
   int jitter_ms = 50;          // rtpbin latency (rtpjitterbuffer); stock default is 200
+  // "gcc": accept the TWCC header extension (extmap-1 in the caps) and run the session with the AVPF profile
+  // so rtpsession returns transport-wide feedback to the sender's rtpgccbwe. "profile": plain AVP, no
+  // extension (identical to the runs before 2026-09-30). Must match the sender's --cc.
+  std::string cc = "profile";
+  int pt = 96;                 // payload type in the udpsrc caps (must match the sender's --pt). rtpsession caches
+                               // per-payload caps and reads the TWCC extmap only from caps that carry "payload"
+                               // (gstrtpsession.c gst_rtp_session_cache_caps), so this is required for --cc gcc.
   int drop_late = 0;           // rtpjitterbuffer drop-on-latency
   int stats_period_ms = 1000;
   int duration_s = 0;
@@ -118,7 +125,12 @@ class Receiver {
     rtp_socket_ = BindUdp(g_cfg.rtp_port, &rtp_port_);
     rtcp_socket_ = BindUdp(0, &rtcp_port_);
     GstCaps* caps = gst_caps_new_simple("application/x-rtp", "media", G_TYPE_STRING, "video", "clock-rate", G_TYPE_INT, (int)kVideoClockRate,
-                                        "encoding-name", G_TYPE_STRING, "H264", nullptr);
+                                        "encoding-name", G_TYPE_STRING, "H264", "payload", G_TYPE_INT, g_cfg.pt, nullptr);
+    if (g_cfg.cc == "gcc") {
+      const std::string key = "extmap-" + std::to_string(kTwccExtId);
+      gst_caps_set_simple(caps, key.c_str(), G_TYPE_STRING, kTwccUri, nullptr);
+      gst_util_set_object_arg(G_OBJECT(rtpbin_), "rtp-profile", "avpf");
+    }
     g_object_set(rtpsrc, "socket", rtp_socket_, "close-socket", FALSE, "caps", caps, nullptr);
     gst_caps_unref(caps);
     g_object_set(rtcpsrc, "socket", rtcp_socket_, "close-socket", FALSE, nullptr);
@@ -394,6 +406,9 @@ class Receiver {
     frames_ = std::make_unique<DecodedFrameTrace>(prefix + "-frames.csv", kDecodedFrameHeader, &FormatDecodedFrameRow, kFrameTraceCapacity);
     if (g_cfg.stats_period_ms > 0) stats_.store(std::fopen((prefix + "-stats.jsonl").c_str(), "w"), std::memory_order_release);
     ssrc_.store(m.value("ssrc", 0u), std::memory_order_relaxed);
+    if (m.value("cc", "profile") != g_cfg.cc)
+      P5G_LOG_WARN << "sender --cc " << m.value("cc", "profile") << " but this receiver runs --cc " << g_cfg.cc
+                   << (g_cfg.cc == "profile" ? ": no TWCC feedback will be sent, the sender's GCC will starve" : ": harmless, but RTCP timing differs from a plain-AVP run");
     // Publish to the streaming threads only after the rings exist (release / acquire pairs).
     rtp_p_.store(rtp_.get(), std::memory_order_release);
     rtcp_p_.store(rtcp_.get(), std::memory_order_release);
@@ -454,13 +469,13 @@ class Receiver {
 static void Usage() {
   std::fprintf(stderr,
                "video_receiver --control-host H --control-port P --session S --receiver-id RID --trace-dir DIR\n"
-               "               [--rtp-port N(=ephemeral)] [--advertise-host A] [--jitter-ms 50] [--drop-late 0|1]\n"
+               "               [--rtp-port N(=ephemeral)] [--advertise-host A] [--jitter-ms 50] [--drop-late 0|1] [--cc profile|gcc] [--pt 96]\n"
                "               [--stats-period-ms 1000] [--duration S]\n");
 }
 
 int main(int argc, char** argv) {
   p5g::CliArgs a(argc, argv, {"help", "control-host", "control-port", "session", "receiver-id", "trace-dir", "rtp-port",
-                              "advertise-host", "jitter-ms", "drop-late", "stats-period-ms", "duration"});
+                              "advertise-host", "jitter-ms", "drop-late", "stats-period-ms", "duration", "cc", "pt"});
   if (a.Has("help")) { Usage(); return 0; }
   auto& c = p5g::g_cfg;
   c.control_host = a.Get("control-host", c.control_host);
@@ -475,12 +490,15 @@ int main(int argc, char** argv) {
   c.drop_late = a.GetInt("drop-late", 0);
   c.stats_period_ms = a.GetInt("stats-period-ms", c.stats_period_ms);
   c.duration_s = a.GetInt("duration", 0);
+  c.cc = a.Get("cc", c.cc);
+  c.pt = a.GetInt("pt", c.pt);
+  if (c.cc != "profile" && c.cc != "gcc") P5G_FATAL("--cc must be profile or gcc");
 
   gst_init(nullptr, nullptr);
   p5g::InitFrameMetaCaps();
   P5G_LOG_INFO << "config: transport=gstreamer receiver_id=" << c.receiver_id << " session=" << c.session << " control="
                << c.control_host << ":" << c.control_port << " rtp_port=" << c.rtp_port << " jitter_ms=" << c.jitter_ms
-               << " drop_late=" << c.drop_late << " stats_period_ms=" << c.stats_period_ms << " " << p5g::GstProvenance();
+               << " drop_late=" << c.drop_late << " cc=" << c.cc << " stats_period_ms=" << c.stats_period_ms << " " << p5g::GstProvenance();
   p5g::InstallSignalHandlers();
   {
     p5g::Receiver receiver;

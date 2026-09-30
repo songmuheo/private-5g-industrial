@@ -61,6 +61,12 @@ struct SenderConfig {
   int vbv_ms = 600;
   std::string preset = "veryfast";  // x264 speed preset; zerolatency tune is always on
   int threads = 4;
+  // Who decides the bitrate: "profile" = the value above (and `profile` control messages) — nothing in
+  // the stack adapts; "gcc" = rtpgccbwe (Google Congestion Control, gst-plugins-rs) estimates from TWCC
+  // feedback and its estimate is applied to x264 through the same path. fps/resolution are caps in both.
+  std::string cc = "profile";
+  int gcc_min_kbps = 300;
+  int gcc_max_kbps = 0;   // 0 = the profile bitrate is the ceiling
   // RTP
   int mtu = 1200;
   int pt = 96;
@@ -82,6 +88,8 @@ class Sender {
     rtp_ = std::make_unique<RtpPacketTrace>(TracePrefix() + "-rtp.csv", kRtpPacketHeader, &FormatRtpPacketRow, kPacketTraceCapacity);
     rtcp_ = std::make_unique<RtcpPacketTrace>(TracePrefix() + "-rtcp.csv", kRtcpPacketHeader, &FormatRtcpPacketRow, kPacketTraceCapacity / 8);
     stats_ = g_cfg.stats_period_ms > 0 ? std::fopen((TracePrefix() + "-stats.jsonl").c_str(), "w") : nullptr;
+    if (g_cfg.cc == "gcc")
+      cc_ = std::make_unique<CcUpdateTrace>(TracePrefix() + "-cc.csv", kCcUpdateHeader, &FormatCcUpdateRow, kFrameTraceCapacity);
     BuildPipeline();
   }
 
@@ -160,6 +168,7 @@ class Sender {
     if (rates_) rates_->Close();
     if (rtp_) rtp_->Close();
     if (rtcp_) rtcp_->Close();
+    if (cc_) cc_->Close();
     if (stats_) std::fclose(stats_);
     stats_ = nullptr;
     if (pipeline_) gst_object_unref(pipeline_);
@@ -240,7 +249,30 @@ class Sender {
 
     gst_bin_add_many(GST_BIN(pipeline_), src, enc, pay, rtpbin_, rtpsink_, rtcpsink_, rtcpsrc, nullptr);
     if (!gst_element_link_many(src, enc, pay, nullptr)) P5G_FATAL("link appsrc -> x264enc -> rtph264pay failed");
-    LinkRequest(pay, "src", rtpbin_, "send_rtp_sink_0");
+    if (g_cfg.cc == "gcc") {
+      // GCC condition: TWCC extension on every packet (the receiver's session answers with transport-wide
+      // feedback, RFC 8888-style), rtpgccbwe right before the send session (rtpgccbwe docs: "must be placed
+      // right before an rtpsession"; it consumes the RTPTWCCPackets upstream event), AVPF profile for early
+      // feedback. The estimate is applied in OnEstimate through the same code as a `profile` message.
+      if (!EnsureRustPlugins("rtpgccbwe"))
+        P5G_FATAL("--cc gcc needs the rtpgccbwe element (gst-plugins-rs): run gstreamer/scripts/build_gst_rs.sh or set GST_PLUGIN_PATH");
+      GstRTPHeaderExtension* twcc = gst_rtp_header_extension_create_from_uri(kTwccUri);
+      if (!twcc) P5G_FATAL("TWCC header extension implementation not found (gst-plugins-good rtpmanagerbad?)");
+      gst_rtp_header_extension_set_id(twcc, kTwccExtId);
+      g_signal_emit_by_name(pay, "add-extension", twcc);
+      gst_object_unref(twcc);
+      bwe_ = Make("rtpgccbwe", "bwe");
+      const int max_kbps = g_cfg.gcc_max_kbps > 0 ? g_cfg.gcc_max_kbps : g_cfg.bitrate_kbps;
+      g_object_set(bwe_, "min-bitrate", (guint)g_cfg.gcc_min_kbps * 1000, "max-bitrate", (guint)max_kbps * 1000,
+                   "estimated-bitrate", (guint)g_cfg.bitrate_kbps * 1000, nullptr);
+      gst_util_set_object_arg(G_OBJECT(rtpbin_), "rtp-profile", "avpf");
+      gst_bin_add(GST_BIN(pipeline_), bwe_);
+      if (!gst_element_link(pay, bwe_)) P5G_FATAL("link rtph264pay -> rtpgccbwe failed");
+      LinkRequest(bwe_, "src", rtpbin_, "send_rtp_sink_0");
+      g_signal_connect(bwe_, "notify::estimated-bitrate", G_CALLBACK(&Sender::OnEstimate), this);
+    } else {
+      LinkRequest(pay, "src", rtpbin_, "send_rtp_sink_0");
+    }
     LinkStatic(rtpbin_, "send_rtp_src_0", rtpsink_, "sink");
     LinkRequestSrc(rtpbin_, "send_rtcp_src_0", rtcpsink_, "sink");
     LinkRequest(rtcpsrc, "src", rtpbin_, "recv_rtcp_sink_0");
@@ -342,6 +374,20 @@ class Sender {
     ForEachProbeBuffer(info, [&](GstBuffer* b) { RtcpPacketRow r; FillRtcpRow(b, 1, &r); rtcp_->Write(r); });
   }
 
+  // rtpgccbwe's thread: new bandwidth estimate -> encoder target (bounded by the profile bitrate as the
+  // ceiling unless --gcc-max-kbps says otherwise). Same effect as a `profile` message.
+  static void OnEstimate(GObject* obj, GParamSpec*, gpointer ud) {
+    auto* self = static_cast<Sender*>(ud);
+    guint est = 0; g_object_get(obj, "estimated-bitrate", &est, nullptr);
+    const int kbps = static_cast<int>(est / 1000);
+    if (kbps <= 0) return;
+    if (self->cc_) self->cc_->Write(CcUpdateRow{NowMonoNs(), NowWallNs(), (int64_t)est});
+    if (kbps == self->bitrate_kbps_.load()) return;
+    g_object_set(self->enc_, "bitrate", (guint)kbps, nullptr);
+    self->bitrate_kbps_ = kbps;
+    self->rates_->Write(EncoderRateRow{NowMonoNs(), NowWallNs(), (int64_t)kbps * 1000, (int64_t)kbps * 1000, (int64_t)est, (double)g_cfg.video.fps, 1});
+  }
+
   // Control channel (its own thread). GObject property sets are thread-safe.
   void OnMessage(const json& m) {
     const std::string type = m.value("type", "");
@@ -359,7 +405,8 @@ class Sender {
       // BEFORE the first packet leaves, so no packet is missed by the receiver's ledgers.
       ctl_.Send({{"type", "stream-start"}, {"to", g_cfg.receiver_id}, {"stream", g_cfg.stream_id}, {"ssrc", g_cfg.ssrc}, {"pt", g_cfg.pt},
                  {"clock_rate", kVideoClockRate}, {"rtcp_port_local", rtcp_port_local_}, {"width", g_cfg.video.width},
-                 {"height", g_cfg.video.height}, {"fps", g_cfg.video.fps}, {"bitrate_kbps", bitrate_kbps_.load()}, {"gop", gop_}});
+                 {"height", g_cfg.video.height}, {"fps", g_cfg.video.fps}, {"bitrate_kbps", bitrate_kbps_.load()}, {"gop", gop_},
+                 {"cc", g_cfg.cc}, {"twcc_ext_id", g_cfg.cc == "gcc" ? kTwccExtId : 0}});
       awaiting_ack_ = true;
       ack_deadline_mono_ns_ = NowMonoNs() + kAckTimeoutNs;
       return;  // continues when the `stream-ack` message arrives (same control thread)
@@ -384,6 +431,7 @@ class Sender {
       // need caps renegotiation + IDR = a new epoch, to be added with the RAN-side epoch signalling).
       if (m.value("stream", g_cfg.stream_id) != g_cfg.stream_id) return;
       if (m.contains("bitrate_kbps")) {
+        if (g_cfg.cc == "gcc") { P5G_LOG_WARN << "profile: bitrate is under GCC control (--cc gcc); ignored"; return; }
         const int kbps = m.at("bitrate_kbps").get<int>();
         if (kbps <= 0) { P5G_LOG_WARN << "profile: bad bitrate_kbps " << kbps; return; }
         g_object_set(enc_, "bitrate", (guint)kbps, nullptr);
@@ -401,12 +449,14 @@ class Sender {
   std::unique_ptr<EncoderRateTrace> rates_;
   std::unique_ptr<RtpPacketTrace> rtp_;
   std::unique_ptr<RtcpPacketTrace> rtcp_;
+  std::unique_ptr<CcUpdateTrace> cc_;   // --cc gcc only
   std::FILE* stats_ = nullptr;
   GstElement* pipeline_ = nullptr;
   GstElement* rtpbin_ = nullptr;
   GstElement* src_ = nullptr;
   GstElement* enc_ = nullptr;
   GstElement* pay_ = nullptr;
+  GstElement* bwe_ = nullptr;   // rtpgccbwe (--cc gcc)
   std::atomic<bool> eos_seen_{false};
   GstElement* rtpsink_ = nullptr;
   GstElement* rtcpsink_ = nullptr;
@@ -434,13 +484,14 @@ static void Usage() {
                "video_sender --control-host H --control-port P --session S --stream-id ID --to RECV_ID\n"
                "             --trace-dir DIR [--yuv FILE | (pattern)] --width W --height H --fps F\n"
                "             [--bitrate-kbps 2500] [--gop FRAMES(=2*fps)] [--vbv-ms 600] [--preset veryfast] [--threads 4]\n"
+               "             [--cc profile|gcc] [--gcc-min-kbps 300] [--gcc-max-kbps N(=bitrate)]\n"
                "             [--mtu 1200] [--pt 96] [--ssrc N] [--stats-period-ms 1000] [--duration S]\n");
 }
 
 int main(int argc, char** argv) {
   p5g::CliArgs a(argc, argv, {"help", "control-host", "control-port", "session", "stream-id", "to", "trace-dir", "yuv", "width",
                               "height", "fps", "bitrate-kbps", "gop", "vbv-ms", "preset", "threads", "mtu", "pt", "ssrc",
-                              "stats-period-ms", "duration"});
+                              "stats-period-ms", "duration", "cc", "gcc-min-kbps", "gcc-max-kbps"});
   if (a.Has("help")) { Usage(); return 0; }
   auto& c = p5g::g_cfg;
   c.control_host = a.Get("control-host", c.control_host);
@@ -463,16 +514,23 @@ int main(int argc, char** argv) {
   c.ssrc = static_cast<uint32_t>(std::strtoul(a.Get("ssrc", "0").c_str(), nullptr, 10));
   c.stats_period_ms = a.GetInt("stats-period-ms", c.stats_period_ms);
   c.duration_s = a.GetInt("duration", 0);
+  c.cc = a.Get("cc", c.cc);
+  c.gcc_min_kbps = a.GetInt("gcc-min-kbps", c.gcc_min_kbps);
+  c.gcc_max_kbps = a.GetInt("gcc-max-kbps", 0);
+  if (c.cc != "profile" && c.cc != "gcc") P5G_FATAL("--cc must be profile or gcc");
   if (c.bitrate_kbps <= 0 || c.video.fps <= 0 || c.video.width <= 0 || c.video.height <= 0) P5G_FATAL("bad profile (width/height/fps/bitrate)");
 
   gst_init(nullptr, nullptr);
   p5g::InitFrameMetaCaps();
+  if (c.cc == "gcc") p5g::EnsureRustPlugins("rtpgccbwe");  // so the provenance line below can name its version
   // One provenance line per run: the flags that shape the stream and the library versions.
   P5G_LOG_INFO << "config: transport=gstreamer stream_id=" << c.stream_id << " to=" << c.receiver_id << " session=" << c.session
                << " control=" << c.control_host << ":" << c.control_port << " codec=H264 " << c.video.width << "x" << c.video.height
                << "@" << c.video.fps << " source=" << (c.video.yuv_path.empty() ? "pattern" : c.video.yuv_path)
                << " bitrate_kbps=" << c.bitrate_kbps << " gop=" << (c.gop_frames > 0 ? c.gop_frames : 2 * c.video.fps)
-               << " vbv_ms=" << c.vbv_ms << " preset=" << c.preset << " threads=" << c.threads << " mtu=" << c.mtu << " pt=" << c.pt
+               << " vbv_ms=" << c.vbv_ms << " preset=" << c.preset << " threads=" << c.threads << " cc=" << c.cc
+               << (c.cc == "gcc" ? " gcc_min_kbps=" + std::to_string(c.gcc_min_kbps) + " gcc_max_kbps=" + std::to_string(c.gcc_max_kbps > 0 ? c.gcc_max_kbps : c.bitrate_kbps) + " rtpgccbwe=" + p5g::PluginVersion("rtpgccbwe") : "")
+               << " mtu=" << c.mtu << " pt=" << c.pt
                << " stats_period_ms=" << c.stats_period_ms << " " << p5g::GstProvenance();
 
   p5g::InstallSignalHandlers();

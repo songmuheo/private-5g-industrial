@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 ROOT  := $(shell pwd)
 
-.PHONY: help deps submodules build-gnb build-apps webrtc-build-libwebrtc webrtc-build-apps build-ue-sim core-up core-down ota ota-stop run-local verify venv clean
+.PHONY: help deps submodules build-gnb build-apps build-gst-rs webrtc-build-libwebrtc webrtc-build-apps build-ue-sim core-up core-down ota ota-stop run-local verify venv clean
 
 # Transport trees: gstreamer/ (active) and webrtc/ (frozen libwebrtc stack). They share no code, only the
 # run-directory / trace-file contract (docs/TRACE_SCHEMA.md). TREE selects which one the shared targets use.
@@ -13,6 +13,7 @@ help:
 	@echo "  make submodules       fetch third_party/srsRAN_Project (shallow, pinned)"
 	@echo "  make build-gnb        srsRAN gNB + tracer patches   -> build/srsran_gnb/apps/gnb/gnb"
 	@echo "  make build-apps       [TREE=gstreamer|webrtc] sender / receiver of the transport tree -> <tree>/build/apps/"
+	@echo "  make build-gst-rs     rtpgccbwe (GCC bandwidth estimator, gst-plugins-rs 0.13.7, Rust) -> gstreamer/build/gst-plugins-rs/  [for --cc gcc]"
 	@echo "  make webrtc-build-libwebrtc   frozen webrtc tree: fetch + build stock libwebrtc M120 (hours; or symlink a checkout to webrtc/libwebrtc)"
 	@echo "  make webrtc-build-apps        frozen webrtc tree: build its sender / receiver"
 	@echo "  make core-up          Open5GS (docker) + host route to the UE subnet     [gNB PC]"
@@ -33,7 +34,8 @@ deps:
 	    libx11-dev libxext-dev libxdamage-dev libxfixes-dev libxcomposite-dev libxrandr-dev libxtst-dev \
 	    python3-venv docker-compose-plugin \
 	    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-tools gstreamer1.0-plugins-base \
-	    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
+	    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+	    rustc cargo
 
 submodules:
 	git submodule update --init --depth 1
@@ -43,6 +45,9 @@ build-gnb:
 
 build-apps:
 	$(ROOT)/$(TREE)/scripts/build_apps.sh
+
+build-gst-rs:
+	$(ROOT)/gstreamer/scripts/build_gst_rs.sh
 
 webrtc-build-libwebrtc:
 	$(ROOT)/webrtc/scripts/build_libwebrtc.sh

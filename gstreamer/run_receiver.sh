@@ -8,7 +8,7 @@
 #   run_dir  : default = the run published by ./run_gnb_core.sh (results/CURRENT), else a new
 #              results/<timestamp>-receiver. All receivers write into <run_dir>/app:
 #              <stream>-rx-*.csv, <stream>-rx-stats.jsonl, receiver-recvK.log, control.log.
-#   extra    : passed to every receiver (e.g. --jitter-ms 20 --drop-late 1 --advertise-host A). With -n 1 a
+#   extra    : passed to every receiver (e.g. --jitter-ms 20 --drop-late 1 --advertise-host A --cc gcc). With -n 1 a
 #              --receiver-id may be given to rename the single receiver.
 #
 # One receiver process per stream is a design rule (one RTP port pair and trace set per process); this script

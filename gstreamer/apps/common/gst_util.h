@@ -24,6 +24,8 @@
 #include <cstring>
 #include <string>
 
+#include <unistd.h>
+
 #include <gst/gst.h>
 #include <gst/rtp/rtp.h>
 
@@ -126,6 +128,44 @@ inline void FormatEncoderRateRow(std::FILE* f, const EncoderRateRow& r) {
                r.framerate_fps, r.num_active_spatial_layers);
 }
 using EncoderRateTrace = TraceRing<EncoderRateRow>;
+
+// ---- <stream>-tx-cc.csv : one row per bandwidth estimate (only with --cc gcc) -------------------
+// Same header as the webrtc tree's GoogCC ledger so analysis/ reads both; rtpgccbwe exposes only the
+// estimate itself, every other column is -1.
+struct CcUpdateRow {
+  int64_t log_mono_ns;
+  int64_t log_wall_ns;
+  int64_t target_bps;              // rtpgccbwe estimated-bitrate
+};
+inline constexpr const char* kCcUpdateHeader =
+    "log_mono_ns,log_wall_ns,trigger,target_bps,stable_target_bps,est_bandwidth_bps,rtt_us,"
+    "loss_rate_ratio,bwe_period_ms,cwnd_reduce_ratio,pacer_rate_bps,pad_rate_bps,cwnd_bytes,num_probe_clusters";
+inline void FormatCcUpdateRow(std::FILE* f, const CcUpdateRow& r) {
+  std::fprintf(f, "%lld,%lld,-1,%lld,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1\n", (long long)r.log_mono_ns, (long long)r.log_wall_ns,
+               (long long)r.target_bps);
+}
+using CcUpdateTrace = TraceRing<CcUpdateRow>;
+
+// TWCC header extension (draft-holmer-rmcat-transport-wide-cc-extensions-01), id 1, as in
+// gst-examples/webrtc/sendrecv/gst/webrtc-sendrecv.c. Both the payloader (add-extension) and the receiver's
+// caps (extmap-1) name it.
+inline constexpr const char* kTwccUri = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
+inline constexpr int kTwccExtId = 1;
+
+// The Rust plugins (rtpgccbwe) live in <tree>/build/gst-plugins-rs, next to the apps' build directory.
+// Registering that path here keeps the binaries self-contained (no GST_PLUGIN_PATH needed on the laptops).
+// Returns whether the element is available afterwards.
+inline bool EnsureRustPlugins(const char* element) {
+  if (GstElementFactory* f = gst_element_factory_find(element)) { gst_object_unref(f); return true; }
+  char exe[4096]; const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+  if (n <= 0) return false;
+  exe[n] = 0;
+  std::string dir(exe); dir = dir.substr(0, dir.rfind('/'));          // .../build/apps
+  const std::string rs = dir.substr(0, dir.rfind('/')) + "/gst-plugins-rs";  // .../build/gst-plugins-rs
+  gst_registry_scan_path(gst_registry_get(), rs.c_str());
+  if (GstElementFactory* f = gst_element_factory_find(element)) { gst_object_unref(f); return true; }
+  return false;
+}
 
 // ---- <stream>-{tx,rx}-rtp.csv : one row per RTP packet ------------------------------------------
 struct RtpPacketRow {

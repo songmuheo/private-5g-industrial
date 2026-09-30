@@ -59,6 +59,18 @@ in-order RLC AM path). Accepted frame sizes: width % 4 == 0 and height % 2 == 0 
 GStreamer's default layout); others are refused at start-up. Control port: `P5G_CONTROL_PORT` (default 8765);
 `run_receiver.sh` refuses a foreign listener on it (`ping`/`pong` identity check).
 
-Not in this tree (by design): NACK/RTX, FEC, header extensions, network-adaptive bitrate. If a RAN-aware or
-GCC-like controller is wanted as an experimental condition, it sets the same `bitrate` property through the
-`profile` message; fps and resolution stay caps.
+## Who sets the bitrate: `--cc profile` (default) or `--cc gcc`
+
+| | `--cc profile` | `--cc gcc` |
+|---|---|---|
+| bitrate | the scenario's `kbps`, changed only by a `profile` control message (edge) | **rtpgccbwe** (Google Congestion Control, gst-plugins-rs 0.13.7) estimates from TWCC feedback and its estimate is applied to x264 `bitrate` through the same code path; bounded by `--gcc-min-kbps` (300) and `--gcc-max-kbps` (= `kbps`) |
+| on the wire | RTP, AVP profile, no header extension | RTP + TWCC header extension (id 1), AVPF profile; the receiver returns transport-wide feedback (RTPFB 15, ~80 packets/s: the GCC condition adds that much downlink RTCP) |
+| traces | `tx-encoder-rates` (1 row) | + `tx-cc.csv` (every estimate; webrtc-tree column layout), `tx-encoder-rates` (every change) |
+| fps / resolution | caps-fixed | caps-fixed (unchanged: rtpgccbwe outputs a number, nothing else adapts) |
+| needs | — | `make build-gst-rs` on every sender host (Rust from apt, ~1 min); the receiver must run `--cc gcc` too (run_experiment.sh adds it when any camera uses gcc) |
+
+Scenario keys: `cams.camK.cc: "gcc"`, optional `gcc_min_kbps`, `gcc_max_kbps`. Example: `experiments/2ue-720p30-gcc.json`.
+Verified 2026-09-30 on loopback under a `tc` limit and over the srsUE code test (`P5G_CC=gcc make run-local`).
+Pitfall (rtpsession): the receiver's caps must carry `payload` or the TWCC extmap is ignored (`--pt`, default 96).
+
+Not in this tree (by design): NACK/RTX, FEC, other header extensions, any adaptation of fps or resolution.

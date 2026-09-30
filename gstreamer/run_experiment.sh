@@ -33,7 +33,9 @@ print(f"NAME={q(s['name'])}; DURATION={int(s.get('duration_s', 300))}; START_DEL
 print(f"RELAY_HOST={q(s.get('relay_host', '10.53.1.1'))}; REQUIRE_GNB={'1' if s.get('require_gnb', True) else '0'}")
 h = s.get('hosts', {}); print(f"HOST_MODE={q(h.get('mode', 'ssh'))}; HOST_USER={q(h.get('user', 'songmu'))}; HOST_PATTERN={q(h.get('ip_pattern', '192.168.77.1{K}'))}; HOST_REPO={q(h.get('repo', 'private-5g-industrial'))}")
 sy = s.get('sync', {}); print(f"SYNC_MODE={q(str(sy.get('mode', 'auto')))}; SYNC_MAX_MS={q(str(sy.get('max_ms', 1)))}")
-r = s.get('receiver', {}); print(f"RECV_EXTRA={q(' '.join(r.get('extra_args', [])))}")
+r = s.get('receiver', {}); extra = list(r.get('extra_args', []))
+if any(v.get('cc', 'profile') == 'gcc' for v in s['cams'].values()) and '--cc' not in ' '.join(extra): extra += ['--cc', 'gcc']   # receivers must answer TWCC
+print(f"RECV_EXTRA={q(' '.join(extra))}")
 cams = s['cams']; print(f"CAMS=({' '.join(q(c) for c in cams)})")
 for c, v in cams.items():
     if v.get('host'): print(f"CAM_HOST_{c}={q(v['host'])}")
@@ -42,6 +44,10 @@ for c, v in cams.items():
             f"--bitrate-kbps {int(v.get('kbps', 2500))}"]                       # fixed profile: (WxH, fps, kbps[, gop, vbv_ms])
     if int(v.get('gop', 0)) > 0: args.append(f"--gop {int(v['gop'])}")
     if int(v.get('vbv_ms', 0)) > 0: args.append(f"--vbv-ms {int(v['vbv_ms'])}")
+    if v.get('cc', 'profile') == 'gcc':                                        # GCC condition: rtpgccbwe decides the bitrate
+        args.append("--cc gcc")
+        if int(v.get('gcc_min_kbps', 0)) > 0: args.append(f"--gcc-min-kbps {int(v['gcc_min_kbps'])}")
+        if int(v.get('gcc_max_kbps', 0)) > 0: args.append(f"--gcc-max-kbps {int(v['gcc_max_kbps'])}")
     if v.get('source'): args.append(f"--yuv video/assets/{v['source']}")
     args += v.get('extra_args', [])
     print(f"CAM_ARGS_{c}={q(' '.join(args))}")
@@ -80,7 +86,8 @@ fi
 declare -A STATUS
 for c in "${CAMS[@]}"; do
   var="CAM_ARGS_$c"; args="${!var}"; src="$(sed -n 's/.*--yuv \([^ ]*\).*/\1/p' <<<"$args")"   # repo-relative; on_host cd's into gstreamer/ -> ../
-  out="$(on_host "$c" "git rev-parse --short HEAD 2>/dev/null; [ -z '$src' ] || { [ -f '../$src' ] && echo asset=ok || echo asset=MISSING; }; chronyc tracking 2>/dev/null | awk '/RMS offset/{print \"rms_ms=\" \$4*1000}' || echo chrony=none" 2>&1 | tr '\n' ' ')" \
+  gccchk=""; case " $args " in *" --cc gcc "*) gccchk="[ -f build/gst-plugins-rs/libgstrsrtp.so ] && echo rtpgccbwe=ok || echo rtpgccbwe=MISSING;";; esac   # --cc gcc needs the Rust plugin on the laptop (make build-gst-rs)
+  out="$(on_host "$c" "git rev-parse --short HEAD 2>/dev/null; [ -z '$src' ] || { [ -f '../$src' ] && echo asset=ok || echo asset=MISSING; }; $gccchk chronyc tracking 2>/dev/null | awk '/RMS offset/{print \"rms_ms=\" \$4*1000}' || echo chrony=none" 2>&1 | tr '\n' ' ')" \
     && STATUS[$c]="ok: $out" || STATUS[$c]="UNREACHABLE: $out"
   log "preflight $c @ $( [ "$HOST_MODE" = local ] && echo local || host_of "$c"): ${STATUS[$c]}"
 done

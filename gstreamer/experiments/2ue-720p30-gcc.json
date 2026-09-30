@@ -1,0 +1,41 @@
+{
+  "name": "2ue-720p30-gcc",
+  "duration_s": 300,
+  "start_delay_s": 20,
+  "relay_host": "10.53.1.1",
+  "require_gnb": true,
+  "hosts": {
+    "mode": "ssh",
+    "user": "songmu",
+    "ip_pattern": "192.168.77.1{K}",
+    "repo": "private-5g-industrial"
+  },
+  "sync": {
+    "mode": "auto",
+    "max_ms": 1
+  },
+  "receiver": {
+    "extra_args": []
+  },
+  "cams": {
+    "cam0": {
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "kbps": 2500,
+      "source": "kendo_view0_1280x720_30.yuv",
+      "cc": "gcc",
+      "gcc_min_kbps": 300
+    },
+    "cam1": {
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "kbps": 2500,
+      "source": "kendo_view1_1280x720_30.yuv",
+      "cc": "gcc",
+      "gcc_min_kbps": 300
+    }
+  },
+  "_note": "GCC condition: same fixed 720p30 profile, but rtpgccbwe (TWCC feedback) sets the x264 bitrate within [gcc_min_kbps, kbps]; compare with 2ue-720p30.json (edge-fixed bitrate)"
+}

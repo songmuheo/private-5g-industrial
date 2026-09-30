@@ -738,3 +738,23 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
 * Decision: option B = the existing sender/receiver + `--cc gcc` (TWCC extension, rtpgccbwe before the send session,
   avpf, estimate -> x264 bitrate through the same path as the `profile` message) vs `--cc profile` (default, no
   estimator). fps/resolution stay caps-fixed in both. The laptops need libgstrsrtp.so (copy) + GST_PLUGIN_PATH.
+
+## 2026-09-30 — option B implemented: `--cc gcc` on the gstreamer tree (fixed fps/resolution, GCC-driven bitrate)
+* Sender: TWCC header extension on rtph264pay (`add-extension`, id 1, as gst-examples/webrtc/sendrecv), `rtpgccbwe`
+  between the payloader and `rtpbin.send_rtp_sink_0`, `rtp-profile=avpf`, `notify::estimated-bitrate` -> x264
+  `bitrate` (same code as a `profile` message) + `tx-cc.csv` (webrtc column layout) + `tx-encoder-rates` rows.
+  Receiver: `--cc gcc` = caps with `extmap-1` + AVPF so rtpsession returns TWCC feedback. run_experiment.sh: cams with
+  `cc: gcc` get the flags, receivers get `--cc gcc` automatically; preflight checks the Rust plugin on the laptops.
+  Binaries find the plugin themselves (`gst_registry_scan_path` on `<build>/gst-plugins-rs`), no GST_PLUGIN_PATH.
+* Bug found on the way (FACT, gstrtpsession.c `gst_rtp_session_cache_caps`): rtpsession reads the TWCC extmap only
+  from caps that carry a `payload` field — our receiver caps had none, so no feedback was ever generated
+  (first GCC run: 0 estimates). Fixed by adding `payload` (`--pt`, 96) to the udpsrc caps.
+* Loopback (results/20260930-181328-demo-local-gcc, tc 2 Mbit/s on lo from 6 s to 16 s of the streams): cam0 estimate
+  2000 -> 766 kbps in 2 s, +30-40 kbps/s recovery; 359 TWCC feedback packets received; 38 estimates / 39 encoder
+  changes in 12 s; verify PASS. Even without the limit the estimate fell in the first 2 s: two bursty senders on one
+  loopback (10 packets per frame, no pacing) look like inter-arrival delay growth to the delay estimator — expected
+  GCC behaviour with unpaced frames, to be kept in mind when reading OTA results.
+* srsUE code test in the GCC condition (results/20260930-181500-gst-gcc, `P5G_CC=gcc make run-local`): 840/840/839
+  frames, estimate rose to the 2500 kbps ceiling in 1.2 s and stayed (ZMQ link has headroom), capture->app 34 ms
+  median. Cost of the condition visible in the RAN trace: 1609 RTCP packets (TWCC feedback, ~80/s) vs 11 in profile
+  mode -> pdcp_dl 1615 vs 18 rows.

@@ -28,7 +28,8 @@ GStreamer 1.20 + x264, 순수 RTP, 혼잡 제어 없음. **`webrtc/`(동결)**: 
 | `-tx-encoder-rates.csv` | ○ | ○ | gstreamer: 시작 시 1행 + `profile` 메시지마다 1행. `bandwidth_allocation_bps=-1` |
 | `-tx-rtp.csv`, `-rx-rtp.csv` | ○ | ○ | 동일. gstreamer `probe_cluster_id=-1`, `has_ext=0` |
 | `-tx-rtcp.csv`, `-rx-rtcp.csv` | ○ | ○ | 동일(SR/RR/SDES만; NACK/PLI/TWCC 없음) |
-| `-tx-cc.csv`, `-tx-events.csv`, `-rx-events.csv` | × | ○ | GoogCC·RtcEventLog: webrtc 전용 |
+| `-tx-cc.csv` | △ (`--cc gcc`일 때만) | ○ | 컬럼 동일. gstreamer: rtpgccbwe 추정치마다 1행, `target_bps`만 값이 있고 나머지 -1 |
+| `-tx-events.csv`, `-rx-events.csv` | × | ○ | RtcEventLog: webrtc 전용 |
 | `-rx-decoded.csv` | ○ | ○ | gstreamer: `render_time_ms=-1`, `decoder_decode_time_ms=-1`, `qp=-1` |
 | `-rx-frames.csv` | ○ | ○ | gstreamer: `abs_capture_ntp_ms=-1`, `sender_rtp_ts_est == rtp_ts`, `wire_offset_est=0`(오프셋이 없으므로), `first/last_pkt_mono_ns`는 udpsrc 출력 시각 |
 | `-tx-stats.jsonl`, `-rx-stats.jsonl` | ○ | ○ | **형식 다름**: gstreamer는 `{"mono_ns","wall_ns","frames…","bitrate_kbps","rtpsession":"<GstStructure 문자열>"}`(rtpbin 내부 세션 stats), webrtc는 W3C getStats 배열 |
