@@ -22,3 +22,8 @@ target_link_libraries(video_sender PRIVATE PkgConfig::GST Threads::Threads)
 add_executable(video_receiver receiver/video_receiver.cc)
 target_include_directories(video_receiver PRIVATE ${P5G_INCLUDES})
 target_link_libraries(video_receiver PRIVATE PkgConfig::GST Threads::Threads)
+
+# Unit test of the RTCP validator (runs at build time from scripts/build_apps.sh).
+add_executable(rtcp_valid_test tests/rtcp_valid_test.cc)
+target_include_directories(rtcp_valid_test PRIVATE ${P5G_INCLUDES})
+target_link_libraries(rtcp_valid_test PRIVATE PkgConfig::GST Threads::Threads)

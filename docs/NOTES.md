@@ -672,3 +672,8 @@ take the tree as a parameter.
   sized SR/RR, padding only on the last packet with a sane count byte, known packet types, exact tiling) — 11 crafted
   packets checked (scratchpad rtcp_valid_test.cc, not versioned): the 8-byte "RR with rc=1" and padded-not-last cases are
   now rejected. Re-verified: demo-local 20260930-163749-demo-local, run-local 20260930-163815-gst-review4.
+* Codex pass 5 (same day): RTCP validation completed — every packet of the compound now needs its type- and
+  count-specific minimum body (SR/RR exact, SDES >= 4+8·SC, BYE >= 4+4·SC, APP/RTPFB/PSFB >= 12; unknown types
+  invalid; compound must start with SR/RR). The 11 crafted cases became 18 (bare 4-byte SR header after a valid SR,
+  under-sized SDES/RTPFB, SDES-first, SR with a profile extension: all rejected) and live in
+  gstreamer/apps/tests/rtcp_valid_test.cc, run by build_apps.sh. Re-verified: demo-local 20260930-164255-demo-local, run-local 20260930-164321-gst-review5.

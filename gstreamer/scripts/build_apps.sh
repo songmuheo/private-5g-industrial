@@ -11,6 +11,8 @@ JOBS="${JOBS:-$(nproc)}"
 cmake -S "$ROOT/apps" -B "$OUT/cmake" -G Ninja -DCMAKE_BUILD_TYPE=Release >/dev/null
 ninja -C "$OUT/cmake" -j"$JOBS"
 cp "$OUT/cmake/video_sender" "$OUT/cmake/video_receiver" "$OUT/"
+"$OUT/cmake/rtcp_valid_test" > "$OUT/rtcp_valid_test.log" || { cat "$OUT/rtcp_valid_test.log"; echo "[build_apps] RTCP validator test FAILED" >&2; exit 1; }
+echo "[build_apps] rtcp_valid_test: $(tail -1 "$OUT/rtcp_valid_test.log")"
 {
   echo "transport=gstreamer"
   echo "gstreamer_core=$(pkg-config --modversion gstreamer-1.0)"

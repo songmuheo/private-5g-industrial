@@ -226,12 +226,27 @@ inline void FillRtcpRow(GstBuffer* b, uint8_t dir, RtcpPacketRow* r) {
   gst_buffer_unmap(b, &map);
 }
 
-// Strict validation (unlike FillRtcpRow, which is a tolerant trace parser). RFC 3550 §6.1 / §6.4.1 /
-// §6.4.2: every packet has version 2; the lengths tile the buffer exactly; padding (P bit) is allowed only
-// on the last packet of the compound and its count byte must fit; the first packet must be an SR
-// (pt 200: 8-byte header + 20-byte sender info + RC x 24-byte report blocks) or an RR (pt 201: 8 + RC x 24)
-// whose length matches its report count exactly and whose SSRC is `ssrc`. Used before letting a packet
-// change where RTCP reports are sent, so a spoofed or malformed datagram cannot redirect them.
+// Strict validation (unlike FillRtcpRow, which is a tolerant trace parser). RFC 3550 §6.1 / §6.4 /
+// §6.5 / §6.6 / §6.7 and RFC 4585 §6.1: every packet has version 2; the lengths tile the buffer exactly;
+// padding (P bit) only on the last packet with a count byte that fits; every packet's body is at least
+// what its type and count field require:
+//   SR  200: exactly 28 + 24 x RC (header, sender info, report blocks; profile extensions rejected)
+//   RR  201: exactly  8 + 24 x RC
+//   SDES 202: >= 4 + 8 x SC (each chunk: SSRC + at least one item + END, padded to 32 bits)
+//   BYE 203: >= 4 + 4 x SC (optional reason follows)
+//   APP 204: >= 12 (SSRC + 4-byte name);   RTPFB 205 / PSFB 206: >= 12 (sender + media SSRC)
+// and the first packet must be an SR or RR whose SSRC is `ssrc`. Used before letting a packet change
+// where RTCP reports are sent, so a spoofed or malformed datagram cannot redirect them.
+inline size_t RtcpMinBody(uint8_t pt, unsigned count) {
+  switch (pt) {
+    case 200: return 28 + 24 * count;
+    case 201: return 8 + 24 * count;
+    case 202: return 4 + 8 * count;
+    case 203: return 4 + 4 * count;
+    case 204: case 205: case 206: return 12;
+    default: return 0;  // unknown type: invalid
+  }
+}
 inline bool IsValidRtcpCompoundFrom(GstBuffer* b, uint32_t ssrc) {
   GstMapInfo map;
   if (!gst_buffer_map(b, &map, GST_MAP_READ)) return false;
@@ -251,14 +266,16 @@ inline bool IsValidRtcpCompoundFrom(GstBuffer* b, uint32_t ssrc) {
       const uint8_t pad = p[len - 1];
       if (pad == 0 || pad > len - 4) { ok = false; break; }
     }
+    const size_t body = padded ? len - p[len - 1] : len;                // length without padding octets
+    const size_t min_body = RtcpMinBody(pt, rc);
+    if (min_body == 0 || body < min_body) { ok = false; break; }        // type/count-specific minimum, every packet
+    if ((pt == 200 || pt == 201) && body != min_body) { ok = false; break; }  // SR/RR sized exactly by RC
     if (idx == 0) {
-      const size_t body = padded ? len - p[len - 1] : len;              // length without padding octets
-      const size_t want = pt == 200 ? 28 + 24 * rc : pt == 201 ? 8 + 24 * rc : 0;
-      if (want == 0 || body != want) { ok = false; break; }             // SR/RR sized exactly by its report count
+      if (pt != 200 && pt != 201) { ok = false; break; }                // compound must start with SR/RR (§6.1)
       const uint32_t s = (uint32_t)p[4] << 24 | (uint32_t)p[5] << 16 | (uint32_t)p[6] << 8 | p[7];
       if (s != ssrc) { ok = false; break; }
       ok = true;
-    } else if (pt < 200 || pt > 206) { ok = false; break; }            // unknown packet type in the compound
+    }
     off += len;
     ++idx;
   }
