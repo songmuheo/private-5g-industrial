@@ -118,13 +118,17 @@ PYEOF
 fi
 
 # ---- launch ----
+# Every sender of this launch writes to results/<RUN_ID>-sender-<cam> on its host (run_sender.sh P5G_RUN_ID), so the
+# collection below takes exactly that directory — never "the newest one", which after a failed launch is a
+# previous run's.
+RUN_ID="$(basename "$(readlink -f "$RD")")-$(date +%H%M%S)"
 T="$(awk -v n="$(date +%s.%N)" -v d="$START_DELAY" 'BEGIN{printf "%.3f", n+d}')"
 log "start time T=$T ($(date -d "@$T" +%H:%M:%S.%3N))"
 declare -A LPID
 for c in "${CAMS[@]}"; do
   case "${STATUS[$c]}" in UNREACHABLE*) log "skip $c (unreachable)"; continue;; esac
   var="CAM_ARGS_$c"; K="$(camK "$c")"
-  cmd="P5G_SYNC=$SYNC_MODE P5G_SYNC_MAX_MS=$SYNC_MAX_MS P5G_CONTROL_PORT=${P5G_CONTROL_PORT:-8765} ./run_sender.sh $RELAY_HOST --to recv$K --stream-id $c ${!var} --duration $DURATION --start-at $T"
+  cmd="P5G_RUN_ID=$RUN_ID P5G_SYNC=$SYNC_MODE P5G_SYNC_MAX_MS=$SYNC_MAX_MS P5G_CONTROL_PORT=${P5G_CONTROL_PORT:-8765} ./run_sender.sh $RELAY_HOST --to recv$K --stream-id $c ${!var} --duration $DURATION --start-at $T"
   log "launch $c: $cmd"
   on_host "$c" "$cmd" > "$RD/senders/$c.launch.log" 2>&1 &
   LPID[$c]=$!
@@ -140,8 +144,9 @@ json.dump(rec, open(f"{rd}/experiment.json", "w"), indent=2)
 PYEOF
 
 # ---- wait for the senders ----
+declare -A FAILED
 for c in "${!LPID[@]}"; do
-  if wait "${LPID[$c]}"; then log "$c finished"; else log "$c FAILED (see senders/$c.launch.log)"; fi
+  if wait "${LPID[$c]}"; then log "$c finished"; else log "$c FAILED (see senders/$c.launch.log)"; FAILED[$c]=1; fi
 done
 sleep 2
 
@@ -149,23 +154,27 @@ sleep 2
 for c in "${CAMS[@]}"; do
   case "${STATUS[$c]}" in UNREACHABLE*) continue;; esac
   mkdir -p "$RD/senders/$c"
+  src="results/$RUN_ID-sender-$c"   # this launch's directory (results/ is at the repo root; on_host cd's into gstreamer/)
   if [ "$HOST_MODE" = "local" ]; then
-    src="$(ls -td results/*-sender-$c 2>/dev/null | head -1)"; [ -n "$src" ] && cp -r "$src/app" "$RD/senders/$c/" && log "collected $c from $src"
+    if [ -d "$src/app" ]; then cp -r "$src/app" "$RD/senders/$c/" && log "collected $c from $src"; else log "$c: no sender traces ($src missing)"; MISSING="${MISSING:-} $c"; fi
   else
-    remote="$(on_host "$c" "cd .. && ls -td results/*-sender-$c 2>/dev/null | head -1" 2>/dev/null | tr -d '\r')"   # results/ is at the repo root, on_host cd's into gstreamer/
-    if [ -n "$remote" ]; then rsync -aq "$HOST_USER@$(host_of "$c"):~/$(repo_of "$c")/$remote/app/" "$RD/senders/$c/app/" && log "collected $c from $(host_of "$c"):$remote" || log "collect $c FAILED"; fi
+    if rsync -aq "$HOST_USER@$(host_of "$c"):~/$(repo_of "$c")/$src/app/" "$RD/senders/$c/app/" 2>/dev/null; then log "collected $c from $(host_of "$c"):$src"
+    else log "$c: no sender traces on $(host_of "$c") ($src missing)"; MISSING="${MISSING:-} $c"; fi
   fi
+  [ -n "${FAILED[$c]:-}" ] && MISSING="${MISSING:-} $c(failed)"
 done
 
 # ---- stop receivers, verify, report ----
 cleanup; trap - EXIT
+AN="$(readlink -f "$RD")-analysis"; mkdir -p "$AN"   # derived outputs live beside the run directory (rule 3), never inside it
+if [ -n "${MISSING:-}" ]; then log "RESULT INVALID: sender(s) failed or left no traces:${MISSING}"; echo "INVALID: senders failed / traces missing:${MISSING}" >> "$AN/INVALID"; fi
 "$PY" analysis/verify_run.py "$RD" 2>&1 | tail -3 | tee -a "$LOG"
 log "note: gNB trace files get their footers only when ./run_gnb_core.sh is stopped; re-run: make verify RD=$RD afterwards"
-"$PY" analysis/exp_run_report.py "$RD" 5 > "$RD/report.txt" 2>&1 && log "report: $RD/report.txt"
-sed -n '/## A\./,/## B\./p' "$RD/report.txt" | grep -E "^cam|A2|selected|^  cam" | head -20
-if grep -q "WARNING: check path" "$RD/report.txt" && [ "$HOST_MODE" = "ssh" ]; then
+"$PY" analysis/exp_run_report.py "$RD" 5 > "$AN/report.txt" 2>&1 && log "report: $AN/report.txt"
+sed -n '/## A\./,/## B\./p' "$AN/report.txt" | grep -E "^cam|A2|selected|^  cam" | head -20
+if grep -q "WARNING: check path" "$AN/report.txt" && [ "$HOST_MODE" = "ssh" ]; then
   log "RESULT INVALID: at least one stream did not travel over the 5G link (report.txt section A2). Check the sync-LAN firewall and laptop Wi-Fi."
-  echo "INVALID: media not on the 5G path (see report.txt A2)" > "$RD/INVALID"
+  echo "INVALID: media not on the 5G path (see report.txt A2)" > "$AN/INVALID"
 else
   log "media path check: all streams over the 5G link"
 fi

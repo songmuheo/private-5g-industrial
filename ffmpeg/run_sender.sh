@@ -6,8 +6,10 @@
 #   receiver-host : where ./run_receiver.sh runs (control channel on TCP $P5G_CONTROL_PORT, default 8765; RTP goes to the same host unless
 #                   the receiver advertises another). On the testbed that is the gNB PC's
 #                   core-bridge address 10.53.1.1, reachable from the UE through the UPF.
-#   --start-at T  : wait until wall-clock time T before starting (HH:MM:SS today, or a UNIX epoch with fraction).
-#                   The same T on every laptop = synchronised start; needs the clock sync below.
+#   --start-at T  : wall-clock epoch of the capture grid (HH:MM:SS today, or a UNIX epoch with fraction): the
+#                   sender connects, negotiates and then captures at T + k/fps (video_sender --start-at-epoch),
+#                   so the same T on every laptop = frames and IDRs in phase across cameras. Needs the clock
+#                   sync below. (The wait happens inside the app, after preparation, not in this shell.)
 #   other args    : any video_sender flag; later flags override the defaults, e.g.
 #                   --fps 30 --bitrate-kbps 1000 --duration 60 --source video/assets/x_2500k.h264@2500,...
 #
@@ -15,7 +17,8 @@
 # pre-encoded rungs of the camera's content (ffmpeg/scripts/prepare_video.sh): P5G_SOURCE (a name prefix such as
 # mot17-02_1280x720_30 or kendo_view<K>_1280x720_30, default kendo_view<K>... if present else mot17-02...), with
 # every rung file <prefix>_<kbps>k.h264 found in video/assets (P5G_RUNGS="500 1000 ..." restricts). No encoder
-# runs on the laptop. Traces -> results/<ts>-sender-<stream>/app.
+# runs on the laptop. Traces -> results/<ts>-sender-<stream>/app (P5G_RUN_ID=<id> -> results/<id>-sender-<stream>,
+# which is how run_experiment.sh knows exactly which directory belongs to its launch).
 #
 # Clock sync (P5G_SYNC=auto): if this laptop is not yet on the sync LAN (no NetworkManager connection
 # "p5g-sync"), scripts/setup/sync_lan_client.sh <K> is run once (wired port auto-detected, 192.168.77.1K,
@@ -64,7 +67,8 @@ if [ "$P5G_SYNC" != "off" ]; then
 fi
 
 # run directory carries the stream id, so several senders never share a directory or a log
-RD="results/$(date +%Y%m%d-%H%M%S)-sender-$STREAM"
+RD="results/${P5G_RUN_ID:-$(date +%Y%m%d-%H%M%S)}-sender-$STREAM"
+[ -e "$RD" ] && { echo "[sender] run dir $RD already exists (P5G_RUN_ID must be unique per launch)" >&2; exit 1; }
 mkdir -p "$RD/app"
 echo "[sender] route to $HOST: $(ip route get "$HOST" 2>/dev/null | head -1 || echo '(unknown)')"
 echo "[sender] run dir: $RD   binary: $BIN"
@@ -86,16 +90,18 @@ if [ "$EXPLICIT_YUV" = 0 ]; then
   YUV_ARGS=(--source "$LIST"); echo "[sender] source rungs: $LIST" | tee -a "$RD/app/clock-$STREAM.txt"
 fi
 
-# synchronised start
+# synchronised capture grid: the epoch goes into the app (it prepares and negotiates first, then waits for T)
+EPOCH_ARGS=()
 if [ -n "$START_AT" ]; then
   if [[ "$START_AT" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then TARGET="$START_AT"; else TARGET="$(date -d "today $START_AT" +%s.%N)" || { echo "bad --start-at $START_AT" >&2; exit 1; }; fi
   WAIT="$(awk -v t="$TARGET" -v n="$(date +%s.%N)" 'BEGIN{printf "%.3f", t-n}')"
-  if [ "$(awk -v w="$WAIT" 'BEGIN{print (w<0)?1:0}')" = 1 ]; then echo "[sender] --start-at $START_AT is in the past (by ${WAIT#-} s); starting now" >&2
-  else echo "[sender] waiting ${WAIT} s until $(date -d "@$TARGET" +%H:%M:%S.%N) ..."; sleep "$WAIT"; fi
-  echo "[sender] started at $(date +%H:%M:%S.%N) (target $START_AT)" | tee -a "$RD/app/clock-$STREAM.txt"
+  if [ "$(awk -v w="$WAIT" 'BEGIN{print (w<0)?1:0}')" = 1 ]; then echo "[sender] --start-at $START_AT is in the past (by ${WAIT#-} s); the grid keeps its phase, capture starts at the next slot" >&2
+  else echo "[sender] capture epoch in ${WAIT} s at $(date -d "@$TARGET" +%H:%M:%S.%N) (the app waits after negotiating)"; fi
+  echo "capture_epoch=$TARGET launched_at=$(date +%s.%N)" | tee -a "$RD/app/clock-$STREAM.txt"
+  EPOCH_ARGS=(--start-at-epoch "$TARGET")
 fi
 
 "$BIN" --control-host "$HOST" --control-port "${P5G_CONTROL_PORT:-8765}" --trace-dir "$RD/app" \
-       --fps 30 "${YUV_ARGS[@]}" \
+       --fps 30 "${YUV_ARGS[@]}" "${EPOCH_ARGS[@]}" \
        --bitrate-kbps 2500 --duration 300 "$@" 2>&1 | (trap '' INT; exec tee "$RD/app/sender-$STREAM.log")
 echo "[sender] done. traces: $RD/app"

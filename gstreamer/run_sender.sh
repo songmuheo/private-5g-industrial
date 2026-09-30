@@ -64,7 +64,8 @@ if [ "$P5G_SYNC" != "off" ]; then
 fi
 
 # run directory carries the stream id, so several senders never share a directory or a log
-RD="results/$(date +%Y%m%d-%H%M%S)-sender-$STREAM"
+RD="results/${P5G_RUN_ID:-$(date +%Y%m%d-%H%M%S)}-sender-$STREAM"   # P5G_RUN_ID: run_experiment.sh names the directory it will collect
+[ -e "$RD" ] && { echo "[sender] run dir $RD already exists (P5G_RUN_ID must be unique per launch)" >&2; exit 1; }
 mkdir -p "$RD/app"
 echo "[sender] route to $HOST: $(ip route get "$HOST" 2>/dev/null | head -1 || echo '(unknown)')"
 echo "[sender] run dir: $RD   binary: $BIN"

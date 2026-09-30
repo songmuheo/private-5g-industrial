@@ -7,11 +7,11 @@
 ```
 results/<run>/
   run.json          실행 파라미터·버전·측정 창(wall ns)          (run_local_e2e.sh 또는 수동 기록)
-  summary.json      analysis/verify_run.py 의 완전성 검사 결과   (행 수·손실 수 요약, 파생값 없음)
   app/              video_sender(<stream>-tx-*), video_receiver(<stream>-rx-*), control.log (gstreamer) / signaling.log (webrtc)
   gnb/              gNB tracer gnb_*.csv, gnb.log, gnb_stdout.log, gnb_metrics.jsonl [, *.pcap]
   core/             open5gs.log
   ue/               (코드 테스트만) srsUE ue.log, ue_metrics.csv, ue_mac_nr.pcap
+results/<run>-analysis/   파생물은 실행 디렉터리 밖(옆)에: summary.json(verify_run.py), report.txt(run_experiment.sh), graphs/(plot_run.py), INVALID
 ```
 
 ## 0-a. 두 전송 트리와 파일 계약 (2026-09-30)
@@ -22,8 +22,14 @@ IDR 경계에서 rung 전환. **`webrtc/`(동결)**: libwebrtc M120 + GoogCC. �
 **파일 이름·컬럼이 유일한 계약**이다. `analysis/`는 전부 읽는다. ffmpeg 트리의 컬럼 값 차이: `tx-encoded`의
 `encode_done_*`는 AU를 muxer에 넘긴 시각(인코더 없음), `bytes`는 파일의 AU 크기; `rx-rtp.log_*_ns`는 **커널 도착
 시각**(`SO_TIMESTAMPNS`, wall→mono는 읽는 순간의 오프셋으로 환산); `rx-frames.first/last_pkt_mono_ns`도 커널 도착;
-`tx-cc`/`tx-events`/`rx-events` 없음; `rx-stats.jsonl`에 `aus_incomplete`, `lost_packets`, `lost_fragments`,
-`decode_failures`; `tx-stats.jsonl`에 `rung_kbps`, `missed_slots`. `tx-encoder-rates`는 시작 + rung 전환마다 1행.
+`tx-cc`/`tx-events`/`rx-events` 없음; `rx-stats.jsonl`에 `aus_incomplete`(marker 없이 끝났거나 손실/손상), `aus_empty`(모든
+바이트가 버려진 AU: 디코더에 안 넘김), `aus_damaged`(STAP-A 길이 오류·버퍼 초과·비허용 NAL 종류), `lost_packets`(seq 간격,
+RFC 3550 A.1: 앞으로 ≤3000 = 손실, 뒤로 ≤100 = 지연/중복 → `late_or_dup_packets`, 그 외 = `seq_resets`), `lost_fragments`
+(버려진 부분 NAL: FU-A 끝 유실·시작 유실), `decode_failures`, `av_log_errors`(수신 스레드에서 억제한 libavcodec 메시지 수),
+`decoder_held_buffers`(0이어야 함); `tx-stats.jsonl`에 `rung_kbps`, `missed_slots`, `send_failures`/`rtcp_send_failures`
+(커널이 거부한 datagram: 로컬 실패이며 tx-rtp 행으로 남지 않음). `tx-encoder-rates`는 시작 + rung 전환마다 1행. 캡처 격자는
+wall-clock epoch T(`--start-at-epoch`, run_experiment.sh의 T)에 고정: 모든 호스트에서 slot k = T + k/fps, pts 0 = T, RTCP SR의
+epoch도 T(rtpenc `start_time_realtime`). 코드 테스트의 `run.json.source`는 `app/source.json`(실제 보낸 rung 목록).
 어느 트리가 만든 run인지는 `run.json`의 `transport`(코드 테스트) 또는 `app/*.log`의 `config: transport=` 줄로 안다.
 
 | 파일 | gstreamer | webrtc | 차이 |

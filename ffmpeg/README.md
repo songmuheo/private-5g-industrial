@@ -23,8 +23,8 @@ RAN scripts, `scripts/setup/`, `video/assets/`, `analysis/`, `results/`.
 | `apps/sender/video_sender.cc` | mmap'ed rungs → per grid slot one AU → libavformat `rtp` muxer → our AVIO callback → our UDP socket (each packet logged as it is sent); RTCP SR from the muxer forwarded; rung switch at IDR on `profile` |
 | `apps/receiver/video_receiver.cc` | our UDP socket with `SO_TIMESTAMPNS` (kernel arrival per packet) → depacketizer → libavcodec H.264 (1 thread, low delay) → traces; no RTCP sent back (as SMEC) |
 | `apps/control/control_server.py` | control channel (copy of gstreamer's protocol: ports, `stream-start`/`stream-ack`, `profile`) |
-| `apps/tests/depack_test.cc` | round trip: file AUs → rtp muxer → depacketizer → byte-identical AUs; a dropped fragment marks the AU incomplete. Run on every build |
-| `scripts/prepare_video.sh` | **run once on the gNB PC**: MOT17-02 (MOTChallenge, 600 frames, the SMEC/ARMA sequence) and the Kendo views → rungs `video/assets/<src>_<WxH>_<fps>_<kbps>k.h264` (x264: AUD per AU, headers on IDR, GOP 60, scenecut off, **HRD-CBR** so bytes/frame track the rung) |
+| `apps/tests/depack_test.cc` | asserted cases against the rtp muxer: byte-identical round trip + ts progression, mid/tail/head packet loss, duplicate, reorder, two AUs ended by one packet, sequence wraparound. Run on every build |
+| `scripts/prepare_video.sh` | **run once on the gNB PC**: MOT17-02 (MOTChallenge, 600 frames, the SMEC/ARMA sequence) and the Kendo views → rungs `video/assets/<src>_<WxH>_<fps>_<kbps>k.h264` (x264: AUD per AU, headers on IDR, GOP 60, scenecut off, **HRD-CBR** so bytes/frame track the rung). Each rung is encoded to a temp file, checked (frame count, IDR every GOP) and renamed; `h264_ladders.txt` is the manifest that lets a rung be reused only with identical settings |
 | `scripts/prepare_client.sh <K>` | **run once on each laptop**: packages, build, rsync of the rungs from the gNB PC over the sync LAN, sync-LAN/chrony, checks |
 | `run_sender.sh`, `run_receiver.sh`, `run_experiment.sh`, `experiments/*.json`, `scripts/local_apps.sh` | same shape as the other trees; cams carry `fps`, `source` (name prefix), `rungs` (kbps list), `kbps` (start rung) |
 
@@ -51,6 +51,14 @@ printf '{"type":"profile","session":"s1","stream":"cam1","bitrate_kbps":1000}\n'
 | frame identity | wire `rtp_ts` = the muxer's random base + 90 kHz pts; the sender learns the base from its first packet and logs wire values → `tx-frames`/`gnb_pdcp_ul`/`rx-frames` join directly | run-local: 840/840 frames joined at the gNB and the app |
 | delay decomposition | capture → AU handed to muxer (`tx-encoded`, ≈0) → last packet sent (`tx-rtp`) → kernel arrival (`rx-rtp`, SO_TIMESTAMPNS) → decode (`rx-decoded`) → app (`rx-frames`) | loopback capture→app 2.7 ms median |
 
-Loss: the receiver counts per AU the missing sequence numbers (`lost_packets`), the dropped FU-A fragments and
-whether the AU was complete (`rx-stats.jsonl`); incomplete AUs are still decoded (frames may be corrupt, exactly as
-in SMEC's receiver). There is no RTCP RR, NACK or FEC — a lost packet stays lost, and the traces say which one.
+Loss: the receiver counts per AU the missing sequence numbers (`lost_packets`; RFC 3550 A.1 rules separate loss from
+late/duplicate packets and sequence resets), the discarded partial NALs (`lost_fragments`: an FU-A whose end or start
+was lost is dropped, never handed to the decoder as a half NAL) and damage (`aus_damaged`); incomplete AUs are still
+decoded from their whole NALs (frames may be corrupt, exactly as in SMEC's receiver), AUs with nothing left are
+counted (`aus_empty`) and skipped. There is no RTCP RR, NACK or FEC — a lost packet stays lost, and the traces say
+which one. A datagram the sender's kernel refused is a local failure (`send_failures`, ERROR log), not path loss.
+
+Timing contract: `run_experiment.sh` picks one wall-clock epoch T for the run; every sender connects, negotiates and
+then captures at T + k/fps (`--start-at-epoch`), so frames and IDRs of all cameras are in phase (chrony, ~50 µs) and
+pts 0 = T on every host; the RTCP SR epoch is the same T. Derived files (verify summary, report, graphs, INVALID)
+go to `results/<run>-analysis/`, never into the run directory.

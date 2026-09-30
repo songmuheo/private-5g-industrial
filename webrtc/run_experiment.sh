@@ -151,13 +151,14 @@ done
 
 # ---- stop receivers, verify, report ----
 cleanup; trap - EXIT
+AN="$(readlink -f "$RD")-analysis"; mkdir -p "$AN"   # derived outputs live beside the run directory (rule 3), never inside it
 "$PY" analysis/verify_run.py "$RD" 2>&1 | tail -3 | tee -a "$LOG"
 log "note: gNB trace files get their footers only when ./run_gnb_core.sh is stopped; re-run: make verify RD=$RD afterwards"
-"$PY" analysis/exp_run_report.py "$RD" 5 > "$RD/report.txt" 2>&1 && log "report: $RD/report.txt"
-sed -n '/## A\./,/## B\./p' "$RD/report.txt" | grep -E "^cam|A2|selected|^  cam" | head -20
-if grep -q "WARNING: check path" "$RD/report.txt" && [ "$HOST_MODE" = "ssh" ]; then
+"$PY" analysis/exp_run_report.py "$RD" 5 > "$AN/report.txt" 2>&1 && log "report: $AN/report.txt"
+sed -n '/## A\./,/## B\./p' "$AN/report.txt" | grep -E "^cam|A2|selected|^  cam" | head -20
+if grep -q "WARNING: check path" "$AN/report.txt" && [ "$HOST_MODE" = "ssh" ]; then
   log "RESULT INVALID: at least one stream did not travel over the 5G link (report.txt section A2). Check the sync-LAN firewall and laptop Wi-Fi."
-  echo "INVALID: media not on the 5G path (see report.txt A2)" > "$RD/INVALID"
+  echo "INVALID: media not on the 5G path (see report.txt A2)" > "$AN/INVALID"
 else
   log "media path check: all streams over the 5G link"
 fi

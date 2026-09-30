@@ -73,6 +73,7 @@ struct SenderConfig {
   uint32_t ssrc = 0;            // 0 = random
   int stats_period_ms = 1000;
   int duration_s = 0;
+  int64_t start_wall_ns = 0;    // --start-at-epoch: wall-clock epoch of the capture grid (0 = now); slots are T + k/fps on every host
 };
 static SenderConfig g_cfg;
 std::string TracePrefix() { return g_cfg.trace_dir + "/" + g_cfg.stream_id + "-tx"; }
@@ -113,10 +114,13 @@ class Sender {
     if (next_stats_ == 0) next_stats_ = now;
     if (now < next_stats_) return;
     next_stats_ += (int64_t)g_cfg.stats_period_ms * 1000000; if (next_stats_ < now) next_stats_ = now;
-    std::fprintf(stats_, "{\"mono_ns\":%lld,\"wall_ns\":%lld,\"frames_sent\":%lld,\"missed_slots\":%lld,\"packets_sent\":%lld,\"bytes_sent\":%lld,\"rung_kbps\":%d}\n",
+    std::fprintf(stats_, "{\"mono_ns\":%lld,\"wall_ns\":%lld,\"frames_sent\":%lld,\"missed_slots\":%lld,\"packets_sent\":%lld,\"bytes_sent\":%lld,\"send_failures\":%lld,\"rtcp_send_failures\":%lld,\"rung_kbps\":%d}\n",
                  (long long)now, (long long)NowWallNs(), (long long)frames_sent_.load(), (long long)missed_.load(),
-                 (long long)pkts_sent_.load(), (long long)bytes_sent_.load(), g_cfg.rungs[cur_rung_.load()].kbps);
+                 (long long)pkts_sent_.load(), (long long)bytes_sent_.load(), (long long)send_fail_.load(), (long long)rtcp_send_fail_.load(), g_cfg.rungs[cur_rung_.load()].kbps);
     std::fflush(stats_);
+    // send failures are counted on the grid thread (no I/O there); reported here as they happen
+    const int64_t sf = send_fail_.load();
+    if (sf != send_fail_reported_) { P5G_LOG_ERROR << "sendto failed for " << (sf - send_fail_reported_) << " RTP packet(s) (total " << sf << ", last errno " << last_send_errno_.load() << " " << std::strerror(last_send_errno_.load()) << "): local failure, not path loss"; send_fail_reported_ = sf; }
   }
 
   // Teardown: control -> grid stops (its last send is synchronous, nothing is queued anywhere) -> join ->
@@ -128,6 +132,8 @@ class Sender {
     rtcp_rx_running_ = false;
     if (rtcp_rx_thread_.joinable()) rtcp_rx_thread_.join();
     if (missed_.load()) P5G_LOG_WARN << missed_.load() << " capture slots missed behind a blocked send (to_encoder=0 rows)";
+    if (send_fail_.load()) P5G_LOG_ERROR << send_fail_.load() << " RTP sendto failures (tx-stats send_failures): those packets never left this host";
+    P5G_LOG_INFO << "sent " << frames_sent_.load() << " frames, " << pkts_sent_.load() << " packets, " << bytes_sent_.load() << " bytes";
     if (oc_) { if (header_written_) av_write_trailer(oc_); avio_context_free(&oc_->pb); avformat_free_context(oc_); oc_ = nullptr; }
     if (frames_) frames_->Close();
     if (encoded_) encoded_->Close();
@@ -226,54 +232,88 @@ class Sender {
     av_dict_set_int(&opts, "ssrc", (int64_t)(int32_t)g_cfg.ssrc, 0);
     av_dict_set_int(&opts, "payload_type", g_cfg.pt, 0);
     av_dict_set_int(&opts, "seq", 0, 0);
-    if (avformat_write_header(oc_, &opts) < 0) P5G_FATAL("rtp muxer write_header");
-    av_dict_free(&opts);
+    av_dict_free(&mux_opts_); mux_opts_ = opts;   // header is written when the grid starts (WriteHeader)
+  }
+  // rtpenc fixes the RTCP SR epoch (first_rtcp_ntp_time) when the header is written, from start_time_realtime
+  // if set, and maps SR rtp_ts = base + (ntp_now - epoch): media pts 0 must coincide with that epoch or every
+  // SR carries an rtp_ts offset equal to the handshake delay (libavformat/rtpenc.c n4.4.2 rtp_write_header,
+  // rtcp_send_sr; RFC 3550 §6.4.1). So: header written from the grid thread once the grid epoch is known.
+  void WriteHeader(int64_t epoch_wall_ns) {
+    oc_->start_time_realtime = epoch_wall_ns / 1000;   // µs since the Unix epoch
+    if (avformat_write_header(oc_, &mux_opts_) < 0) P5G_FATAL("rtp muxer write_header");
+    av_dict_free(&mux_opts_);
     header_written_ = true;
   }
-  // One RTP or RTCP packet from the muxer: log it and send it on our socket.
+  // sendto with EINTR retry; false = the kernel refused the datagram (EMSGSIZE, ENETUNREACH, EAGAIN on a full
+  // SNDBUF, ...). Such a packet never left the host and must not appear in the tx-rtp trace as sent.
+  static bool SendAll(int fd, const uint8_t* buf, int size, const sockaddr_in& to, std::atomic<int>* err) {
+    for (;;) {
+      const ssize_t n = ::sendto(fd, buf, size, 0, (const sockaddr*)&to, sizeof(to));
+      if (n == size) return true;
+      if (n < 0 && errno == EINTR) continue;
+      err->store(errno, std::memory_order_relaxed);
+      return false;
+    }
+  }
+  // One RTP or RTCP packet from the muxer (grid thread, synchronous): send it on our socket, then log it. The
+  // muxer always gets `size` back: a socket failure is counted (tx-stats send_failures, ERROR from the main
+  // thread), not turned into a muxer error that would desynchronise rtpenc's sequence numbers from the wire.
   static int WritePacket(void* opaque, uint8_t* buf, int size) {
     auto* self = static_cast<Sender*>(opaque);
     const int64_t mono = NowMonoNs(), wall = NowWallNs();
     if (IsRtcp(buf, size)) {
+      if (!self->dest_set_ || !SendAll(self->rtcp_fd_, buf, size, self->rtcp_dest_, &self->last_send_errno_)) { self->rtcp_send_fail_++; return size; }
       RtcpPacketRow r; FillRtcpRow(buf, size, 0, mono, wall, &r); self->rtcp_->Write(r);
-      if (self->dest_set_) ::sendto(self->rtcp_fd_, buf, size, 0, (sockaddr*)&self->rtcp_dest_, sizeof(self->rtcp_dest_));
       return size;
     }
     RtpHeader h;
-    if (!ParseRtp(buf, size, &h)) return size;
+    if (!ParseRtp(buf, size, &h)) { self->send_fail_++; return size; }
     if (!self->base_known_) { self->wire_base_ = h.ts - (uint32_t)self->cur_pts_; self->base_known_ = true; }
-    RtpPacketRow r; FillRtpRow(buf, size, h, 0, mono, wall, &r); self->rtp_->Write(r);
+    if (!SendAll(self->rtp_fd_, buf, size, self->rtp_dest_, &self->last_send_errno_)) { self->send_fail_++; self->au_send_failed_ = true; return size; }
+    RtpPacketRow r; FillRtpRow(buf, size, h, 0, mono, wall, &r); self->rtp_->Write(r);   // log_*_ns = just before the send
     if (h.marker) self->last_sent_ts_.store(h.ts, std::memory_order_relaxed);
-    const ssize_t n = ::sendto(self->rtp_fd_, buf, size, 0, (sockaddr*)&self->rtp_dest_, sizeof(self->rtp_dest_));
-    if (n == size) { self->pkts_sent_++; self->bytes_sent_ += size; }
+    self->pkts_sent_++; self->bytes_sent_ += size;
     return size;
   }
 
   // ---- grid --------------------------------------------------------------------------------------
   static void SleepUntilMonoUs(int64_t t) { timespec ts{(time_t)(t / 1000000), (long)((t % 1000000) * 1000)}; while (::clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR) {} }
+  // The capture grid is anchored to a WALL-CLOCK epoch T (--start-at-epoch, default: now): slot k is at
+  // T + k/fps on every host, so senders on different laptops (chrony, ~50 µs) capture in phase and their IDRs
+  // coincide; pts 0 = T. T is converted to this host's monotonic clock once, here. A late start (T already
+  // past) begins at the next slot on the same grid and says so; nothing before the start is a "missed" slot.
   void GridLoop() {
     const int64_t interval_us = 1000000 / g_cfg.fps;
-    int64_t slot = NowMonoNs() / 1000 / interval_us + 1; int64_t idx = 0;
-    start_us_ = slot * interval_us;
+    const int64_t wall_now = NowWallNs(), mono_now = NowMonoNs();
+    const int64_t epoch_wall = g_cfg.start_wall_ns ? g_cfg.start_wall_ns : wall_now;
+    start_us_ = (mono_now - (wall_now - epoch_wall)) / 1000;              // epoch in CLOCK_MONOTONIC µs
+    int64_t slot = 0; int64_t idx = 0;
+    if (mono_now / 1000 > start_us_) {
+      slot = (mono_now / 1000 - start_us_) / interval_us + 1;
+      if (g_cfg.start_wall_ns) P5G_LOG_WARN << "capture epoch was " << (mono_now / 1000 - start_us_) / 1000 << " ms ago; starting at slot " << slot;
+    }
+    WriteHeader(epoch_wall);
+    P5G_LOG_INFO << "capture grid: epoch wall_ns=" << epoch_wall << " (" << (g_cfg.start_wall_ns ? "--start-at-epoch" : "now") << "), first slot " << slot
+                 << " in " << (start_us_ + slot * interval_us - mono_now / 1000) / 1000 << " ms";
     rates_->Write(EncoderRateRow{NowMonoNs(), NowWallNs(), (int64_t)g_cfg.rungs[cur_rung_].kbps * 1000, (int64_t)g_cfg.rungs[cur_rung_].kbps * 1000, -1, (double)g_cfg.fps, 1});
     while (running_) {
-      int64_t target_us = slot * interval_us;
+      int64_t target_us = start_us_ + slot * interval_us;
       SleepUntilMonoUs(target_us);
       const int64_t now_us = NowMonoNs() / 1000;
-      if (now_us >= (slot + 1) * interval_us) {              // fell behind (a send blocked): record the missed slots
-        const int64_t resume = now_us / interval_us;
+      if (now_us >= start_us_ + (slot + 1) * interval_us) {  // fell behind (a send blocked): record the missed slots
+        const int64_t resume = (now_us - start_us_) / interval_us;
         for (; slot < resume && running_; ++slot) EmitMissed(slot, idx, interval_us);
-        target_us = slot * interval_us;
+        target_us = start_us_ + slot * interval_us;
       }
       EmitSlot(slot, idx, target_us, interval_us);
       ++slot;
     }
     const int64_t now_us = NowMonoNs() / 1000;
-    for (; (slot + 1) * interval_us <= now_us; ++slot) EmitMissed(slot, idx, interval_us);
+    for (; start_us_ + (slot + 1) * interval_us <= now_us; ++slot) EmitMissed(slot, idx, interval_us);
   }
   uint32_t RtpTsForPts(int64_t pts) const { return (uint32_t)pts + wire_base_; }
   void EmitMissed(int64_t slot, int64_t& idx, int64_t interval_us) {
-    const int64_t pts = (slot * interval_us - start_us_) * 90 / 1000;
+    const int64_t pts = slot * interval_us * 90 / 1000;
     frames_->Write(CaptureFrameRow{idx, slot, idx % (int64_t)g_cfg.rungs[0].aus.size(), RtpTsForPts(pts), NowWallNs(), NowMonoNs(), width_, height_, 0});
     ++idx; missed_++;
   }
@@ -289,12 +329,12 @@ class Sender {
     }
     const AccessUnit& au = g_cfg.rungs[cur_rung_.load()].aus[src];
     const int64_t pts = (target_us - start_us_) * 90 / 1000;
-    cur_pts_ = pts;
+    cur_pts_ = pts; au_send_failed_ = false;
     AVPacket pkt; av_init_packet(&pkt);
     pkt.data = const_cast<uint8_t*>(au.data); pkt.size = au.bytes; pkt.pts = pts; pkt.dts = pts; pkt.stream_index = 0;
     pkt.flags = au.is_idr ? AV_PKT_FLAG_KEY : 0;
     const int ret = av_write_frame(oc_, &pkt);        // synchronous: every RTP packet of this AU went through WritePacket
-    const bool ok = ret >= 0;
+    const bool ok = ret >= 0 && !au_send_failed_;     // false: the muxer failed or at least one packet was refused by the socket
     const uint32_t rtp_ts = RtpTsForPts(pts);           // wire value (base learned from the first packet)
     frames_->Write(CaptureFrameRow{idx, slot, src, rtp_ts, capture_wall, capture_mono, width_, height_, ok ? 1 : 0});
     if (ok) {
@@ -372,7 +412,9 @@ class Sender {
   bool header_written_ = false;
   int rtp_fd_ = -1, rtcp_fd_ = -1, rtp_port_local_ = 0, rtcp_port_local_ = 0;
   sockaddr_in rtp_dest_{}, rtcp_dest_{}; bool dest_set_ = false; std::string dest_host_;
-  int64_t start_us_ = 0, cur_pts_ = 0;
+  int64_t start_us_ = 0, cur_pts_ = 0; bool au_send_failed_ = false;   // grid thread
+  AVDictionary* mux_opts_ = nullptr;
+  std::atomic<int64_t> send_fail_{0}, rtcp_send_fail_{0}; std::atomic<int> last_send_errno_{0}; int64_t send_fail_reported_ = 0;
   uint32_t wire_base_ = 0; bool base_known_ = false;
   std::atomic<int> cur_rung_{0}, want_rung_{0};
   std::atomic<int64_t> frames_sent_{0}, missed_{0}, pkts_sent_{0}, bytes_sent_{0};
@@ -390,12 +432,13 @@ static void Usage() {
   std::fprintf(stderr,
                "video_sender --control-host H --control-port P --session S --stream-id ID --to RECV_ID --trace-dir DIR\n"
                "             --source a.h264@2500[,b.h264@1000,...] [--bitrate-kbps START_RUNG] [--fps 30]\n"
-               "             [--mtu 1200] [--pt 96] [--ssrc N] [--stats-period-ms 1000] [--duration S]\n");
+               "             [--mtu 1200] [--pt 96] [--ssrc N] [--stats-period-ms 1000] [--duration S] [--start-at-epoch T.sss]\n"
+               "  --start-at-epoch: wall-clock (UNIX seconds) epoch of the capture grid, shared by all senders of a run\n");
 }
 
 int main(int argc, char** argv) {
   p5g::CliArgs a(argc, argv, {"help", "control-host", "control-port", "session", "stream-id", "to", "trace-dir", "source", "bitrate-kbps",
-                              "fps", "mtu", "pt", "ssrc", "stats-period-ms", "duration"});
+                              "fps", "mtu", "pt", "ssrc", "stats-period-ms", "duration", "start-at-epoch"});
   if (a.Has("help")) { Usage(); return 0; }
   auto& c = p5g::g_cfg;
   c.control_host = a.Get("control-host", c.control_host); c.control_port = a.GetInt("control-port", c.control_port);
@@ -404,6 +447,7 @@ int main(int argc, char** argv) {
   c.ssrc = (uint32_t)std::strtoul(a.Get("ssrc", "0").c_str(), nullptr, 10);
   c.stats_period_ms = a.GetInt("stats-period-ms", c.stats_period_ms); c.duration_s = a.GetInt("duration", 0);
   c.start_kbps = a.GetInt("bitrate-kbps", 0);
+  if (a.Has("start-at-epoch")) { const double t = std::atof(a.Get("start-at-epoch", "0").c_str()); if (t <= 0) P5G_FATAL("--start-at-epoch must be UNIX seconds"); c.start_wall_ns = (int64_t)(t * 1e9); }
   {  // --source a@kbps,b@kbps
     std::string s = a.Get("source", ""); size_t pos = 0;
     while (pos <= s.size() && !s.empty()) {
@@ -417,11 +461,15 @@ int main(int argc, char** argv) {
     }
   }
   if (c.fps <= 0) P5G_FATAL("--fps must be > 0");
+  if (c.start_wall_ns && c.duration_s > 0) {   // --duration counts from the capture epoch, not from the launch
+    const int64_t wait_ns = c.start_wall_ns - p5g::NowWallNs();
+    if (wait_ns > 0) c.duration_s += (int)((wait_ns + 999999999LL) / 1000000000LL);
+  }
   av_log_set_level(AV_LOG_ERROR);
   if (const char* lv = std::getenv("P5G_AV_LOG")) av_log_set_level(!std::strcmp(lv, "debug") ? AV_LOG_DEBUG : !std::strcmp(lv, "verbose") ? AV_LOG_VERBOSE : AV_LOG_INFO);
   P5G_LOG_INFO << "config: transport=ffmpeg stream_id=" << c.stream_id << " to=" << c.receiver_id << " session=" << c.session << " control="
                << c.control_host << ":" << c.control_port << " codec=H264 fps=" << c.fps << " source=" << a.Get("source", "")
-               << " start_rung_kbps=" << c.start_kbps << " mtu=" << c.mtu << " pt=" << c.pt << " stats_period_ms=" << c.stats_period_ms
+               << " start_rung_kbps=" << c.start_kbps << " start_at_epoch_wall_ns=" << c.start_wall_ns << " mtu=" << c.mtu << " pt=" << c.pt << " stats_period_ms=" << c.stats_period_ms
                << " libavformat=" << LIBAVFORMAT_VERSION_MAJOR << "." << LIBAVFORMAT_VERSION_MINOR << "." << LIBAVFORMAT_VERSION_MICRO
                << " libavcodec=" << LIBAVCODEC_VERSION_MAJOR << "." << LIBAVCODEC_VERSION_MINOR << "." << LIBAVCODEC_VERSION_MICRO;
   p5g::InstallSignalHandlers();

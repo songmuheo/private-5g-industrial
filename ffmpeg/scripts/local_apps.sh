@@ -31,6 +31,7 @@ fi
 UE_IP="${3:?ue_ip}"; HOST_IP="${4:?host_ip}"; TOTAL="${5:?total_s}"; DIRECTION="${6:?ul|dl}"
 CODEC="${7:?codec}"; WIDTH="${8:?W}"; HEIGHT="${9:?H}"; FPS="${10:?fps}"; YUV="${11:-}"
 [ "$CODEC" = "H264" ] || { echo "ffmpeg tree: pre-encoded H.264 only; got $CODEC" >&2; exit 1; }
+[ -z "$YUV" ] || { echo "ffmpeg tree: no live encoder, a YUV source cannot be used; pick pre-encoded rungs with P5G_SOURCE=<prefix>" >&2; exit 1; }
 [ -x "$SENDER" ] && [ -x "$RECEIVER" ] || { echo "ffmpeg apps not built (make build-apps TREE=ffmpeg)" >&2; exit 1; }
 
 PORT="${P5G_CONTROL_PORT:-8765}"
@@ -40,6 +41,17 @@ PREFIX="${P5G_SOURCE:-}"; [ -n "$PREFIX" ] || { ls "$TREE/../video/assets/kendo_
 [ -n "$PREFIX" ] || PREFIX="mot17-02_1280x720_30"
 LIST=""; for f in $(ls "$TREE/../video/assets/${PREFIX}_"*k.h264 2>/dev/null | sort -t_ -k5 -n); do kb="$(basename "$f" | sed -E 's/.*_([0-9]+)k\.h264$/\1/')"; LIST="${LIST:+$LIST,}$f@$kb"; done
 [ -n "$LIST" ] || { echo "no pre-encoded rungs for $PREFIX in video/assets (ffmpeg/scripts/prepare_video.sh)" >&2; exit 1; }
+# the shared runner's WIDTH/HEIGHT/FPS must describe the files (their names carry <WxH>_<fps>): refuse a mismatch
+# rather than record a resolution that was not transmitted
+case "$PREFIX" in *_${WIDTH}x${HEIGHT}_${FPS}) ;; *) echo "ffmpeg tree: WIDTH=$WIDTH HEIGHT=$HEIGHT FPS=$FPS do not match the pre-encoded source '$PREFIX' (pass the file's values, or P5G_SOURCE=<prefix>_<WxH>_<fps>)" >&2; exit 1;; esac
+mkdir -p "$RD/app"
+# provenance for run.json: what was actually sent (the shared runner has no YUV/pattern here)
+python3 - "$PREFIX" "$LIST" "${P5G_START_KBPS:-2500}" > "$RD/app/source.json" <<'PY'
+import json, sys
+prefix, lst, start = sys.argv[1], sys.argv[2], int(sys.argv[3])
+rungs = [{"file": i.split('@')[0].split('/')[-1], "kbps": int(i.split('@')[1])} for i in lst.split(',')]
+print(json.dumps({"source": prefix, "kind": "pre-encoded-h264", "rungs": rungs, "start_kbps": start}))
+PY
 VID=(--fps "$FPS" --source "$LIST" --bitrate-kbps "${P5G_START_KBPS:-2500}")
 if [ "$DIRECTION" = "ul" ]; then
   # control server + receiver on the host (reachable from the UE at HOST_IP through the UPF)

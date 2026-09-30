@@ -22,6 +22,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdarg>
 #include <cstring>
 #include <fcntl.h>
 #include <memory>
@@ -35,6 +36,8 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/buffer.h>
+#include <libavutil/log.h>
 }
 
 #include "app_util.h"
@@ -56,6 +59,12 @@ struct ReceiverConfig {
   int duration_s = 0;
 };
 static ReceiverConfig g_cfg;
+
+// libavcodec's default log callback takes a mutex and writes to stderr — on the receive thread, and only when
+// packets were damaged (rule 2: the measurement load must not depend on loss). Default here: count only, report
+// from the main thread. P5G_AV_LOG=1 restores FFmpeg's callback for debugging.
+static std::atomic<int64_t> g_av_log_errors{0};
+static void CountingAvLog(void*, int level, const char*, va_list) { if (level <= AV_LOG_WARNING) g_av_log_errors.fetch_add(1, std::memory_order_relaxed); }
 
 class Receiver {
  public:
@@ -82,9 +91,12 @@ class Receiver {
     if (next_stats_ == 0) next_stats_ = now;
     if (now < next_stats_) return;
     next_stats_ += (int64_t)g_cfg.stats_period_ms * 1000000; if (next_stats_ < now) next_stats_ = now;
-    std::fprintf(f, "{\"mono_ns\":%lld,\"wall_ns\":%lld,\"packets\":%lld,\"bytes\":%lld,\"frames\":%lld,\"aus_incomplete\":%lld,\"lost_packets\":%lld,\"lost_fragments\":%lld,\"decode_failures\":%lld}\n",
+    const H264Depacketizer::Counters dc = depack_ ? depack_->counters() : H264Depacketizer::Counters{};   // written by the rx thread; read here, ±1 packet
+    std::fprintf(f, "{\"mono_ns\":%lld,\"wall_ns\":%lld,\"packets\":%lld,\"bytes\":%lld,\"frames\":%lld,\"aus_incomplete\":%lld,\"aus_empty\":%lld,\"aus_damaged\":%lld,"
+                    "\"lost_packets\":%lld,\"lost_fragments\":%lld,\"late_or_dup_packets\":%lld,\"seq_resets\":%lld,\"decode_failures\":%lld,\"av_log_errors\":%lld,\"decoder_held_buffers\":%lld}\n",
                  (long long)now, (long long)NowWallNs(), (long long)pkts_.load(), (long long)bytes_.load(), (long long)frame_idx_.load(),
-                 (long long)incomplete_.load(), (long long)lost_pkts_.load(), (long long)lost_frag_.load(), (long long)decode_fail_.load());
+                 (long long)incomplete_.load(), (long long)empty_aus_.load(), (long long)damaged_.load(), (long long)lost_pkts_.load(), (long long)lost_frag_.load(),
+                 (long long)dc.late_or_dup, (long long)dc.seq_resets, (long long)decode_fail_.load(), (long long)g_av_log_errors.load(), (long long)buf_held_.load());
     std::fflush(f);
   }
 
@@ -93,9 +105,16 @@ class Receiver {
     running_ = false;
     if (rx_thread_.joinable()) rx_thread_.join();   // returns within the 100 ms socket timeout
     CloseTraces();
+    if (const int64_t e = g_av_log_errors.load()) P5G_LOG_WARN << e << " libavcodec error/warning messages were suppressed on the receive thread (P5G_AV_LOG=1 prints them)";
+    if (buf_held_.load()) P5G_LOG_WARN << buf_held_.load() << " AUs were still referenced by the decoder after avcodec_send_packet (unexpected; see rx-stats decoder_held_buffers)";
+    P5G_LOG_INFO << "frames " << frame_idx_.load() << ", AUs incomplete " << incomplete_.load() << " (empty " << empty_aus_.load() << ", damaged " << damaged_.load()
+                 << "), lost packets " << lost_pkts_.load() << ", lost fragments " << lost_frag_.load() << ", late/dup " << (depack_ ? depack_->counters().late_or_dup : 0)
+                 << ", decode failures " << decode_fail_.load();
     if (dec_) avcodec_free_context(&dec_);
     if (frame_) av_frame_free(&frame_);
     if (pkt_) av_packet_free(&pkt_);
+    depack_.reset();
+    for (auto& b : au_buf_) if (b) av_buffer_unref(&b);
     if (rtp_fd_ >= 0) ::close(rtp_fd_);
     if (rtcp_fd_ >= 0) ::close(rtcp_fd_);
   }
@@ -129,6 +148,17 @@ class Receiver {
     dec_->flags2 |= AV_CODEC_FLAG2_CHUNKS;
     if (avcodec_open2(dec_, d, nullptr) < 0) P5G_FATAL("h264 decoder open");
     frame_ = av_frame_alloc(); pkt_ = av_packet_alloc();
+    // The depacketizer assembles straight into libavcodec-owned, padded, reference-counted buffers: the decoder
+    // takes the AU by reference (av_packet_ref -> av_buffer_ref, no copy of the AU bytes; a non-refcounted
+    // packet would be copied into a fresh allocation per AU, libavcodec/avpacket.c av_packet_ref).
+    uint8_t* ptrs[H264Depacketizer::kBuffers];
+    for (int k = 0; k < H264Depacketizer::kBuffers; ++k) {
+      au_buf_[k] = av_buffer_alloc(kMaxAuBytes + AV_INPUT_BUFFER_PADDING_SIZE);
+      if (!au_buf_[k]) P5G_FATAL("av_buffer_alloc");
+      std::memset(au_buf_[k]->data + kMaxAuBytes, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+      ptrs[k] = au_buf_[k]->data;
+    }
+    depack_ = std::make_unique<H264Depacketizer>(ptrs, kMaxAuBytes);
   }
 
   // Receive thread: one datagram per iteration; kernel arrival from SO_TIMESTAMPNS (CLOCK_REALTIME),
@@ -160,21 +190,28 @@ class Receiver {
       // per-timestamp arrival bookkeeping: an AU closed by the marker is `cur`, one closed by a new timestamp is `prev`
       if (!have_cur_ || h.ts != cur_.ts) { prev_ = cur_; cur_ = {h.ts, arrival_mono, arrival_mono, 1}; have_cur_ = true; }
       else { cur_.last = arrival_mono; cur_.n++; }
-      H264Depacketizer::AuEvent ev;
-      if (depack_.Push(h, &ev)) {
-        const Arr& a = (ev.rtp_ts == cur_.ts) ? cur_ : prev_;
-        DecodeAu(ev, a.first, a.last, a.n);
+      H264Depacketizer::AuEvent ev[2];
+      const int n_ev = depack_->Push(h, ev);      // 0..2 AUs ended with this packet (each in its own buffer)
+      for (int k = 0; k < n_ev; ++k) {
+        const Arr& a = (ev[k].rtp_ts == cur_.ts) ? cur_ : prev_;
+        DecodeAu(ev[k], a.first, a.last, a.n);
       }
     }
   }
 
   void DecodeAu(const H264Depacketizer::AuEvent& ev, int64_t first, int64_t last, int npk) {
-    if (!ev.complete) { incomplete_++; lost_frag_ += ev.lost_fragments; lost_pkts_ += ev.lost_packets; }
+    if (!ev.complete) { incomplete_++; lost_frag_ += ev.lost_fragments; lost_pkts_ += ev.lost_packets; damaged_ += ev.damaged; }
+    if (ev.bytes == 0) { empty_aus_++; return; }   // every byte of this AU was lost or discarded: counted, nothing to decode
     const int64_t t0 = NowMonoNs();
-    pkt_->data = const_cast<uint8_t*>(depack_.data()); pkt_->size = depack_.size(); pkt_->pts = ev.rtp_ts; pkt_->dts = ev.rtp_ts;
+    // hand the AU to the decoder by reference (our AVBufferRef; the decoder's av_packet_ref only bumps the count)
+    pkt_->buf = av_buffer_ref(au_buf_[ev.buffer]);
+    pkt_->data = pkt_->buf->data; pkt_->size = ev.bytes; pkt_->pts = ev.rtp_ts; pkt_->dts = ev.rtp_ts;
     pkt_->flags = ev.is_idr ? AV_PKT_FLAG_KEY : 0;
     int ret = avcodec_send_packet(dec_, pkt_);
-    pkt_->data = nullptr; pkt_->size = 0;
+    av_packet_unref(pkt_);
+    // the h264 decoder copies NALs into its own RBSP buffers and releases the packet before returning; if it ever
+    // held on to ours the buffer would be overwritten two AUs later — count it so that a run can be judged
+    if (av_buffer_get_ref_count(au_buf_[ev.buffer]) != 1) buf_held_++;
     if (ret < 0) { decode_fail_++; return; }
     while ((ret = avcodec_receive_frame(dec_, frame_)) == 0) {
       const int64_t t1 = NowMonoNs(), w1 = NowWallNs();
@@ -225,11 +262,13 @@ class Receiver {
 
   int rtp_fd_ = -1, rtcp_fd_ = -1, rtp_port_ = 0, rtcp_port_ = 0;
   AVCodecContext* dec_ = nullptr; AVFrame* frame_ = nullptr; AVPacket* pkt_ = nullptr;
-  H264Depacketizer depack_;
+  static constexpr int kMaxAuBytes = 4 << 20;   // one access unit (an 8 Mbps IDR is ~100 KB; generous)
+  AVBufferRef* au_buf_[H264Depacketizer::kBuffers] = {nullptr, nullptr, nullptr};
+  std::unique_ptr<H264Depacketizer> depack_;
   struct Arr { uint32_t ts = 0; int64_t first = 0, last = 0; int n = 0; };
   Arr cur_, prev_; bool have_cur_ = false;   // receive thread only
   std::atomic<uint32_t> ssrc_{0}; std::atomic<uint8_t> pt_{96};
-  std::atomic<int64_t> pkts_{0}, bytes_{0}, frame_idx_{0}, incomplete_{0}, lost_pkts_{0}, lost_frag_{0}, decode_fail_{0};
+  std::atomic<int64_t> pkts_{0}, bytes_{0}, frame_idx_{0}, incomplete_{0}, empty_aus_{0}, damaged_{0}, lost_pkts_{0}, lost_frag_{0}, decode_fail_{0}, buf_held_{0};
   std::atomic<RtpPacketTrace*> rtp_p_{nullptr}; std::atomic<RtcpPacketTrace*> rtcp_p_{nullptr};
   std::atomic<DecodedFrameLedgerTrace*> decoded_p_{nullptr}; std::atomic<DecodedFrameTrace*> frames_p_{nullptr};
   std::unique_ptr<RtpPacketTrace> rtp_; std::unique_ptr<RtcpPacketTrace> rtcp_;
@@ -257,6 +296,7 @@ int main(int argc, char** argv) {
   c.advertise_host = a.Get("advertise-host", ""); c.rtp_port = a.GetInt("rtp-port", 0);
   c.stats_period_ms = a.GetInt("stats-period-ms", c.stats_period_ms); c.duration_s = a.GetInt("duration", 0);
   av_log_set_level(AV_LOG_ERROR);
+  if (!std::getenv("P5G_AV_LOG")) av_log_set_callback(&p5g::CountingAvLog);
   P5G_LOG_INFO << "config: transport=ffmpeg receiver_id=" << c.receiver_id << " session=" << c.session << " control=" << c.control_host << ":"
                << c.control_port << " rtp_port=" << c.rtp_port << " stats_period_ms=" << c.stats_period_ms
                << " libavcodec=" << LIBAVCODEC_VERSION_MAJOR << "." << LIBAVCODEC_VERSION_MINOR << "." << LIBAVCODEC_VERSION_MICRO;

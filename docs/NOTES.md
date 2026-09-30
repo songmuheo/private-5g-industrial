@@ -787,3 +787,31 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   sends nothing back, as SMEC). rtpenc's RTP timestamp base is random and not settable — the sender reads it off its
   first packet, so tx-frames carries wire values.
 * Not yet: OTA run; laptops need `ffmpeg/scripts/prepare_client.sh K` (packages, build, rungs over the sync LAN).
+
+## 2026-09-30 — ffmpeg/ tree: Codex review pass 1 (15 findings) fixed and re-verified
+* High: the depacketizer emitted the previous AU on a timestamp change but kept assembling the new packet into the
+  same buffer -> mixed bytes. Now three rotating fixed buffers (assembly + up to two emitted), `Push()` returns 0..2
+  events. Sequence handling per RFC 3550 A.1 (forward <= 3000 loss, backward <= 100 late/dup dropped, else reset);
+  a gap at a timestamp change is attributed to the marker-less previous AU; partial NALs are discarded (RFC 6184
+  §5.8) and counted; loss-only AUs are reported with bytes=0; STAP-A/overflow damage is sticky (`complete=false`);
+  a terminal start code no longer reads past the mapping. Test now asserts 7 cases (61 events, 55 complete).
+* Sender: `sendto` failures counted (`send_failures`, no tx-rtp row, ERROR from the main thread), EINTR retried.
+  The rtp muxer header is written from the grid thread with `start_time_realtime` = the capture epoch, so RTCP SR
+  rtp_ts and media rtp_ts share one origin — verified on a lo capture: SR-vs-media residual 0.08-0.11 ms on all 6
+  SRs (before: the handshake delay, ~6 s in demo-local). Capture grid anchored to a wall-clock epoch
+  (`--start-at-epoch`; run_sender.sh no longer sleeps in the shell): demo-local's two senders hit slot 0 within 59 µs
+  of the same T; `--duration` counts from T.
+* Receiver: AUs are assembled straight into padded `AVBufferRef`s and handed to libavcodec by reference (no per-AU
+  copy/alloc, `av_packet_ref` = refcount); `decoder_held_buffers`=0 over 1140 frames confirms the h264 decoder
+  releases the packet inside `avcodec_send_packet`. libavcodec logging on the receive thread replaced by a counting
+  callback (`av_log_errors`; P5G_AV_LOG=1 restores it). Remaining stock-decoder allocations (frame pool, RBSP) are
+  the same for every frame and are documented as inherent.
+* Scripts: prepare_video.sh encodes to a temp file, validates frames + IDR positions, renames, and keeps a manifest
+  (`h264_ladders.txt`) that gates reuse; run_experiment.sh (gstreamer too) names each launch's sender directory
+  (`P5G_RUN_ID`) and collects exactly it, marking INVALID when a sender failed or left nothing; local_apps.sh refuses a
+  YUV or a WxH/fps that is not the file's and writes `app/source.json` (run.json embeds it); all derived outputs
+  (summary.json, report.txt, graphs/, INVALID) moved to `results/<run>-analysis/` for every tree (rule 3).
+* Re-verified: build test bad=0; demo-local 364/364 both cams (0 loss, 0 late/dup); rung switch at IDR 120
+  (10417 -> 4167 B/frame, 302/302); `make run-local TREE=ffmpeg` 1140/1140 joined, capture->app 30.5 ms median.
+* Not changed: gstreamer/run_sender.sh still waits for --start-at in the shell (its grid is app-anchored); the
+  ffmpeg epoch mechanism is the model if the gstreamer tree needs cross-camera phase later.

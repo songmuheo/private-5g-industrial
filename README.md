@@ -37,7 +37,7 @@ One command from the gNB PC (after `./run_gnb_core.sh` is up): receivers, prefli
 sync LAN, per-camera settings from a JSON scenario, synchronised start, trace collection, verify and report.
 
 ```bash
-./gstreamer/run_experiment.sh gstreamer/experiments/5ue-720p30.json   # -> results/CURRENT/{scenario.json,experiment.json,app,senders/camK,report.txt}
+./gstreamer/run_experiment.sh gstreamer/experiments/5ue-720p30.json   # -> results/<run>/{scenario.json,experiment.json,app,senders/camK}, results/<run>-analysis/report.txt
 ./gstreamer/run_experiment.sh gstreamer/experiments/demo-local.json   # smoke test on one PC (senders + receivers over loopback, no RAN)
 ./webrtc/run_experiment.sh webrtc/experiments/2ue-720p30.json         # the frozen tree, same shape (needs webrtc/build/apps)
 ```

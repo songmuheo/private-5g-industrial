@@ -99,7 +99,7 @@ cat > "$RD/run.json" <<EOF
   "run_id": "$RUN_ID", "mode": "local_zmq_codetest", "direction": "$DIRECTION", "transport": "$TREE_NAME",
   "duration_s": $DURATION, "warmup_s": $WARMUP, "drain_s": $DRAIN,
   "window_start_wall_ns": $WIN_START_NS, "window_end_wall_ns": $WIN_END_NS,
-  "codec": "$CODEC", "width": $WIDTH, "height": $HEIGHT, "fps": $FPS, "source": "${YUV:-pattern}",
+  "codec": "$CODEC", "width": $WIDTH, "height": $HEIGHT, "fps": $FPS, "source": $([ -f "$RD/app/source.json" ] && cat "$RD/app/source.json" || echo "\"${YUV:-pattern}\""),
   "ue_ip": "$UE_IP",
   "srsran_project": "$(git -C "$ROOT/third_party/srsRAN_Project" describe --tags --always)",
   "srsran_4g": "$(git -C "$ROOT/third_party/srsRAN_4G" describe --tags --always)",

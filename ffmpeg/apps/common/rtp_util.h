@@ -187,12 +187,14 @@ struct AccessUnit {
   int32_t is_idr;   // contains a NAL of type 5
 };
 inline int NalType(const uint8_t* p) { return p[0] & 0x1f; }
-// Finds the next start code (00 00 01 / 00 00 00 01) at or after `from`; returns offset of the first byte after it, or -1.
+// Finds the next start code (00 00 01 / 00 00 00 01) at or after `from`; returns offset of the first byte after it,
+// or -1. A start code that ends the buffer (no NAL header byte after it) is treated as "none": a truncated file's
+// tail must not be dereferenced (was an out-of-bounds read).
 inline int64_t NextStartCode(const uint8_t* d, int64_t n, int64_t from, int64_t* sc_begin) {
   for (int64_t i = from; i + 3 <= n; ++i) {
     if (d[i] == 0 && d[i + 1] == 0) {
-      if (d[i + 2] == 1) { *sc_begin = i; return i + 3; }
-      if (i + 4 <= n && d[i + 2] == 0 && d[i + 3] == 1) { *sc_begin = i; return i + 4; }
+      if (d[i + 2] == 1) { if (i + 3 >= n) return -1; *sc_begin = i; return i + 3; }
+      if (i + 4 <= n && d[i + 2] == 0 && d[i + 3] == 1) { if (i + 4 >= n) return -1; *sc_begin = i; return i + 4; }
     }
   }
   return -1;
@@ -226,77 +228,122 @@ inline std::vector<AccessUnit> IndexAccessUnits(const uint8_t* d, int64_t n, std
 // ---- RFC 6184 depacketizer --------------------------------------------------------------------------
 // Rebuilds Annex B access units from RTP payloads: single NAL unit packets (§5.6), STAP-A (§5.7.1),
 // FU-A (§5.8). An AU ends at the marker bit (§5.1) or when a packet with a new timestamp arrives.
-// `complete` means: ended by the marker AND no sequence-number gap was seen since the AU's first packet
-// (a gap right before the first packet counts against this AU too — conservative, since a lost marker
-// packet of the previous AU is indistinguishable). Lost FU-A fragments discard the partial NAL; the
-// caller decides what to do with an incomplete AU (we hand it to the decoder and record the loss).
+//
+// Output contract: Push() returns the number of AUs that ended with this packet, 0..2 (2 = the previous AU
+// ended by the timestamp change AND this packet carries the marker of a one-packet AU). Each ended AU has
+// its own output buffer: three fixed buffers rotate (assembly + up to two emitted), so an emitted AU is
+// never overwritten by the packet that ended it; data(k)/size(k) stay valid until the next Push().
+//
+// `complete` = ended by the marker AND no sequence gap attributed to it AND no damage (an FU-A left open, a
+// malformed STAP-A, an AU larger than the buffer). Gap attribution: a gap seen at a packet that changes the
+// timestamp while the previous AU is still open (its marker never arrived) is that previous AU's lost tail;
+// a gap seen after a marker-ended AU, or inside an AU, belongs to the AU being assembled. (A tail+head loss
+// spanning two AUs is attributed to the first; only one of them is then marked incomplete — a known limit.)
+// A partial NAL (FU-A whose end or later fragment was lost) is discarded, not delivered (§5.8 permits either;
+// a half NAL only makes the decoder produce garbage). FU-A fragments without an open FU (start lost) are
+// dropped and counted once per run as a lost fragment.
+//
+// Sequence numbers follow RFC 3550 Appendix A.1: a forward step of at most kMaxDropout is progress (gap =
+// step-1 counted as lost), a backward step of at most kMaxMisorder is a duplicate/late packet (dropped and
+// counted, assembly state untouched), anything else is a sequence reset (accepted, counted, no loss).
+// AUs whose every byte was discarded are still reported (bytes=0, complete=false) so no loss goes uncounted.
 class H264Depacketizer {
  public:
-  explicit H264Depacketizer(size_t max_au_bytes = 4 << 20) : buf_(max_au_bytes) {}
+  static constexpr int kBuffers = 3;
+  static constexpr int kMaxDropout = 3000;   // RFC 3550 A.1
+  static constexpr int kMaxMisorder = 100;   // RFC 3550 A.1
+  // Buffers may be supplied by the caller (e.g. libavcodec-padded, reference-counted memory so the decoder
+  // takes the AU without a copy); otherwise they are allocated once here.
+  explicit H264Depacketizer(size_t max_au_bytes = 4 << 20) : cap_((int)max_au_bytes) {
+    for (int k = 0; k < kBuffers; ++k) { own_[k].resize(max_au_bytes); buf_[k] = own_[k].data(); }
+  }
+  H264Depacketizer(uint8_t* const bufs[kBuffers], size_t cap) : cap_((int)cap) { for (int k = 0; k < kBuffers; ++k) buf_[k] = bufs[k]; }
 
-  struct AuEvent { bool complete = false; uint32_t rtp_ts = 0; int bytes = 0; int packets = 0; int lost_packets = 0; int lost_fragments = 0; int is_idr = 0; };
+  struct AuEvent {
+    bool complete = false; uint32_t rtp_ts = 0; int bytes = 0; int packets = 0; int lost_packets = 0; int lost_fragments = 0; int is_idr = 0;
+    int damaged = 0;   // malformed STAP-A / buffer overflow seen in this AU
+    int buffer = 0;    // index for data(k)/size(k)
+  };
+  struct Counters { int64_t late_or_dup = 0, seq_resets = 0; };
 
-  // Feed one RTP packet. Returns true and fills `out` when an AU became complete (the AU is `data()`
-  // for `out.bytes`; valid until the next call).
-  bool Push(const RtpHeader& h, AuEvent* out) {
-    bool emitted = false;
-    if (have_ts_ && h.ts != cur_ts_) emitted = Emit(out, false);   // timestamp change without marker: previous AU ends
-    if (!have_ts_ || h.ts != cur_ts_) { have_ts_ = true; cur_ts_ = h.ts; len_ = 0; packets_ = 0; lost_ = 0; lost_frag_ = 0; idr_ = 0; fu_open_ = false; }
+  // Feed one RTP packet. Returns the number of AUs that ended (0..2), filled into out[0..n-1] in order.
+  int Push(const RtpHeader& h, AuEvent out[2]) {
+    int n_out = 0;
     if (have_seq_) {
-      const int gap = (uint16_t)(h.seq - last_seq_ - 1);
-      if (gap) { lost_ += gap; if (fu_open_) { lost_frag_++; fu_open_ = false; DropOpenFu(); } }
+      const int16_t step = (int16_t)(uint16_t)(h.seq - last_seq_);
+      if (step <= 0 && step > -kMaxMisorder) { counters_.late_or_dup++; return 0; }        // duplicate or late: ignore
+      if (step > 0 && step <= kMaxDropout) { pending_gap_ = step - 1; }
+      else { counters_.seq_resets++; pending_gap_ = 0; }                                    // far jump: sequence reset
     }
     have_seq_ = true; last_seq_ = h.seq;
+    if (have_ts_ && h.ts != cur_ts_) {                       // timestamp change while an AU is open: it lost its marker packet(s)
+      if (pending_gap_) { lost_ += pending_gap_; pending_gap_ = 0; }   // -> the gap is that AU's lost tail, not this one's head
+      if (Emit(&out[n_out], false)) n_out++;
+    }
+    if (!have_ts_ || h.ts != cur_ts_) Reset(h.ts);
+    if (pending_gap_) { lost_ += pending_gap_; pending_gap_ = 0; if (fu_open_) { lost_frag_++; fu_open_ = false; DropOpenFu(); } }   // within this AU (or after a marker-ended one: this AU's head)
     packets_++;
     const uint8_t* p = h.payload; const int n = h.payload_len;
-    if (n < 1) return emitted;
-    const int type = p[0] & 0x1f;
-    if (type >= 1 && type <= 23) {            // single NAL unit
-      AppendNal(p, n);
-    } else if (type == 24) {                  // STAP-A: 1 byte header, then (2-byte size, NAL)*
-      int off = 1;
-      while (off + 2 <= n) {
-        const int sz = (p[off] << 8) | p[off + 1]; off += 2;
-        if (sz <= 0 || off + sz > n) break;
-        AppendNal(p + off, sz); off += sz;
+    if (n >= 1) {
+      const int type = p[0] & 0x1f;
+      if (type >= 1 && type <= 23) {            // single NAL unit
+        AppendNal(p, n);
+      } else if (type == 24) {                  // STAP-A: 1 byte header, then (2-byte size, NAL)*
+        int off = 1;
+        while (off < n) {
+          if (off + 2 > n) { damaged_ = 1; break; }
+          const int sz = (p[off] << 8) | p[off + 1]; off += 2;
+          if (sz <= 0 || off + sz > n) { damaged_ = 1; break; }
+          AppendNal(p + off, sz); off += sz;
+        }
+      } else if (type == 28 && n >= 2) {        // FU-A: FU indicator, FU header (S|E|R|type), fragment
+        const uint8_t fu = p[1]; const int s = fu >> 7, e = (fu >> 6) & 1, ntype = fu & 0x1f;
+        if (s) {
+          if (fu_open_) { lost_frag_++; DropOpenFu(); }   // a new start while one is open: the previous end was lost
+          const uint8_t nal_hdr = (uint8_t)((p[0] & 0xe0) | ntype);
+          fu_start_ = len_; orphan_ = false;
+          AppendStartCode(); Append(&nal_hdr, 1); fu_open_ = true;
+          if (ntype == 5) idr_ = 1;
+        }
+        if (fu_open_) { Append(p + 2, n - 2); if (e) fu_open_ = false; }
+        else if (!orphan_) { orphan_ = true; lost_frag_++; }   // continuation without a start: that NAL is lost
+      } else {
+        damaged_ = 1;                            // STAP-B / MTAP / FU-B (RFC 6184 §5.2 non-interleaved mode never sends them)
       }
-    } else if (type == 28 && n >= 2) {        // FU-A: FU indicator, FU header (S|E|R|type), fragment
-      const uint8_t fu = p[1]; const int s = fu >> 7, e = (fu >> 6) & 1, ntype = fu & 0x1f;
-      if (s) {
-        const uint8_t nal_hdr = (uint8_t)((p[0] & 0xe0) | ntype);
-        fu_start_ = len_;
-        AppendStartCode(); Append(&nal_hdr, 1); fu_open_ = true;
-      }
-      if (fu_open_) {
-        Append(p + 2, n - 2);
-        if (e) fu_open_ = false;
-      }
-      if (ntype == 5) idr_ = 1;
     }
-    if (h.marker) emitted = Emit(out, true) || emitted;
-    return emitted;
+    if (h.marker) { if (Emit(&out[n_out], true)) n_out++; Reset(cur_ts_); have_ts_ = false; }   // next packet opens a new AU whatever its ts
+    return n_out;
   }
-  const uint8_t* data() const { return buf_.data(); }
-  int size() const { return emitted_len_; }
+  const uint8_t* data(int k) const { return buf_[k]; }
+  int size(int k) const { return emitted_len_[k]; }
+  const Counters& counters() const { return counters_; }
 
  private:
+  void Reset(uint32_t ts) { have_ts_ = true; cur_ts_ = ts; len_ = 0; packets_ = 0; lost_ = 0; lost_frag_ = 0; idr_ = 0; damaged_ = 0; fu_open_ = false; orphan_ = false; }
   bool Emit(AuEvent* out, bool by_marker) {
-    if (len_ == 0) return false;
-    emitted_len_ = len_;
-    out->complete = by_marker && lost_ == 0 && !fu_open_;
-    out->rtp_ts = cur_ts_; out->bytes = len_; out->packets = packets_; out->lost_packets = lost_; out->lost_fragments = lost_frag_ + (fu_open_ ? 1 : 0); out->is_idr = idr_;
-    len_ = 0; packets_ = 0; lost_ = 0; lost_frag_ = 0; idr_ = 0; fu_open_ = false;
+    if (fu_open_) { lost_frag_++; fu_open_ = false; DropOpenFu(); }   // partial NAL: discarded, counted
+    if (len_ == 0 && packets_ == 0 && lost_ == 0) return false;        // nothing happened under this timestamp
+    out->complete = by_marker && lost_ == 0 && lost_frag_ == 0 && !damaged_ && len_ > 0;
+    out->rtp_ts = cur_ts_; out->bytes = len_; out->packets = packets_; out->lost_packets = lost_; out->lost_fragments = lost_frag_;
+    out->is_idr = idr_; out->damaged = damaged_; out->buffer = cur_;
+    emitted_len_[cur_] = len_;
+    cur_ = (cur_ + 1) % kBuffers;   // the emitted buffer stays untouched for the next two emissions
+    len_ = 0;
     return true;
   }
   void AppendStartCode() { static const uint8_t sc[4] = {0, 0, 0, 1}; Append(sc, 4); }
   void AppendNal(const uint8_t* p, int n) { AppendStartCode(); Append(p, n); if ((p[0] & 0x1f) == 5) idr_ = 1; }
-  void Append(const uint8_t* p, int n) { if (len_ + n <= (int)buf_.size()) { std::memcpy(buf_.data() + len_, p, n); len_ += n; } }
+  void Append(const uint8_t* p, int n) { if (len_ + n <= cap_) { std::memcpy(buf_[cur_] + len_, p, n); len_ += n; } else damaged_ = 1; }
   void DropOpenFu() { len_ = fu_start_; }  // discard the partial NAL
 
-  std::vector<uint8_t> buf_;
-  int len_ = 0, emitted_len_ = 0, packets_ = 0, lost_ = 0, lost_frag_ = 0, idr_ = 0, fu_start_ = 0;
+  std::vector<uint8_t> own_[kBuffers];
+  uint8_t* buf_[kBuffers] = {nullptr, nullptr, nullptr};
+  int cap_ = 0, cur_ = 0;
+  int emitted_len_[kBuffers] = {0, 0, 0};
+  int len_ = 0, packets_ = 0, lost_ = 0, lost_frag_ = 0, idr_ = 0, fu_start_ = 0, damaged_ = 0, pending_gap_ = 0;
   uint32_t cur_ts_ = 0; uint16_t last_seq_ = 0;
-  bool have_ts_ = false, have_seq_ = false, fu_open_ = false;
+  bool have_ts_ = false, have_seq_ = false, fu_open_ = false, orphan_ = false;
+  Counters counters_;
 };
 
 }  // namespace p5g
