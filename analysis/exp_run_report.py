@@ -56,10 +56,14 @@ for s in streams:
         missed=sum(1 for r in cap if r['to_encoder']=='0'); idr=sum(1 for r in enc if r['frame_type']=='3')
         enc_kbps=sum(int(r['bytes']) for r in enc)*8/1000/max(1e-9,(int(enc[-1]['encode_done_mono_ns'])-int(enc[0]['encode_done_mono_ns']))/1e9) if len(enc)>1 else 0
         txk={(r['ssrc'],r['seq'],r['rtp_ts']) for r in txr if r['dir']=='out'}; rxk={(r['ssrc'],r['seq'],r['rtp_ts']) for r in rtp if r['dir']=='in'}
-        capw={r['rtp_ts']:int(r['capture_wall_ns']) for r in cap}
+        # frame-level join by rtp_ts is exact only when the wire timestamp equals the sender's (gstreamer tree,
+        # wire_offset_est == 0); the webrtc tree adds a per-SSRC offset and reports its delays via abs-capture-time below
+        same_ts = all(r.get('wire_offset_est','0')=='0' for r in fr[:50])
+        capw={r['rtp_ts']:int(r['capture_wall_ns']) for r in cap} if same_ts else {}
         d=[(int(r['recv_wall_ns'])-capw[r['rtp_ts']])/1e6 for r in fr if r['rtp_ts'] in capw]
         E={r['rtp_ts'] for r in enc}; R={r['rtp_ts'] for r in fr}
-        print(f"   sender ({os.path.relpath(SA,RD)}): captured={len(cap)} missed_slots={missed} encoded={len(enc)} ~{enc_kbps:.0f} kbps idr={idr} | rtp sent={len(txk)} lost={len(txk-rxk)} ({100*len(txk-rxk)/max(1,len(txk)):.2f}%) | encoded frames not delivered={len(E-R)}")
+        und=f"{len(E-R)}" if same_ts else "n/a (rtp_ts offset)"
+        print(f"   sender ({os.path.relpath(SA,RD)}): captured={len(cap)} missed_slots={missed} encoded={len(enc)} ~{enc_kbps:.0f} kbps idr={idr} | rtp sent={len(txk)} lost={len(txk-rxk)} ({100*len(txk-rxk)/max(1,len(txk)):.2f}%) | encoded frames not delivered={und}")
         if d: print(f"   capture->app abs (chrony) ms: med {st.median(d):.0f} p90 {q(d,.9):.0f} p99 {q(d,.99):.0f} max {max(d):.0f}   (per {BIN}s p50: {[f0(st.median([x for x,r in zip(d,[r for r in fr if r['rtp_ts'] in capw]) if int((int(r['recv_mono_ns'])/1e9-T0)//BIN)==i]) if any(int((int(r['recv_mono_ns'])/1e9-T0)//BIN)==i for r in fr if r['rtp_ts'] in capw) else None) for i in range(0,NB)]})")
     print(f"   kbps/{BIN}s: {[round(kb[i]) for i in range(0,NB)]}")
     print(f"   net OWD med/p90 (ms, offset unknown): {[f'{f0(st.median(net[i]))}/{f0(q(net[i],.9))}' for i in range(0,NB) if net.get(i)]}")
