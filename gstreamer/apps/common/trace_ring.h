@@ -168,10 +168,9 @@ class TraceRing {
 }  // namespace p5g
 
 // Per-frame trace rows written by the sender (capture side) and receiver (decoded side).
-// Column meanings: docs/TRACE_SCHEMA.md. Join key between the two files is rtp_ts; the receiver
-// sees rtp_ts + K where K is the per-SSRC random RTP timestamp offset libwebrtc adds on the wire
-// (RFC 3550 §5.1); the receiver logs sender_rtp_ts_est / wire_offset_est live from the abs-capture-time
-// extension so both sides can be matched without post-processing.
+// Column meanings: docs/TRACE_SCHEMA.md. Join key between the two files is rtp_ts; in this tree the
+// wire timestamp equals the sender's (rtph264pay timestamp-offset 0), so both sides log the same value
+// and the sender_rtp_ts_est / wire_offset_est columns (kept for the schema) are rtp_ts / 0.
 
 namespace p5g {
 

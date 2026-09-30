@@ -144,7 +144,7 @@ for c in "${CAMS[@]}"; do
   if [ "$HOST_MODE" = "local" ]; then
     src="$(ls -td results/*-sender-$c 2>/dev/null | head -1)"; [ -n "$src" ] && cp -r "$src/app" "$RD/senders/$c/" && log "collected $c from $src"
   else
-    remote="$(on_host "$c" "cd .. && ls -td results/*-sender-$c 2>/dev/null | head -1" 2>/dev/null | tr -d '\r')"   # results/ is at the repo root, on_host cd's into webrtc/
+    remote="$(on_host "$c" "cd .. && ls -td results/*-sender-$c 2>/dev/null | head -1" 2>/dev/null | tr -d '\r')"   # results/ is at the repo root, on_host cd's into gstreamer/
     if [ -n "$remote" ]; then rsync -aq "$HOST_USER@$(host_of "$c"):~/$(repo_of "$c")/$remote/app/" "$RD/senders/$c/app/" && log "collected $c from $(host_of "$c"):$remote" || log "collect $c FAILED"; fi
   fi
 done
