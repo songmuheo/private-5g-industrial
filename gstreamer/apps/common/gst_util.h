@@ -14,6 +14,7 @@
 #ifndef P5G_APPS_COMMON_GST_UTIL_H
 #define P5G_APPS_COMMON_GST_UTIL_H
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -286,9 +287,10 @@ inline std::string GstProvenance() {
 }
 
 // Bus messages: handled synchronously on the posting thread (gst_bus_set_sync_handler), because the
-// apps run no GLib main loop (the lifecycle loop in app_util.h polls). Errors and EOS raise the
-// shutdown flag; everything is dropped so the bus queue cannot grow.
-inline GstBusSyncReply BusSyncHandler(GstBus*, GstMessage* msg, gpointer) {
+// apps run no GLib main loop (the lifecycle loop in app_util.h polls). Errors raise the shutdown flag;
+// EOS sets *eos_seen (user_data, may be null) so a sender can drain the encoder before going to NULL;
+// everything is dropped so the bus queue cannot grow.
+inline GstBusSyncReply BusSyncHandler(GstBus*, GstMessage* msg, gpointer eos_seen) {
   switch (GST_MESSAGE_TYPE(msg)) {
     case GST_MESSAGE_ERROR: {
       GError* err = nullptr; gchar* dbg = nullptr;
@@ -306,8 +308,8 @@ inline GstBusSyncReply BusSyncHandler(GstBus*, GstMessage* msg, gpointer) {
       break;
     }
     case GST_MESSAGE_EOS:
-      P5G_LOG_INFO << "gst EOS";
-      ShutdownFlag() = 1;
+      if (eos_seen) static_cast<std::atomic<bool>*>(eos_seen)->store(true);
+      else ShutdownFlag() = 1;
       break;
     default: break;
   }

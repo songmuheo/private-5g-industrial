@@ -637,3 +637,7 @@ take the tree as a parameter.
 * Not yet: OTA run of the gstreamer tree (laptops need `make deps` + `make build-apps`, and the preflight should
   compare GStreamer versions), NACK/RTX (deliberately absent), profile changes of width/height/fps at run time
   (refused with a warning; bitrate works), multi-stream receiver process.
+* Fix (same day): tx-frames had one row more than tx-encoded (361 vs 360, 838 vs 837) — the last captured frame
+  was pushed (to_encoder=1) and then the pipeline went to NULL before x264enc emitted it. The sender now sends
+  EOS through appsrc after stopping the grid and waits (<= 2 s) for EOS on the bus before NULL: demo-local
+  re-run results/20260930-155332-demo-local gives captured = encoded = delivered (361/361/361, 181/181/181).

@@ -25,11 +25,13 @@
 //   <stream>-tx-rtcp.csv            every RTCP compound packet out / in
 //   <stream>-tx-stats.jsonl         rtpsession stats every --stats-period-ms (0 = off)
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include <gio/gio.h>
 #include <gst/app/gstappsrc.h>
@@ -113,10 +115,16 @@ class Sender {
     std::fflush(stats_);
   }
 
-  // Ordered teardown: control -> capture thread -> pipeline -> traces (no writer left dangling).
+  // Ordered teardown: control -> capture thread -> drain (EOS through encoder and payloader, so the
+  // last captured frame is encoded and sent: tx-frames == tx-encoded) -> pipeline NULL -> traces.
   void Shutdown() {
     ctl_.Stop();
     if (source_) source_->Stop();
+    if (pipeline_ && started_) {
+      gst_app_src_end_of_stream(GST_APP_SRC(src_));
+      for (int i = 0; i < 200 && !eos_seen_.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));  // <= 2 s
+      if (!eos_seen_.load()) P5G_LOG_WARN << "EOS not seen within 2 s; frames still in the encoder are lost";
+    }
     if (pipeline_) gst_element_set_state(pipeline_, GST_STATE_NULL);
     if (frames_) frames_->Close();
     if (encoded_) encoded_->Close();
@@ -143,6 +151,7 @@ class Sender {
   void BuildPipeline() {
     pipeline_ = gst_pipeline_new("sender");
     GstElement* src = Make("appsrc", "src");
+    src_ = src;
     GstElement* enc = Make("x264enc", "enc");
     GstElement* pay = Make("rtph264pay", "pay");
     pay_ = pay;
@@ -227,7 +236,7 @@ class Sender {
     AddProbe(rtcpsrc, "src", &Sender::OnRtcpIn);
 
     GstBus* bus = gst_element_get_bus(pipeline_);
-    gst_bus_set_sync_handler(bus, &BusSyncHandler, nullptr, nullptr);
+    gst_bus_set_sync_handler(bus, &BusSyncHandler, &eos_seen_, nullptr);
     gst_object_unref(bus);
   }
 
@@ -354,8 +363,10 @@ class Sender {
   std::FILE* stats_ = nullptr;
   GstElement* pipeline_ = nullptr;
   GstElement* rtpbin_ = nullptr;
+  GstElement* src_ = nullptr;
   GstElement* enc_ = nullptr;
   GstElement* pay_ = nullptr;
+  std::atomic<bool> eos_seen_{false};
   GstElement* rtpsink_ = nullptr;
   GstElement* rtcpsink_ = nullptr;
   GSocket* rtcp_socket_ = nullptr;
