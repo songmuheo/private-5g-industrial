@@ -21,9 +21,11 @@ K = the camera id this laptop plays (`cam0` -> K=0). Do these in order, in a ter
 
 ```bash
 # 0. cables: USB to the Pixel (tethering on), Ethernet to the sync switch (ipTIME H6008)
-# 1. code + binaries
+# 1. code + binaries (the gstreamer sender links the distribution's GStreamer dynamically: build it here)
 git clone https://github.com/songmuheo/private-5g-industrial.git && cd private-5g-industrial      # or: git pull
-mkdir -p gstreamer/build/apps && scp songmu@192.168.77.1:private-5g-industrial/gstreamer/build/apps/video_sender build/apps/  # the sender binary (built on the gNB PC)
+make deps                                          # GStreamer 1.20 dev/plugins (+ srsRAN deps; harmless on a laptop)
+make build-apps                                    # -> gstreamer/build/apps/video_sender (runs the RTCP validator test)
+gstreamer/build/apps/video_sender --help           # sanity: prints usage
 # 2. clock-sync LAN + chrony (asks for sudo; must be run here, not over SSH)
 scripts/setup/sync_lan_client.sh K                 # wired port auto-detected -> 192.168.77.1K, chrony -> gNB PC
 # 3. video asset for this camera (415 MB from the gNB PC over the sync LAN)
@@ -36,8 +38,9 @@ ip route show default                              # exactly one line, via the p
 Then, from the gNB PC, once per laptop: `ssh-copy-id songmu@192.168.77.1K` and `ssh songmu@192.168.77.1K true`.
 
 After that a laptop needs nothing per experiment: phone attached, laptop on and awake, cable in. Everything
-else is driven from the gNB PC by run_experiment.sh. If the gNB PC's gstreamer/build/apps/video_sender changes (rebuild),
-repeat step 1's scp. If a laptop changes camera id, repeat steps 2-3 with the new K (and update the scenario).
+else is driven from the gNB PC by run_experiment.sh (its preflight refuses a laptop whose repo HEAD differs from the
+gNB PC's). After a `git pull` on the laptop rebuild with `make build-apps`. If a laptop changes camera id, repeat steps
+2-3 with the new K (and update the scenario).
 
 ## One command: run_experiment.sh
 
