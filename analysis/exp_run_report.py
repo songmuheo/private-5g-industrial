@@ -27,10 +27,10 @@ print("## A. app per stream")
 for s in streams:
     fr=frames[s]; rtp=rows(f'{RD}/app/{s}-rx-rtp.csv')
     t0=int(fr[0]['recv_mono_ns'])/1e9; t1=int(fr[-1]['recv_mono_ns'])/1e9
-    byssrc=collections.defaultdict(set)
+    byssrc=collections.defaultdict(set)   # (seq, rtp_ts): wrap-safe packet key (16-bit seq wraps in a 300 s run)
     for r in rtp:
-        if r['dir']=='in': byssrc[r['ssrc']].add(int(r['seq']))
-    loss=sum((max(v)-min(v)+1-len(v)) for v in byssrc.values() if len(v)>10)
+        if r['dir']=='in': byssrc[r['ssrc']].add((int(r['seq']),r['rtp_ts']))
+    loss=None  # receiver-only view cannot count loss across wraps; the sender line below has the exact number
     # W3C getStats lines exist only in webrtc runs; gstreamer runs carry rtpsession stats instead -> last=None
     last=None; STATS=f'{RD}/app/{s}-rx-stats.jsonl'
     for line in (open(STATS) if os.path.exists(STATS) else []):
@@ -47,7 +47,20 @@ for s in streams:
         cap=int(r['abs_capture_ntp_ms']); lp=int(r['last_pkt_mono_ns']); fp=int(r['first_pkt_mono_ns']); rm=int(r['recv_mono_ns']); rw=int(r['recv_wall_ns'])
         if cap<=0 or lp<=0: continue
         b=int((rm/1e9-T0)//BIN); net[b].append((lp+rw-rm)/1e6-(cap-NTP_UNIX_MS)); span[b].append((lp-fp)/1e6)
-    print(f"{s}: frames={len(fr)} span={t1-t0:.1f}s fps={len(fr)/(t1-t0):.1f} rtp_in={sum(len(v) for v in byssrc.values())} seq_loss={loss} | stats: lost={last.get('packetsLost')} nack={last.get('nackCount')} pli={last.get('pliCount')} freeze={last.get('freezeCount')}/{last.get('totalFreezesDuration')}s jbufDelay_avg={1000*last.get('jitterBufferDelay',0)/max(1,last.get('jitterBufferEmittedCount',1)):.0f}ms keyframes={last.get('keyFramesDecoded')} bytes={(last.get('bytesReceived') or sum(int(r['pkt_bytes']) for r in rtp if r['dir']=='in'))/1e6:.2f}MB")
+    w3c=(f" | webrtc stats: lost={last.get('packetsLost')} nack={last.get('nackCount')} pli={last.get('pliCount')} freeze={last.get('freezeCount')}/{last.get('totalFreezesDuration')}s jbufDelay_avg={1000*last.get('jitterBufferDelay',0)/max(1,last.get('jitterBufferEmittedCount',1)):.0f}ms keyframes={last.get('keyFramesDecoded')}" if last else "")
+    print(f"{s}: frames={len(fr)} span={t1-t0:.1f}s fps={len(fr)/(t1-t0):.1f} rtp_in={sum(len(v) for v in byssrc.values())} bytes={(last.get('bytesReceived') or sum(int(r['pkt_bytes']) for r in rtp if r['dir']=='in'))/1e6:.2f}MB{w3c}")
+    # sender side (collected by run_experiment.sh into senders/<stream>/app, or app/ on a one-PC run)
+    SA=f'{RD}/senders/{s}/app' if os.path.exists(f'{RD}/senders/{s}/app/{s}-tx-frames.csv') else f'{RD}/app'
+    if os.path.exists(f'{SA}/{s}-tx-frames.csv'):
+        cap=rows(f'{SA}/{s}-tx-frames.csv'); enc=rows(f'{SA}/{s}-tx-encoded.csv'); txr=rows(f'{SA}/{s}-tx-rtp.csv')
+        missed=sum(1 for r in cap if r['to_encoder']=='0'); idr=sum(1 for r in enc if r['frame_type']=='3')
+        enc_kbps=sum(int(r['bytes']) for r in enc)*8/1000/max(1e-9,(int(enc[-1]['encode_done_mono_ns'])-int(enc[0]['encode_done_mono_ns']))/1e9) if len(enc)>1 else 0
+        txk={(r['ssrc'],r['seq'],r['rtp_ts']) for r in txr if r['dir']=='out'}; rxk={(r['ssrc'],r['seq'],r['rtp_ts']) for r in rtp if r['dir']=='in'}
+        capw={r['rtp_ts']:int(r['capture_wall_ns']) for r in cap}
+        d=[(int(r['recv_wall_ns'])-capw[r['rtp_ts']])/1e6 for r in fr if r['rtp_ts'] in capw]
+        E={r['rtp_ts'] for r in enc}; R={r['rtp_ts'] for r in fr}
+        print(f"   sender ({os.path.relpath(SA,RD)}): captured={len(cap)} missed_slots={missed} encoded={len(enc)} ~{enc_kbps:.0f} kbps idr={idr} | rtp sent={len(txk)} lost={len(txk-rxk)} ({100*len(txk-rxk)/max(1,len(txk)):.2f}%) | encoded frames not delivered={len(E-R)}")
+        if d: print(f"   capture->app abs (chrony) ms: med {st.median(d):.0f} p90 {q(d,.9):.0f} p99 {q(d,.99):.0f} max {max(d):.0f}   (per {BIN}s p50: {[f0(st.median([x for x,r in zip(d,[r for r in fr if r['rtp_ts'] in capw]) if int((int(r['recv_mono_ns'])/1e9-T0)//BIN)==i]) if any(int((int(r['recv_mono_ns'])/1e9-T0)//BIN)==i for r in fr if r['rtp_ts'] in capw) else None) for i in range(0,NB)]})")
     print(f"   kbps/{BIN}s: {[round(kb[i]) for i in range(0,NB)]}")
     print(f"   net OWD med/p90 (ms, offset unknown): {[f'{f0(st.median(net[i]))}/{f0(q(net[i],.9))}' for i in range(0,NB) if net.get(i)]}")
     print(f"   frame span med/p90/max (ms): {[f'{f0(st.median(span[i]))}/{f0(q(span[i],.9))}/{f0(max(span[i]))}' for i in range(0,NB) if span.get(i)]}")

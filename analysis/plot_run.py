@@ -1,4 +1,4 @@
-# plot_run.py <results/run> [bitrate|fps|delay|all]  — graphs of one run into <run>/graphs/*.png
+# plot_run.py <results/run> [bitrate|fps|delay|latency|all]  — graphs of one run into <run>/graphs/*.png
 #
 #   bitrate  : per UE, the bitrate the encoder is actually told to produce (tx-encoder-rates target_bps =
 #              VideoEncoder::SetRates target_bitrate sum, solid) over GoogCC's estimated bandwidth (tx-cc target_bps =
@@ -18,6 +18,9 @@
 #              app after decode (rx-decoded, dashed). A gap between dotted and solid = encoder/VideoStreamEncoder frame
 #              drops (bitrate-driven with MAINTAIN_RESOLUTION); a gap between solid and dashed = frames lost or not yet
 #              delivered in that second (network). Bins are on the receiver's wall clock (chrony-synced, see delay).
+#   latency  : per camera (own y-scale) the per-frame capture -> app latency with 10 s rolling p50/p90 and the
+#              jitter-buffer+decode share, plus its CDF (log x) with p50/p90/p99 — the figure to read when one camera
+#              queues for seconds and the others do not.
 #   delay    : top = per-packet one-way delay (rx log_wall_ns - tx log_wall_ns, RTP joined by (ssrc, seq),
 #              sequence-wrap aware); bottom = per-frame delay: capture -> last packet arrived (network) and
 #              capture -> delivered to the app (network + jitter buffer + decode). Absolute values are valid
@@ -120,6 +123,65 @@ def plot_delay():
     fig.text(0.01, 0.005, 'clocks: ' + '; '.join(notes), fontsize=7, color=INK2)
     fig.tight_layout(); fig.savefig(f'{OUT}/delay.png'); plt.close(fig); print(f'{OUT}/delay.png')
 
+def frame_delays(cam):
+    """Per delivered frame: (t since T0, capture->last packet ms, capture->app ms), absolute when both clocks
+    are chrony-synced (abs-capture-time for webrtc runs, sender tx-frames join by rtp_ts for gstreamer runs)."""
+    A = f'{RD}/senders/{cam}/app'
+    capw = {r['rtp_ts']: int(r['capture_wall_ns']) for r in rows_opt(f'{A}/{cam}-tx-frames.csv')}
+    out = []
+    for r in rows(f'{RD}/app/{cam}-rx-frames.csv'):
+        cap = int(r['abs_capture_ntp_ms']); lp = int(r['last_pkt_mono_ns']); rm = int(r['recv_mono_ns']); rw = int(r['recv_wall_ns'])
+        if cap > 0: cap_wall_ms = cap - NTP_UNIX_MS
+        elif r['rtp_ts'] in capw: cap_wall_ms = capw[r['rtp_ts']]/1e6
+        else: continue
+        if lp <= 0: continue
+        out.append((tw(rw), (lp + rw - rm)/1e6 - cap_wall_ms, rw/1e6 - cap_wall_ms))
+    return out
+
+def plot_latency():
+    """latency.png: one panel per camera (own y-scale, so a queued camera does not flatten a healthy one) with the
+    per-frame capture->app latency, its 10 s rolling p50/p90, and the jitter-buffer share (app minus last packet);
+    right column: the CDF of capture->app per camera on a log axis with p50/p90/p99 marked. Valid only for
+    chrony-synced runs (absolute one-way values); otherwise the panel says so."""
+    import numpy as np
+    n = len(cams)
+    fig, axes = plt.subplots(n, 2, figsize=(12, 3.1 * n + 0.6), dpi=130, gridspec_kw={'width_ratios': [3, 1.3]}, squeeze=False)
+    for i, cam in enumerate(cams):
+        col = PALETTE.get(cam, INK2); ax, axc = axes[i]
+        d = frame_delays(cam); s = sync_ms(cam)
+        synced = s is not None and s <= 1.0
+        if not d:
+            ax.text(0.5, 0.5, f'{cam}: no frames', transform=ax.transAxes, ha='center'); continue
+        t = np.array([x[0] for x in d]); net = np.array([x[1] for x in d]); app = np.array([x[2] for x in d])
+        if not synced:
+            b = net.min(); net -= b; app -= b
+        ax.plot(t, app, lw=0.6, color=col, alpha=0.35, label='capture → app (per frame)')
+        # 10 s rolling p50 / p90 (window on capture time)
+        order = np.argsort(t); t, app_s, net_s = t[order], app[order], net[order]
+        p50, p90, tt = [], [], []
+        for w0 in np.arange(0, t.max(), 10):
+            m = (t >= w0) & (t < w0 + 10)
+            if m.sum() >= 5: tt.append(w0 + 5); p50.append(np.percentile(app_s[m], 50)); p90.append(np.percentile(app_s[m], 90))
+        ax.plot(tt, p50, lw=2.0, color=col, label='10 s p50')
+        ax.plot(tt, p90, lw=1.4, color=col, ls='--', label='10 s p90')
+        ax.set_ylabel(f'{cam}\ncapture → app (ms{"" if synced else ", relative"})')
+        ax.set_ylim(bottom=0)
+        # scale: healthy cameras stay readable (cap the axis at 1.2 x p99, never below 300 ms)
+        ax.set_ylim(top=max(300, 1.2 * np.percentile(app_s, 99)))
+        ax.legend(fontsize=7, loc='upper right', ncol=3)
+        jb = float(np.median(app_s - net_s))
+        ax.set_title(f'p50 {np.median(app_s):.0f} ms · p90 {np.percentile(app_s, 90):.0f} · p99 {np.percentile(app_s, 99):.0f} · max {app_s.max():.0f} · jitter-buffer+decode median {jb:.1f} ms · n={len(app_s)}',
+                     loc='right', fontsize=7.5, color=INK2)
+        # CDF
+        xs = np.sort(app_s); ys = np.arange(1, len(xs) + 1) / len(xs)
+        axc.plot(xs, ys, lw=1.8, color=col)
+        axc.set_xscale('log'); axc.set_ylim(0, 1); axc.set_ylabel('CDF'); axc.set_xlabel('capture → app (ms, log)')
+        for pct, ls in ((50, ':'), (90, '--'), (99, '-.')):
+            v = np.percentile(xs, pct); axc.axvline(v, color=INK2, lw=0.7, ls=ls); axc.text(v, 0.02 + 0.06 * (pct == 99), f'p{pct}', fontsize=7, color=INK2, rotation=90, va='bottom')
+    axes[-1][0].set_xlabel('time since first received frame (s)')
+    fig.suptitle(f'Frame latency per UE — {run_name}', x=0.01, ha='left', color=INK, fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.97)); fig.savefig(f'{OUT}/latency.png'); plt.close(fig); print(f'{OUT}/latency.png')
+
 def plot_fps():
     fig, ax = plt.subplots(figsize=(11, 4.2), dpi=130)
     def per_sec(ts):
@@ -142,3 +204,4 @@ def plot_fps():
 if WHAT in ('bitrate', 'all'): plot_bitrate()
 if WHAT in ('fps', 'all'): plot_fps()
 if WHAT in ('delay', 'all'): plot_delay()
+if WHAT in ('latency', 'all'): plot_latency()

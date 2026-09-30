@@ -41,14 +41,23 @@ def main(run_dir: str) -> int:
         fail(f"error sidecar {s.relative_to(rd)}: {s.read_text().strip()}")
 
     # --- application traces (sender *-tx-*, receiver *-rx-*; either or both may be present) ------
+    # A sender trace is looked up in app/ (one-PC runs) or in senders/<stream>/app/ (run_experiment.sh collects the
+    # laptops' traces there), so a multi-UE run is verified end to end: footers on both sides and the RTP join.
     app = rd / "app"
-    streams = sorted({p.name[: -len(f"-{side}-frames.csv")] for side in ("tx", "rx") for p in app.glob(f"*-{side}-frames.csv")}) if app.exists() else []
+    def tx_dir(stream: str) -> pathlib.Path:
+        d = rd / "senders" / stream / "app"
+        return d if (d / f"{stream}-tx-frames.csv").exists() else app
+    streams = set()
+    if app.exists():
+        streams |= {p.name[: -len(f"-{side}-frames.csv")] for side in ("tx", "rx") for p in app.glob(f"*-{side}-frames.csv")}
+    streams |= {p.parent.parent.name for p in rd.glob("senders/*/app/*-tx-frames.csv")}
+    streams = sorted(streams)
     if not streams:
-        fail("no <stream>-{tx,rx}-frames.csv under app/")
+        fail("no <stream>-{tx,rx}-frames.csv under app/ or senders/*/app/")
     for s in streams:
-        st: dict = {}
+        st: dict = {"tx_dir": str(tx_dir(s).relative_to(rd))}
         for name in APP_TRACES:
-            f = app / f"{s}-{name}.csv"
+            f = (tx_dir(s) if name.startswith("tx-") else app) / f"{s}-{name}.csv"
             rows, footer = read_trace(f)
             st[name] = {"rows": len(rows), "footer": footer}
             if f.exists() and not rows:
@@ -59,18 +68,20 @@ def main(run_dir: str) -> int:
                 kinds = collections.Counter(r["event"] for r in rows)
                 st[name]["kinds"] = dict(kinds)
                 print(f"       {f.name}: " + ", ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
-        for side in ("tx", "rx"):
-            st[f"{side}-stats.jsonl"] = line_count(app / f"{s}-{side}-stats.jsonl")
-        tx, _ = read_trace(app / f"{s}-tx-rtp.csv")
+        st["tx-stats.jsonl"] = line_count(tx_dir(s) / f"{s}-tx-stats.jsonl")
+        st["rx-stats.jsonl"] = line_count(app / f"{s}-rx-stats.jsonl")
+        tx, _ = read_trace(tx_dir(s) / f"{s}-tx-rtp.csv")
         rx, _ = read_trace(app / f"{s}-rx-rtp.csv")
+        # (ssrc, seq, rtp_ts) as the packet key: the 16-bit sequence number wraps every ~65 k packets (a 300 s
+        # 720p run sends ~100 k), rtp_ts disambiguates the wraps
         sent = collections.defaultdict(set)
         got = collections.defaultdict(set)
         for p in tx:
             if p["dir"] == "out":
-                sent[p["ssrc"]].add(p["seq"])
+                sent[p["ssrc"]].add((p["seq"], p["rtp_ts"]))
         for p in rx:
             if p["dir"] == "in":
-                got[p["ssrc"]].add(p["seq"])
+                got[p["ssrc"]].add((p["seq"], p["rtp_ts"]))
         st["rtp"] = {}
         if tx and rx:
             for ssrc, seqs in sent.items():
@@ -78,7 +89,7 @@ def main(run_dir: str) -> int:
                 st["rtp"][str(ssrc)] = {"sent": len(seqs), "received": len(got.get(ssrc, ())), "lost": lost}
                 print(f"       {s} ssrc={ssrc} sent={len(seqs)} received={len(got.get(ssrc, ()))} lost={lost}")
         print(f"       {s} rows: " + ", ".join(f"{n}={st[n]['rows']}" for n in APP_TRACES if st[n]["rows"])
-              + f"; stats.jsonl tx={st['tx-stats.jsonl']} rx={st['rx-stats.jsonl']}")
+              + f"; stats.jsonl tx={st['tx-stats.jsonl']} rx={st['rx-stats.jsonl']}" + (f"  (tx from {st['tx_dir']})" if st['tx_dir'] != 'app' else ""))
         summary["streams"][s] = st
 
     # --- gNB traces --------------------------------------------------------------------------
