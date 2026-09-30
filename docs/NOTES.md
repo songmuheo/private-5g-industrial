@@ -677,3 +677,40 @@ take the tree as a parameter.
   invalid; compound must start with SR/RR). The 11 crafted cases became 18 (bare 4-byte SR header after a valid SR,
   under-sized SDES/RTPFB, SDES-first, SR with a profile extension: all rejected) and live in
   gstreamer/apps/tests/rtcp_valid_test.cc, run by build_apps.sh. Re-verified: demo-local 20260930-164255-demo-local, run-local 20260930-164321-gst-review5.
+
+## 2026-09-30 — first OTA run of the gstreamer tree, 2 UEs (results/20260930-165543-2ue-gst): the stack works; cam1's link cannot carry 2.5 Mbps
+Scenario gstreamer/experiments/2ue-720p30.json: cam0 (laptop .10, phone 10.45.1.15, rnti 0x4603) and cam1 (laptop .11,
+phone 10.45.1.11, rnti 0x4601), both 1280x720@30 **fixed 2500 kbps** (x264 ABR, GOP 60), Kendo view0/1, 300 s, synchronised
+start. Preflight: chrony RMS 45 / 47 µs, link cam0 PUSCH SNR 20 dB CQI 10, cam1 PUSCH SNR 11.5 dB CQI 14, PHR 27 dB both.
+* **Mechanics all worked**: control handshake (`stream-ack` both), RTCP endpoint learned from the phones' SR, senders started
+  0.6 ms apart, traces collected over the sync LAN, every trace has its footer, 0 `.ERROR`, `verify_run` PASS (after the gNB
+  stop), A2: 100 % of both streams' RTP over the 5G link (n = 100047 / 96488 PDCP rows). 0 missed capture slots on either
+  laptop (`to_encoder=1` for all 8996 / 9000 rows); captured == encoded on both (8996, 9000), encoder output 2501 kbps each,
+  150 IDR each (every 2 s as configured). The fixed profile did exactly what it says: the senders never changed anything.
+* **cam0 (20 dB, MCS 13-19)**: 8996/8996 frames delivered at 30.0 fps, 100044/100044 RTP (0 loss). Capture -> app (absolute,
+  chrony): median 71 ms, p90 693, p99 3695, max 4133 ms. Steady state 63-70 ms median (grant cycle + 50 ms jitter buffer);
+  four excursions to 0.7-4 s at t = 15-45, 135, 175-180, 200-215, 280-290 s (see graphs/delay.png).
+* **cam1 (8-12 dB, MCS 3-9)**: 9000 encoded, 8444 delivered (556 lost, all captured between t = 16 and 61 s), 4902/101381 RTP
+  lost (4.8 %, all in t = 10-60 s) — lost BEFORE RLC AM (which would have recovered them): the phone's own queue overflowed.
+  gNB BSR for this UE: mean ~700 KB, max 2.1-3.1 MB the whole run (= 7-10 s of video). Capture -> app median 4.1 s, p90 9.3 s,
+  max 20.9 s; the queue peaked at t≈38 s (20 s), drained to ~2 s by t=120 s, refilled at every cell event. Delivered 20.8 fps
+  in the first 30 s, 30 fps afterwards (late, not dropped: x264 never skips, the receiver never drops).
+* **RAN**: UL PRB utilisation ~80 % from the moment both senders ran (2 UEs sharing the single UL slot, 4600 grants per
+  10 s); cam1 at MCS 3-9 needs ~3x the PRBs of cam0 for the same 2.5 Mbps. UL CRC failure 10.0 % on both (OLLA at target),
+  HARQ completion p99 22-24 ms, grant->CRC 4.1 ms flat, 0 RLF. At t=200 s both UEs' MCS dropped together (cam1 9 -> 2, cam0
+  19 -> 8, OLLA -10 dB) = a cell-wide event, not a per-UE fade; both queues jumped (cam0 4 s, cam1 +5 s).
+* **Reading (for docs/SCENARIO_EDGE_PROFILES.md)**: this is the "profile exceeds the feasible capacity" case in its pure form.
+  Without a congestion controller the excess does not disappear, it queues in the UE (up to 3 MB) and shows up as seconds of
+  delay and, when the phone's buffer is exhausted, as loss before the RAN. Nothing in the RAN or the sender signals it; only
+  the gNB BSR and the receiver's capture->app delay reveal it. The edge must choose the per-camera profile from the RAN's
+  per-UE cost (cam1 at MCS ~8 ≈ 1/3 of cam0's spectral efficiency): the same 2.5 Mbps is a 30 % cell load for cam0 and an
+  infeasible one for cam1. Comparison point: the webrtc tree on 2026-09-29 (192247) would have cut cam1 to ~0.5-1 Mbps within
+  seconds and kept the delay at tens of ms — at the cost of fps/quality decided by the sender, invisible to the edge.
+* **Artefacts to remove before the next run**: (1) cam1's phone at 11 dB PUSCH SNR vs 20 dB (placement; the 09-29 runs had
+  25-34 dB); (2) cam0's phone downloaded **230 MB over UDP/QUIC from 58.123.x / 1.225.x (KT CDN)** during the run
+  (gnb_pdcp_dl: 216k SDUs, ~6 Mbps DL) — background app traffic on the same bearer; disable background data / updates on the
+  phones; (3) `log.all_level: info` in the gNB profile writes 416 MB of gnb.log per 5 min (3.46 M lines; 1.39 M in the
+  09-29 run too) — srslog's own thread, but disk I/O on the gNB PC; set `warning` (rule 2: extra logs opt-in).
+* Tooling: exp_run_report.py's last W3C-stats dependency (aggregate kbps) replaced by the RTP ledger; plot_run works on the run.
+* Next runs (one variable each): (a) same placement, cam1 at 1000 kbps / cam0 2500 (profile fitted to the link) — expect no
+  queue; (b) move cam1's phone to >= 20 dB and repeat 2 x 2500; (c) 5ue-720p30.json (5 x 1000 kbps) once (a) is clean.

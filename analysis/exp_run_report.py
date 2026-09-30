@@ -168,13 +168,8 @@ for r in ha:
     if -1<=t<=WEND: c[r['ack']]+=1; 
     if -1<=t<=WEND and r['pucch_sinr_db'] not in ('','nan'): ps.append(float(r['pucch_sinr_db']))
 tot=sum(c.values()); print(f"- DL HARQ-ACK on PUCCH (run window): ack={100*c['1']/tot:.1f}% nack={100*c['0']/tot:.1f}% dtx={100*c['2']/tot:.1f}% n={tot}; pucch sinr med={st.median(ps) if ps else '-'}")
-agg=collections.defaultdict(float)
+agg=collections.defaultdict(float)   # aggregate received rate from the RTP ledgers (transport-neutral)
 for s_ in streams:
-    prev=None
-    for line in open(f'{RD}/app/{s_}-rx-stats.jsonl'):
-        j=json.loads(line); t=j['mono_ns']/1e9-T0
-        for x in j['stats']:
-            if x['type']=='inbound-rtp' and x.get('kind')=='video':
-                if prev: agg[int(t//BIN)]+=(x['bytesReceived']-prev)*8/(BIN*1000)
-                prev=x['bytesReceived']
+    for r in rows(f'{RD}/app/{s_}-rx-rtp.csv'):
+        if r['dir']=='in': agg[int((int(r['log_mono_ns'])/1e9-T0)//BIN)]+=int(r['pkt_bytes'])*8/(BIN*1000)
 print(f"- aggregate received kbps per {BIN} s:", [round(agg[i]) for i in range(0,NB)])
