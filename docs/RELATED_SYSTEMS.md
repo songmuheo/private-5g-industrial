@@ -75,3 +75,35 @@ Dataset access checks (done directly, 2026-09-29):
 
 Decision: adopt PhysicalAI-SmartSpaces 2025 warehouses as the multi-view source (fits 300 s runs and 5-25 UEs);
 keep Kendo for smoke tests. Local probe files: scratchpad ds/calib_wh000.json, ds/cam0000.mp4.
+
+## Addendum 2026-09-30: what the fixed-fps/fixed-resolution systems actually send with (code read), and framework options
+
+Read from the local SMEC artifact clone (`~/ran-mec/third_party/artifacts/smec/edge-applications`, commit b66409c):
+* SMEC / ARMA / Tutti `video-od` clients are the same program: FFmpeg `libavformat` remuxes a pre-encoded H.264 file to
+  `rtp://server:port` (`avformat_alloc_output_context2(..., "rtp", ...)`, `h264_mp4toannexb`, `pkt_size 1316`,
+  `max_interleave_delta 0`), sleeping until each packet's PTS (`av_usleep(pts_time - now)`). No encoder in the loop, so
+  fps/resolution/bitrate are those of the file by construction; no congestion control; no pacer (a frame leaves as one
+  burst of RTP packets). A per-frame request header is embedded as an H.264 SEI (`sei_handler.cpp`), and a second RTP
+  packet carries the send timestamp. "Dynamic mode" (`-d`) is an on/off pattern (random 0-4 s pauses), not frame skipping.
+* ARMA's client additionally sends one UDP datagram per frame `{ue_rnti, request_index, frame_size, timestamp_us}` to the
+  RAN (`arma/video-od/client/src/streamer.cpp:315-334`) — the "per-frame notify to the scheduler" path of the paper.
+* Server: 10 RTP ports (19000-19090), 100 ms SLO registered with the edge scheduler, frames dropped on scheduler signal
+  (`ignore_scheduler_drop` flag). The receiver is FFmpeg RTP demux + YOLO.
+* Artic (SIGCOMM'26, arXiv 2602.12641; MLLM video assistant, not RAN): production prototype on the commercial Agora RTC
+  SDK; evaluation on a Razor-based WebRTC-like sender (GCC/BBR) over Mahimahi with real 5G uplink traces; Kvazaar HEVC
+  with per-region QP control; resolution and frame rate fixed, bitrate the only knob; "ReCapABR" overrides the CC's
+  increase when model accuracy is saturated. Only the DeViBench benchmark is announced for release. Relevance: a
+  consumer-side saturation signal that caps bitrate — a profile decided by the model's needs, not the channel.
+
+Framework options for a sender whose fps/resolution/bitrate are set from outside and never change on their own:
+
+| option | what fixes the profile | congestion control | RTP/NAT/SRTP | fits the testbed | verdict |
+|---|---|---|---|---|---|
+| libwebrtc M120 + fixed-rate `NetworkController` (plan A, docs/SCENARIO_EDGE_PROFILES.md §6) | DISABLED degradation + FrameDropper trial + wrapper frame-drop off | replaced by a constant | full WebRTC | all traces reused | first choice for the A/B against GoogCC |
+| FFmpeg libavformat/libavcodec (SMEC/ARMA/Tutti path) | file PTS or `libx264 -tune zerolatency` CBR (`nal-hrd=cbr`, `force-cfr`) | none | plain RTP/UDP, UE-initiated so UPF NAT is fine; no SRTP/ICE | new sender+receiver and new ledgers; smallest code | closest to the published baselines |
+| GStreamer (`x264enc`/`openh264enc`/`v4l2h264enc` → `rtph264pay` → `udpsink`/`rtpbin`) | caps negotiation pins WxH@fps; encoder CBR + VBV; `videorate` | none unless `rtpgccbwe` (gst-plugins-rs) is added | RTP/RTCP; `webrtcbin` gives ICE/DTLS/SRTP **without** BWE by default | analytics stacks (DeepStream, DL Streamer, ASTRA's RTSP cameras) are GStreamer-native; tracing via pad probes | best if the edge side will be a GStreamer analytics pipeline |
+| RTSP camera model (gst-rtsp-server / MediaMTX / live555) | camera config (ONVIF Media2 semantics) | none | RTP over UDP or interleaved TCP | edge must reach the UE (routable UE pool) or push with RTSP RECORD | most realistic for "camera + VMS", extra component |
+| SRT (libsrt, ARMA original) | encoder | none (`maxbw`); latency window with late-packet drop (tlpktdrop) = a built-in deadline | UDP, own ARQ (duplicates RLC AM) | FFmpeg has it | only if the deadline-drop semantics are wanted at transport level |
+| libdatachannel (C++) | app hands encoded frames to `H264RtpPacketizer` | none ("no flow or congestion control", partial REMB) | full ICE/DTLS/SRTP | tiny; encode with OpenH264/x264 ourselves | WebRTC-compatible path without GoogCC and without libwebrtc |
+| aiortc (Python) | app | REMB-driven encoder bitrate (GCC receiver side) | full | Python on the media path | no: a CC is built in and the language costs timing |
+| pion (Go) | app | none unless the `cc` interceptor is added | full | Go runtime on media path | possible, no advantage over libdatachannel here |

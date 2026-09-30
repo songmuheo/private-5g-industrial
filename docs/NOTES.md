@@ -581,3 +581,29 @@ Link: CQI 14-15, PHR 15-23 dB, PUSCH SNR 26-34 dB, 0 RLF, both streams over the 
   breakdown in exp_run_report.py on more runs.
 * Tooling: analysis/exp_sender_report.py <run> reproduces this (tx->rx join is sequence-wrap aware; 300 s runs wrap
   the 16-bit RTP sequence once).
+
+## 2026-09-30 — GStreamer as a fixed-profile sender: local check (no radio), 10 s, 720p30, x264 CBR
+Question (docs/SCENARIO_EDGE_PROFILES.md §6.3 option B): does a GStreamer pipeline keep fps and resolution fixed, and
+can the bitrate be changed while PLAYING without touching either? Pipeline on the gNB PC (GStreamer 1.20.3, x264enc):
+`videotestsrc is-live=true pattern=<ball|snow> num-buffers=300 ! video/x-raw,format=I420,width=1280,height=720,framerate=30/1
+ ! x264enc tune=zerolatency speed-preset=veryfast pass=cbr bitrate=2500 vbv-buf-capacity=33 key-int-max=90 threads=4
+ [option-string=nal-hrd=cbr:force-cfr=1] ! rtph264pay mtu=1200 ! fakesink sync=false`, pad probes on the encoder sink
+(raw frames in) and src (encoded frames out, size, DELTA_UNIT flag), `bitrate` set to 800 at t = 5 s
+(scratchpad script gst_fixed_check.py, not versioned; the pipeline above reproduces it).
+* fps / resolution: 300 raw frames in -> 300 encoded out, 1280x720 for every frame, in all three variants, across the
+  bitrate change. x264 has no frame-skip mode (unlike OpenH264 `bEnableFrameSkip`); the only drop points in a GStreamer
+  pipeline are opt-in: `videorate` (only if the source is off-grid), `qos=true` on sink/encoder (default false),
+  `queue leaky=` / `appsrc leaky-type=` (default none), `udpsink max-lateness` (default -1). None is on by default.
+* bitrate (content-limited unless HRD): `ball` (trivial content) produced 88-133 kbps against a 2500 kbps target — x264 CBR
+  is a ceiling, not a floor. `snow` (noise) produced 2095 kbps -> 648 kbps after the change (≈84 % of target; the 33 ms VBV
+  buffer = one frame makes the RC conservative). With `nal-hrd=cbr` filler NALs make the output exactly 312.5 kB/s =
+  2500 kbps every second (constant size per frame, what a RAN-facing "profile" would like), BUT the bitrate change at
+  t = 5 s was refused: x264 "VBV parameters cannot be changed when NAL HRD is in use" (GST_DEBUG=x264enc:5). So strict CBR
+  with filler and runtime bitrate change are mutually exclusive in x264; a profile switch under HRD-CBR needs an encoder
+  reopen (= IDR), which the RAN must be told about anyway (epoch).
+* GOP determinism: on `snow`, x264 placed 3-4 I-frames per second (scenecut detection on noise), i.e. the encoder chose the
+  keyframe pattern on its own. For a declared profile set `option-string=scenecut=0:min-keyint=N` with `key-int-max=N`.
+* x264enc `bitrate` and `vbv-buf-capacity` are the only rate properties changeable in PLAYING (gst-inspect flags);
+  `pass`, `key-int-max`, `option-string` are not (NULL/READY only).
+* Not measured here: RTP packet counts (rtph264pay emits buffer lists for fragmented frames; the BUFFER probe under-counts),
+  encode latency, CPU. Not a substitute for the OTA invariant check in §6.3.

@@ -23,7 +23,8 @@ video_sender                                        gNB PC                      
 Docs: [docs/SETUP.md](docs/SETUP.md) (per-machine commands, clock sync, synchronised start),
 [docs/RAN_CONFIG.md](docs/RAN_CONFIG.md) (every gNB setting and the measurement behind it),
 [docs/TRACE_SCHEMA.md](docs/TRACE_SCHEMA.md) (every output file and column), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-(design and decisions), [docs/NOTES.md](docs/NOTES.md) (log).
+(design and decisions), [docs/NOTES.md](docs/NOTES.md) (log),
+[docs/SCENARIO_EDGE_PROFILES.md](docs/SCENARIO_EDGE_PROFILES.md) (target scenario: edge-issued camera profiles and profile-aware RAN scheduling).
 
 ## Run
 
