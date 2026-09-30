@@ -8,11 +8,43 @@
 results/<run>/
   run.json          실행 파라미터·버전·측정 창(wall ns)          (run_local_e2e.sh 또는 수동 기록)
   summary.json      analysis/verify_run.py 의 완전성 검사 결과   (행 수·손실 수 요약, 파생값 없음)
-  app/              video_sender(<stream>-tx-*), video_receiver(<stream>-rx-*), signaling.log
+  app/              video_sender(<stream>-tx-*), video_receiver(<stream>-rx-*), control.log (gstreamer) / signaling.log (webrtc)
   gnb/              gNB tracer gnb_*.csv, gnb.log, gnb_stdout.log, gnb_metrics.jsonl [, *.pcap]
   core/             open5gs.log
   ue/               (코드 테스트만) srsUE ue.log, ue_metrics.csv, ue_mac_nr.pcap
 ```
+
+## 0-a. 두 전송 트리와 파일 계약 (2026-09-30)
+
+송신·수신 앱은 두 트리 중 하나에서 나온다. **`gstreamer/`(활성)**: 고정 프로파일(해상도·fps·bitrate를 밖에서 정함),
+GStreamer 1.20 + x264, 순수 RTP, 혼잡 제어 없음. **`webrtc/`(동결)**: libwebrtc M120 + GoogCC. 두 트리는 코드를
+공유하지 않으며, 이 문서의 **파일 이름·컬럼이 둘 사이의 유일한 계약**이다. `analysis/`는 둘 다 읽는다.
+어느 트리가 만든 run인지는 `run.json`의 `transport`(코드 테스트) 또는 `app/*.log`의 `config: transport=` 줄로 안다.
+
+| 파일 | gstreamer | webrtc | 차이 |
+|---|---|---|---|
+| `-tx-frames.csv` | ○ | ○ | `to_encoder`: gstreamer에서는 appsrc push 성공 여부(항상 1이어야 함; 0이면 파이프라인 정지). `rtp_ts`는 전선값 그 자체 |
+| `-tx-encoded.csv` | ○ | ○ | gstreamer: `qp=-1`, `temporal/spatial/simulcast_idx=-1`, `ntp_time_ms=-1`, `codec=4`(H264), `capture_time_ms`=PTS(ms) |
+| `-tx-encoder-rates.csv` | ○ | ○ | gstreamer: 시작 시 1행 + `profile` 메시지마다 1행. `bandwidth_allocation_bps=-1` |
+| `-tx-rtp.csv`, `-rx-rtp.csv` | ○ | ○ | 동일. gstreamer `probe_cluster_id=-1`, `has_ext=0` |
+| `-tx-rtcp.csv`, `-rx-rtcp.csv` | ○ | ○ | 동일(SR/RR/SDES만; NACK/PLI/TWCC 없음) |
+| `-tx-cc.csv`, `-tx-events.csv`, `-rx-events.csv` | × | ○ | GoogCC·RtcEventLog: webrtc 전용 |
+| `-rx-decoded.csv` | ○ | ○ | gstreamer: `render_time_ms=-1`, `decoder_decode_time_ms=-1`, `qp=-1` |
+| `-rx-frames.csv` | ○ | ○ | gstreamer: `abs_capture_ntp_ms=-1`, `sender_rtp_ts_est == rtp_ts`, `wire_offset_est=0`(오프셋이 없으므로), `first/last_pkt_mono_ns`는 udpsrc 출력 시각 |
+| `-tx-stats.jsonl`, `-rx-stats.jsonl` | ○ | ○ | **형식 다름**: gstreamer는 `{"mono_ns","wall_ns","frames…","bitrate_kbps","rtpsession":"<GstStructure 문자열>"}`(rtpbin 내부 세션 stats), webrtc는 W3C getStats 배열 |
+
+**프레임 신원.** gstreamer는 `rtph264pay timestamp-offset=0`이라 전선 `rtp_ts = PTS × 90 kHz`이며, 송신 격자 스레드가 push 전에
+같은 산술(`gst_util_uint64_scale`)로 계산해 `tx-frames`에 적는다. 따라서 `tx-frames.rtp_ts == gnb_pdcp_ul.rtp_ts == rx-frames.rtp_ts`가
+**직접** 성립한다(webrtc의 SSRC별 랜덤 오프셋 K와 `sender_rtp_ts_est` 추정이 필요 없다). 검증: `results/20260930-120754-gst-first`
+837 프레임 전부 세 파일에서 같은 `rtp_ts`로 join(NOTES 2026-09-30).
+
+**기록 지점(gstreamer).** 모두 pad probe(streaming thread, ring에 POD 복사만):
+`tx-frames` = 격자 스레드(appsrc push 직전), `tx-encoded` = `x264enc` src pad(PTS→running time→rtp_ts 변환: 인코더가 출력 PTS에 상수
+오프셋을 더하고 segment도 같이 옮기므로 running time으로 되돌려야 한다), `tx-rtp` = RTP `udpsink` sink pad(buffer list 포함),
+`tx/rx-rtcp` = RTCP udpsink/udpsrc pad, `rx-rtp` = RTP `udpsrc` src pad(커널 소켓 읽기 직후, jitter buffer 이전),
+`rx-decoded.decode_start` = `avdec_h264` sink pad(jitter buffer가 내보낸 AU), `decode_done` = `avdec_h264` src pad,
+`rx-frames` = `fakesink` sink pad. 프레임 부가정보(rtp_ts, 패킷 수, 첫/마지막 패킷 도착)는 depayloader 출력에
+`GstReferenceTimestampMeta`로 붙여 디코더를 통과시킨다(GstVideoDecoder는 태그 없는 meta를 출력 프레임에 복사).
 
 ## 0. 공통 형식
 
@@ -39,7 +71,8 @@ results/<run>/
 
 ## 2. 송신 측 `app/<stream>-tx-*` (video_sender)
 
-전부 libwebrtc(M120 순정) 안의 **공식 확장점**에서 얻는다. libwebrtc 소스 패치는 없다.
+아래 설명은 webrtc 트리 기준으로 쓴 원문이다(컬럼 정의는 두 트리 공통; gstreamer의 값 차이는 §0-a 표).
+webrtc: 전부 libwebrtc(M120 순정) 안의 **공식 확장점**에서 얻는다. libwebrtc 소스 패치는 없다.
 
 ### `-tx-frames.csv` — 캡처 슬롯마다 1행
 출처: 우리 `VideoTrackSource`(`apps/common/video_source.h`, `test/test_video_capturer.cc` 패턴)가 캡처 그리드 시각에
@@ -181,6 +214,8 @@ RtcEventLog에 없으며** 코덱 팩토리 래퍼(`-tx-encoded`, `-rx-decoded`)
 fmtp). 카운터는 누적(W3C §4.1)이라 구간 값은 두 샘플의 차이다.
 
 ## 3. 수신 측 `app/<stream>-rx-*` (video_receiver)
+
+(webrtc 트리 기준 원문. gstreamer의 기록 지점은 §0-a.)
 
 ### 수신 경로와 기록 지점
 

@@ -1,0 +1,428 @@
+// video_sender (gstreamer tree) — fixed-profile RTP/H.264 sender with per-frame / per-packet tracing.
+//
+// Based on: subprojects/gst-plugins-good/tests/examples/rtp/server-alsasrc-PCMA.c @ GStreamer 1.20.3
+//           (rtpbin send session: payloader -> send_rtp_sink_0, send_rtp_src_0 -> udpsink,
+//           send_rtcp_src_0 -> udpsink sync=false async=false, udpsrc -> recv_rtcp_sink_0) and
+//           subprojects/gst-plugins-base/tests/examples/app/appsrc-stream.c (appsrc push mode).
+// Local modifications: video instead of audio (appsrc grid source -> x264enc -> rtph264pay), the
+//           RTCP out/in share one socket (the receiver's RTCP reports come back to the port we send
+//           from), pad probes for the traces, receiver address from the control channel, bitrate
+//           changes by `profile` messages while PLAYING.
+//
+// Profile semantics (docs/SCENARIO_EDGE_PROFILES.md §6): resolution and fps are fixed by construction
+// (appsrc caps + capture grid; x264 never skips frames), the bitrate is the x264 target (its default
+// ABR + VBV rate control: a ceiling the content may stay under, changeable while PLAYING). Nothing in
+// the pipeline adapts to the network: there is no congestion controller, no pacer, no frame dropper.
+//
+// Deployment: on the testbed this runs on the laptop tethered to a Pixel phone (uplink video through
+// the private 5G cell). Locally it runs inside the srsUE network namespace.
+//
+// Traces (all in --trace-dir, same names/columns as the webrtc tree where the concept exists):
+//   <stream>-tx-frames.csv          every capture slot (video_source.h)
+//   <stream>-tx-encoded.csv         every encoded access unit (x264enc src pad)
+//   <stream>-tx-encoder-rates.csv   every bitrate handed to the encoder (start + profile changes)
+//   <stream>-tx-rtp.csv             every RTP packet out (udpsink sink pad)
+//   <stream>-tx-rtcp.csv            every RTCP compound packet out / in
+//   <stream>-tx-stats.jsonl         rtpsession stats every --stats-period-ms (0 = off)
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <mutex>
+#include <string>
+
+#include <gio/gio.h>
+#include <gst/app/gstappsrc.h>
+#include <gst/gst.h>
+
+#include "app_util.h"
+#include "control_client.h"
+#include "gst_util.h"
+#include "trace_ring.h"
+#include "video_source.h"
+
+namespace p5g {
+
+struct SenderConfig {
+  std::string control_host = "127.0.0.1";
+  int control_port = 8765;
+  std::string session = "s1";
+  std::string stream_id = "cam0";
+  std::string receiver_id = "recv0";
+  std::string trace_dir = ".";
+  VideoSourceConfig video;
+  // encoder profile (x264enc). gop 0 = 2 s (2 * fps). vbv_ms = VBV buffer in ms (x264enc default 600).
+  int bitrate_kbps = 2500;
+  int gop_frames = 0;
+  int vbv_ms = 600;
+  std::string preset = "veryfast";  // x264 speed preset; zerolatency tune is always on
+  int threads = 4;
+  // RTP
+  int mtu = 1200;
+  int pt = 96;
+  uint32_t ssrc = 0;  // 0 = random (rtph264pay default)
+  int stats_period_ms = 1000;
+  int duration_s = 0;
+};
+static SenderConfig g_cfg;
+
+std::string TracePrefix() { return g_cfg.trace_dir + "/" + g_cfg.stream_id + "-tx"; }
+
+class Sender {
+ public:
+  Sender() {
+    gst_segment_init(&enc_segment_, GST_FORMAT_TIME);
+    frames_ = std::make_unique<CaptureFrameTrace>(TracePrefix() + "-frames.csv", kCaptureFrameHeader, &FormatCaptureFrameRow, kFrameTraceCapacity);
+    encoded_ = std::make_unique<EncodedFrameTrace>(TracePrefix() + "-encoded.csv", kEncodedFrameHeader, &FormatEncodedFrameRow, kFrameTraceCapacity);
+    rates_ = std::make_unique<EncoderRateTrace>(TracePrefix() + "-encoder-rates.csv", kEncoderRateHeader, &FormatEncoderRateRow, kFrameTraceCapacity);
+    rtp_ = std::make_unique<RtpPacketTrace>(TracePrefix() + "-rtp.csv", kRtpPacketHeader, &FormatRtpPacketRow, kPacketTraceCapacity);
+    rtcp_ = std::make_unique<RtcpPacketTrace>(TracePrefix() + "-rtcp.csv", kRtcpPacketHeader, &FormatRtcpPacketRow, kPacketTraceCapacity / 8);
+    stats_ = g_cfg.stats_period_ms > 0 ? std::fopen((TracePrefix() + "-stats.jsonl").c_str(), "w") : nullptr;
+    BuildPipeline();
+  }
+
+  bool Run() {
+    if (!ctl_.Connect(g_cfg.control_host, g_cfg.control_port)) {
+      P5G_LOG_ERROR << "control connect failed (" << g_cfg.control_host << ":" << g_cfg.control_port << ")";
+      return false;
+    }
+    ctl_.Start([this](const json& m) { OnMessage(m); });
+    return ctl_.Send({{"type", "register"}, {"role", "sender"}, {"session", g_cfg.session}, {"stream", g_cfg.stream_id}, {"to", g_cfg.receiver_id}});
+  }
+
+  // Periodic (main thread): rtpsession stats as one JSON line. Not on a streaming thread.
+  void AppendStats() {
+    if (!stats_ || !started_) return;
+    GObject* session = nullptr;
+    g_signal_emit_by_name(rtpbin_, "get-internal-session", 0, &session);
+    std::string st = "null";
+    if (session) {
+      GstStructure* s = nullptr;
+      g_object_get(session, "stats", &s, nullptr);
+      if (s) {
+        gchar* str = gst_structure_to_string(s);
+        st = json(std::string(str)).dump();  // the structure string, JSON-escaped
+        g_free(str);
+        gst_structure_free(s);
+      }
+      g_object_unref(session);
+    }
+    std::fprintf(stats_, "{\"mono_ns\":%lld,\"wall_ns\":%lld,\"frames_pushed\":%lld,\"bitrate_kbps\":%d,\"rtpsession\":%s}\n",
+                 (long long)NowMonoNs(), (long long)NowWallNs(), (long long)(source_ ? source_->frames_pushed() : 0),
+                 bitrate_kbps_.load(), st.c_str());
+    std::fflush(stats_);
+  }
+
+  // Ordered teardown: control -> capture thread -> pipeline -> traces (no writer left dangling).
+  void Shutdown() {
+    ctl_.Stop();
+    if (source_) source_->Stop();
+    if (pipeline_) gst_element_set_state(pipeline_, GST_STATE_NULL);
+    if (frames_) frames_->Close();
+    if (encoded_) encoded_->Close();
+    if (rates_) rates_->Close();
+    if (rtp_) rtp_->Close();
+    if (rtcp_) rtcp_->Close();
+    if (stats_) std::fclose(stats_);
+    stats_ = nullptr;
+    if (pipeline_) gst_object_unref(pipeline_);
+    pipeline_ = nullptr;
+    if (rtcp_socket_) g_object_unref(rtcp_socket_);
+    rtcp_socket_ = nullptr;
+  }
+
+ private:
+  // gst-launch equivalent (rtpbin wiring as in the upstream example):
+  //   appsrc name=src is-live=true format=time block=true caps=video/x-raw,format=I420,width=W,height=H,framerate=F/1
+  //   ! x264enc name=enc tune=zerolatency speed-preset=P pass=cbr bitrate=B vbv-buf-capacity=V key-int-max=G
+  //             threads=T byte-stream=true option-string=scenecut=0:min-keyint=G
+  //   ! rtph264pay name=pay pt=PT mtu=MTU ssrc=S timestamp-offset=0 seqnum-offset=0 config-interval=-1 aggregate-mode=zero-latency
+  //   ! rtpbin.send_rtp_sink_0   rtpbin.send_rtp_src_0 ! udpsink name=rtpsink sync=false async=false
+  //   rtpbin.send_rtcp_src_0 ! udpsink name=rtcpsink sync=false async=false socket=S
+  //   udpsrc name=rtcpsrc socket=S ! rtpbin.recv_rtcp_sink_0
+  void BuildPipeline() {
+    pipeline_ = gst_pipeline_new("sender");
+    GstElement* src = Make("appsrc", "src");
+    GstElement* enc = Make("x264enc", "enc");
+    GstElement* pay = Make("rtph264pay", "pay");
+    pay_ = pay;
+    rtpbin_ = Make("rtpbin", "rtpbin");
+    rtpsink_ = Make("udpsink", "rtpsink");
+    rtcpsink_ = Make("udpsink", "rtcpsink");
+    GstElement* rtcpsrc = Make("udpsrc", "rtcpsrc");
+    enc_ = enc;
+
+    // appsrc: live, timestamps from us, block the grid thread if the encoder falls behind (visible as
+    // grid gaps in tx-frames.csv instead of silently dropped frames).
+    source_ = std::make_unique<GridVideoSource>(g_cfg.video, GST_APP_SRC(src), frames_.get());
+    GstCaps* caps = source_->MakeCaps();
+    const guint64 frame_bytes = (guint64)g_cfg.video.width * g_cfg.video.height * 3 / 2;
+    g_object_set(src, "is-live", TRUE, "format", GST_FORMAT_TIME, "block", TRUE, "do-timestamp", FALSE,
+                 "max-bytes", 3 * frame_bytes, "caps", caps, nullptr);  // queue at most 3 frames, then block the grid
+    gst_caps_unref(caps);
+
+    // x264enc: zerolatency (bframes 0, rc-lookahead 0, sliced threads, no mb-tree), CBR = ABR + VBV,
+    // deterministic GOP (scenecut off, min = max key interval). Only `bitrate` / `vbv-buf-capacity`
+    // are changeable while PLAYING (gst-inspect flags); the rest is fixed for the run.
+    const int gop = g_cfg.gop_frames > 0 ? g_cfg.gop_frames : 2 * g_cfg.video.fps;
+    gst_util_set_object_arg(G_OBJECT(enc), "tune", "zerolatency");
+    gst_util_set_object_arg(G_OBJECT(enc), "speed-preset", g_cfg.preset.c_str());
+    gst_util_set_object_arg(G_OBJECT(enc), "pass", "cbr");
+    const std::string opts = "scenecut=0:min-keyint=" + std::to_string(gop);
+    g_object_set(enc, "bitrate", (guint)g_cfg.bitrate_kbps, "vbv-buf-capacity", (guint)g_cfg.vbv_ms, "key-int-max", (guint)gop,
+                 "threads", (guint)g_cfg.threads, "byte-stream", TRUE, "option-string", opts.c_str(), nullptr);
+    bitrate_kbps_ = g_cfg.bitrate_kbps;
+    gop_ = gop;
+
+    // rtph264pay: RFC 6184, FU-A above mtu, STAP-A aggregation of an access unit, SPS/PPS with every
+    // IDR, deterministic RTP timestamp/sequence origin (timestamp-offset 0 -> rtp_ts = PTS * 90 kHz).
+    g_object_set(pay, "pt", (guint)g_cfg.pt, "mtu", (guint)g_cfg.mtu, "timestamp-offset", (guint)0, "seqnum-offset", (gint)0,
+                 "config-interval", (gint)-1, nullptr);
+    gst_util_set_object_arg(G_OBJECT(pay), "aggregate-mode", "zero-latency");
+    // The SSRC is chosen here (random unless --ssrc) so the receiver can be told before the first
+    // packet leaves (stream-start precedes PLAYING); rtph264pay would otherwise pick one at start.
+    if (!g_cfg.ssrc) { g_cfg.ssrc = static_cast<uint32_t>(g_random_int()); if (!g_cfg.ssrc) g_cfg.ssrc = 1; }
+    g_object_set(pay, "ssrc", (guint)g_cfg.ssrc, nullptr);
+
+    // RTP out: plain UDP, no clock sync (a frame leaves as soon as it is payloaded = one burst).
+    g_object_set(rtpsink_, "sync", FALSE, "async", FALSE, nullptr);
+    // RTCP out and in on ONE socket, so the receiver's reports (sent to the source port of our SRs)
+    // reach us also through a NAT.
+    GError* err = nullptr;
+    rtcp_socket_ = g_socket_new(G_SOCKET_FAMILY_IPV4, G_SOCKET_TYPE_DATAGRAM, G_SOCKET_PROTOCOL_UDP, &err);
+    if (!rtcp_socket_) P5G_FATAL("rtcp socket: " << err->message);
+    GSocketAddress* any = g_inet_socket_address_new_from_string("0.0.0.0", 0);
+    if (!g_socket_bind(rtcp_socket_, any, TRUE, &err)) P5G_FATAL("rtcp bind: " << err->message);
+    g_object_unref(any);
+    GSocketAddress* local = g_socket_get_local_address(rtcp_socket_, nullptr);
+    rtcp_port_local_ = g_inet_socket_address_get_port(G_INET_SOCKET_ADDRESS(local));
+    g_object_unref(local);
+    g_object_set(rtcpsink_, "sync", FALSE, "async", FALSE, "socket", rtcp_socket_, "close-socket", FALSE, nullptr);
+    g_object_set(rtcpsrc, "socket", rtcp_socket_, "close-socket", FALSE, nullptr);
+
+    gst_bin_add_many(GST_BIN(pipeline_), src, enc, pay, rtpbin_, rtpsink_, rtcpsink_, rtcpsrc, nullptr);
+    if (!gst_element_link_many(src, enc, pay, nullptr)) P5G_FATAL("link appsrc -> x264enc -> rtph264pay failed");
+    LinkRequest(pay, "src", rtpbin_, "send_rtp_sink_0");
+    LinkStatic(rtpbin_, "send_rtp_src_0", rtpsink_, "sink");
+    LinkRequestSrc(rtpbin_, "send_rtcp_src_0", rtcpsink_, "sink");
+    LinkRequest(rtcpsrc, "src", rtpbin_, "recv_rtcp_sink_0");
+
+    // Probes (streaming threads: POD copy into a ring, nothing else).
+    // x264enc shifts its output PTS by a constant (gst_video_encoder_set_min_pts, so DTS never goes
+    // negative) and shifts the segment by the same amount: the running time is unchanged and that is
+    // what rtph264pay stamps. Track the encoder's output segment to map PTS -> running time -> rtp_ts.
+    {
+      GstPad* pad = gst_element_get_static_pad(enc, "src");
+      gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+                        [](GstPad*, GstPadProbeInfo* info, gpointer ud) -> GstPadProbeReturn {
+                          GstEvent* ev = GST_PAD_PROBE_INFO_EVENT(info);
+                          if (GST_EVENT_TYPE(ev) == GST_EVENT_SEGMENT) gst_event_copy_segment(ev, &static_cast<Sender*>(ud)->enc_segment_);
+                          return GST_PAD_PROBE_OK;
+                        }, this, nullptr);
+      gst_object_unref(pad);
+    }
+    AddProbe(enc, "src", &Sender::OnEncoded);
+    AddProbe(rtpsink_, "sink", &Sender::OnRtpOut);
+    AddProbe(rtcpsink_, "sink", &Sender::OnRtcpOut);
+    AddProbe(rtcpsrc, "src", &Sender::OnRtcpIn);
+
+    GstBus* bus = gst_element_get_bus(pipeline_);
+    gst_bus_set_sync_handler(bus, &BusSyncHandler, nullptr, nullptr);
+    gst_object_unref(bus);
+  }
+
+  static GstElement* Make(const char* factory, const char* name) {
+    GstElement* e = gst_element_factory_make(factory, name);
+    if (!e) P5G_FATAL("element '" << factory << "' not available (install the GStreamer plugin; see gstreamer/README.md)");
+    return e;
+  }
+  static void LinkRequest(GstElement* from, const char* src, GstElement* rtpbin, const char* req) {
+    GstPad* s = gst_element_request_pad_simple(rtpbin, req);
+    GstPad* p = gst_element_get_static_pad(from, src);
+    if (!s || !p || gst_pad_link(p, s) != GST_PAD_LINK_OK) P5G_FATAL("link " << src << " -> " << req << " failed");
+    gst_object_unref(p);
+  }
+  // request src pad (rtpbin.send_rtcp_src_N) -> static sink pad
+  static void LinkRequestSrc(GstElement* rtpbin, const char* req, GstElement* to, const char* sink) {
+    GstPad* p = gst_element_request_pad_simple(rtpbin, req);
+    GstPad* s = gst_element_get_static_pad(to, sink);
+    if (!p || !s || gst_pad_link(p, s) != GST_PAD_LINK_OK) P5G_FATAL("link " << req << " -> " << sink << " failed");
+    gst_object_unref(s);
+  }
+  static void LinkStatic(GstElement* from, const char* src, GstElement* to, const char* sink) {
+    GstPad* p = gst_element_get_static_pad(from, src);
+    GstPad* s = gst_element_get_static_pad(to, sink);
+    if (!p || !s || gst_pad_link(p, s) != GST_PAD_LINK_OK) P5G_FATAL("link " << src << " -> " << sink << " failed");
+    gst_object_unref(p);
+    gst_object_unref(s);
+  }
+  using ProbeFn = void (Sender::*)(GstPad*, GstPadProbeInfo*);
+  struct ProbeCtx { Sender* self; ProbeFn fn; };
+  void AddProbe(GstElement* e, const char* pad_name, ProbeFn fn) {
+    GstPad* pad = gst_element_get_static_pad(e, pad_name);
+    auto* ctx = new ProbeCtx{this, fn};  // lives as long as the process
+    gst_pad_add_probe(pad, kBufferProbes,
+                      [](GstPad* p, GstPadProbeInfo* info, gpointer ud) -> GstPadProbeReturn {
+                        auto* c = static_cast<ProbeCtx*>(ud);
+                        (c->self->*(c->fn))(p, info);
+                        return GST_PAD_PROBE_OK;
+                      },
+                      ctx, nullptr);
+    gst_object_unref(pad);
+  }
+
+  void OnEncoded(GstPad* pad, GstPadProbeInfo* info) {
+    ForEachProbeBuffer(info, [&](GstBuffer* b) {
+      EncodedFrameRow r{};
+      const GstClockTime pts = GST_CLOCK_TIME_IS_VALID(GST_BUFFER_PTS(b))
+                                   ? gst_segment_to_running_time(&enc_segment_, GST_FORMAT_TIME, GST_BUFFER_PTS(b))
+                                   : GST_CLOCK_TIME_NONE;  // running time == the grid PTS the source stamped
+      r.rtp_ts = GST_CLOCK_TIME_IS_VALID(pts) ? RtpTsFromRunningTime(pts) : 0;
+      r.encode_done_mono_ns = NowMonoNs();
+      r.encode_done_wall_ns = NowWallNs();
+      r.bytes = static_cast<int32_t>(gst_buffer_get_size(b));
+      r.width = enc_w_; r.height = enc_h_;
+      if (!r.width) { PadResolution(pad, &enc_w_, &enc_h_); r.width = enc_w_; r.height = enc_h_; }  // first frame only (caps query)
+      const bool key = !GST_BUFFER_FLAG_IS_SET(b, GST_BUFFER_FLAG_DELTA_UNIT);
+      r.frame_type = key ? 3 : 4;
+      r.qp = -1; r.temporal_idx = -1; r.spatial_idx = -1; r.simulcast_idx = -1;
+      r.capture_time_ms = GST_CLOCK_TIME_IS_VALID(pts) ? static_cast<int64_t>(pts / GST_MSECOND) : -1;
+      r.ntp_time_ms = -1;
+      r.codec = 4;
+      r.is_idr = key ? 1 : 0;
+      encoded_->Write(r);
+    });
+  }
+  void OnRtpOut(GstPad*, GstPadProbeInfo* info) {
+    ForEachProbeBuffer(info, [&](GstBuffer* b) { RtpPacketRow r; if (FillRtpRow(b, 0, &r)) rtp_->Write(r); });
+  }
+  void OnRtcpOut(GstPad*, GstPadProbeInfo* info) {
+    ForEachProbeBuffer(info, [&](GstBuffer* b) { RtcpPacketRow r; FillRtcpRow(b, 0, &r); rtcp_->Write(r); });
+  }
+  void OnRtcpIn(GstPad*, GstPadProbeInfo* info) {
+    ForEachProbeBuffer(info, [&](GstBuffer* b) { RtcpPacketRow r; FillRtcpRow(b, 1, &r); rtcp_->Write(r); });
+  }
+
+  // Control channel (its own thread). GObject property sets are thread-safe.
+  void OnMessage(const json& m) {
+    const std::string type = m.value("type", "");
+    if (type == "receiver-ready") {
+      if (m.value("receiver", "") != g_cfg.receiver_id) return;
+      std::lock_guard<std::mutex> lk(mu_);
+      if (started_) return;
+      const std::string host = m.value("host", g_cfg.control_host);  // receiver on the control host unless it says otherwise
+      const int rtp_port = m.at("rtp_port").get<int>();
+      const int rtcp_port = m.at("rtcp_port").get<int>();
+      g_object_set(rtpsink_, "host", host.c_str(), "port", rtp_port, nullptr);
+      g_object_set(rtcpsink_, "host", host.c_str(), "port", rtcp_port, nullptr);
+      // Tell the receiver what is coming BEFORE the first packet leaves (it opens its traces on this).
+      ctl_.Send({{"type", "stream-start"}, {"to", g_cfg.receiver_id}, {"stream", g_cfg.stream_id}, {"ssrc", g_cfg.ssrc}, {"pt", g_cfg.pt},
+                 {"clock_rate", kVideoClockRate}, {"rtcp_port_local", rtcp_port_local_}, {"width", g_cfg.video.width},
+                 {"height", g_cfg.video.height}, {"fps", g_cfg.video.fps}, {"bitrate_kbps", bitrate_kbps_.load()}, {"gop", gop_}});
+      if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) P5G_FATAL("pipeline PLAYING failed");
+      // Running time 0 of the pipeline = its base time on the (monotonic) system clock; the grid's PTS
+      // are relative to it, so rtp_ts = PTS * 90 kHz is what rtph264pay puts on the wire.
+      const int64_t base = static_cast<int64_t>(gst_element_get_base_time(pipeline_));
+      rates_->Write(EncoderRateRow{NowMonoNs(), NowWallNs(), (int64_t)bitrate_kbps_ * 1000, (int64_t)bitrate_kbps_ * 1000, -1, (double)g_cfg.video.fps, 1});
+      source_->Start(base);
+      started_ = true;
+      P5G_LOG_INFO << "streaming " << g_cfg.stream_id << " -> " << host << ":" << rtp_port << " (rtcp " << rtcp_port
+                   << ", ours " << rtcp_port_local_ << ") ssrc=" << g_cfg.ssrc << " base_mono_ns=" << base;
+    } else if (type == "profile") {
+      // Edge-issued profile change (docs/SCENARIO_EDGE_PROFILES.md §6.2). Bitrate is the only knob that
+      // applies without an encoder reopen; width/height/fps changes are refused here on purpose (they
+      // need caps renegotiation + IDR = a new epoch, to be added with the RAN-side epoch signalling).
+      if (m.value("stream", g_cfg.stream_id) != g_cfg.stream_id) return;
+      if (m.contains("bitrate_kbps")) {
+        const int kbps = m.at("bitrate_kbps").get<int>();
+        if (kbps <= 0) { P5G_LOG_WARN << "profile: bad bitrate_kbps " << kbps; return; }
+        g_object_set(enc_, "bitrate", (guint)kbps, nullptr);
+        bitrate_kbps_ = kbps;
+        rates_->Write(EncoderRateRow{NowMonoNs(), NowWallNs(), (int64_t)kbps * 1000, (int64_t)kbps * 1000, -1, (double)g_cfg.video.fps, 1});
+        P5G_LOG_INFO << "profile: bitrate -> " << kbps << " kbps";
+      }
+      for (const char* k : {"width", "height", "fps"})
+        if (m.contains(k)) P5G_LOG_WARN << "profile: '" << k << "' change not supported at run time (fixed profile); ignored";
+    }
+  }
+
+  std::unique_ptr<CaptureFrameTrace> frames_;
+  std::unique_ptr<EncodedFrameTrace> encoded_;
+  std::unique_ptr<EncoderRateTrace> rates_;
+  std::unique_ptr<RtpPacketTrace> rtp_;
+  std::unique_ptr<RtcpPacketTrace> rtcp_;
+  std::FILE* stats_ = nullptr;
+  GstElement* pipeline_ = nullptr;
+  GstElement* rtpbin_ = nullptr;
+  GstElement* enc_ = nullptr;
+  GstElement* pay_ = nullptr;
+  GstElement* rtpsink_ = nullptr;
+  GstElement* rtcpsink_ = nullptr;
+  GSocket* rtcp_socket_ = nullptr;
+  int rtcp_port_local_ = 0;
+  int gop_ = 0;
+  int32_t enc_w_ = 0, enc_h_ = 0;
+  GstSegment enc_segment_{};  // encoder output segment (encoder streaming thread only)
+  std::atomic<int> bitrate_kbps_{0};
+  std::unique_ptr<GridVideoSource> source_;
+  ControlClient ctl_;
+  std::mutex mu_;  // control-thread state (never taken on a streaming thread)
+  std::atomic<bool> started_{false};
+};
+
+}  // namespace p5g
+
+static void Usage() {
+  std::fprintf(stderr,
+               "video_sender --control-host H --control-port P --session S --stream-id ID --to RECV_ID\n"
+               "             --trace-dir DIR [--yuv FILE | (pattern)] --width W --height H --fps F\n"
+               "             [--bitrate-kbps 2500] [--gop FRAMES(=2*fps)] [--vbv-ms 600] [--preset veryfast] [--threads 4]\n"
+               "             [--mtu 1200] [--pt 96] [--ssrc N] [--stats-period-ms 1000] [--duration S]\n");
+}
+
+int main(int argc, char** argv) {
+  p5g::CliArgs a(argc, argv, {"help", "control-host", "control-port", "session", "stream-id", "to", "trace-dir", "yuv", "width",
+                              "height", "fps", "bitrate-kbps", "gop", "vbv-ms", "preset", "threads", "mtu", "pt", "ssrc",
+                              "stats-period-ms", "duration"});
+  if (a.Has("help")) { Usage(); return 0; }
+  auto& c = p5g::g_cfg;
+  c.control_host = a.Get("control-host", c.control_host);
+  c.control_port = a.GetInt("control-port", c.control_port);
+  c.session = a.Get("session", c.session);
+  c.stream_id = a.Get("stream-id", c.stream_id);
+  c.receiver_id = a.Get("to", c.receiver_id);
+  c.trace_dir = a.Get("trace-dir", c.trace_dir);
+  c.video.yuv_path = a.Get("yuv", "");
+  c.video.width = a.GetInt("width", c.video.width);
+  c.video.height = a.GetInt("height", c.video.height);
+  c.video.fps = a.GetInt("fps", c.video.fps);
+  c.bitrate_kbps = a.GetInt("bitrate-kbps", c.bitrate_kbps);
+  c.gop_frames = a.GetInt("gop", 0);
+  c.vbv_ms = a.GetInt("vbv-ms", c.vbv_ms);
+  c.preset = a.Get("preset", c.preset);
+  c.threads = a.GetInt("threads", c.threads);
+  c.mtu = a.GetInt("mtu", c.mtu);
+  c.pt = a.GetInt("pt", c.pt);
+  c.ssrc = static_cast<uint32_t>(std::strtoul(a.Get("ssrc", "0").c_str(), nullptr, 10));
+  c.stats_period_ms = a.GetInt("stats-period-ms", c.stats_period_ms);
+  c.duration_s = a.GetInt("duration", 0);
+  if (c.bitrate_kbps <= 0 || c.video.fps <= 0 || c.video.width <= 0 || c.video.height <= 0) P5G_FATAL("bad profile (width/height/fps/bitrate)");
+
+  gst_init(nullptr, nullptr);
+  // One provenance line per run: the flags that shape the stream and the library versions.
+  P5G_LOG_INFO << "config: transport=gstreamer stream_id=" << c.stream_id << " to=" << c.receiver_id << " session=" << c.session
+               << " control=" << c.control_host << ":" << c.control_port << " codec=H264 " << c.video.width << "x" << c.video.height
+               << "@" << c.video.fps << " source=" << (c.video.yuv_path.empty() ? "pattern" : c.video.yuv_path)
+               << " bitrate_kbps=" << c.bitrate_kbps << " gop=" << (c.gop_frames > 0 ? c.gop_frames : 2 * c.video.fps)
+               << " vbv_ms=" << c.vbv_ms << " preset=" << c.preset << " threads=" << c.threads << " mtu=" << c.mtu << " pt=" << c.pt
+               << " stats_period_ms=" << c.stats_period_ms << " " << p5g::GstProvenance();
+
+  p5g::InstallSignalHandlers();
+  {
+    p5g::Sender sender;
+    if (!sender.Run()) return 1;
+    p5g::RunUntilShutdown(c.duration_s, [&] { sender.AppendStats(); }, c.stats_period_ms);
+    sender.Shutdown();
+  }
+  return 0;
+}

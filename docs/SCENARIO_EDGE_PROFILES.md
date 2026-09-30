@@ -212,11 +212,17 @@ epoch에 맞춰 RAN에 미리 알려야 하는 이유다.
 | 구현 비용 | 0 | 작음. 제어기 1개와 플래그 3~4개 | 큼. 새 송신기·수신기와 추적 |
 | 프로젝트 규칙 | — | 규칙 4(기본 OFF 플래그)로 수용 가능 | 규칙 5(대체 스택 금지)와 충돌. ARCHITECTURE에 근거를 남겨야 함 |
 
-**결론.** "프로파일을 고정해야 하므로 libwebrtc는 안 된다"는 것은 GoogCC와 인코더의 자율 drop에 대해서는 맞다.
+**결론(2026-09-29 초안).** "프로파일을 고정해야 하므로 libwebrtc는 안 된다"는 것은 GoogCC와 인코더의 자율 drop에 대해서는 맞다.
 하지만 libwebrtc 전체에 대해서는 과하다. A로 가되 아래 **불변식**을 합격 기준으로 삼는다.
 불변식이 깨지는데 원인을 공식 확장점으로 제거할 수 없거나, 연구 질문이 "실제 카메라의 burst 거동"으로 옮겨가면
 B로 전환한다(SMEC/ARMA/Tutti 계열이 FFmpeg/GStreamer/RTP를 쓰는 것과 같은 선택). B의 후보 framework 비교는
 docs/RELATED_SYSTEMS.md의 2026-09-30 addendum에 있다.
+
+**결정(2026-09-30): B, GStreamer.** §6.1의 8·8b(bitrate adjuster 기본 ON, pacer 비상정지)까지 더해지자 A는 여섯 지점을
+버전마다 다시 감사해야 하는 구조가 되었고, 사용자는 "기본 x264 ABR + 고정 fps/해상도"를 원했다. libwebrtc 스택은
+`webrtc/`로 동결(tag `webrtc-baseline-2026-09-30`), 활성 트리는 `gstreamer/`(코드 공유 없음, 파일 계약만). 구현·검증 내용은
+`gstreamer/README.md`, `docs/ARCHITECTURE.md`(결정 표), `docs/TRACE_SCHEMA.md` §0-a, NOTES 2026-09-30. 불변식 1~4는 그대로
+GStreamer 트리의 합격 기준이며, 첫 loopback·srsUE run에서 모두 성립했다(캡처=인코드=전달, 720p 상수, rate 상수, rtp_ts 직접 join).
 
 A의 불변식(모두 기존 trace로 판정 가능):
 1. `tx-frames.to_encoder` = 1인 행 수 = 캡처 슬롯 수, 그리고 `tx-encoded` 행 수 = 캡처 수(drop 0).

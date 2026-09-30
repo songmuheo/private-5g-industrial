@@ -9,7 +9,7 @@ TREE ?= gstreamer
 
 help:
 	@echo "private-5g-industrial"
-	@echo "  make deps             apt packages for building srsRAN natively (Ubuntu 22.04)"
+	@echo "  make deps             apt packages: srsRAN build deps + GStreamer 1.20 dev/plugins (Ubuntu 22.04)"
 	@echo "  make submodules       fetch third_party/srsRAN_Project (shallow, pinned)"
 	@echo "  make build-gnb        srsRAN gNB + tracer patches   -> build/srsran_gnb/apps/gnb/gnb"
 	@echo "  make build-apps       [TREE=gstreamer|webrtc] sender / receiver of the transport tree -> <tree>/build/apps/"
@@ -31,7 +31,9 @@ deps:
 	    libfftw3-dev libmbedtls-dev libsctp-dev libyaml-cpp-dev libgtest-dev libzmq3-dev libdw-dev \
 	    libboost-program-options-dev libfmt-dev \
 	    libx11-dev libxext-dev libxdamage-dev libxfixes-dev libxcomposite-dev libxrandr-dev libxtst-dev \
-	    python3-venv docker-compose-plugin
+	    python3-venv docker-compose-plugin \
+	    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-tools gstreamer1.0-plugins-base \
+	    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
 
 submodules:
 	git submodule update --init --depth 1

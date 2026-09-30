@@ -1,5 +1,11 @@
 # Setup and run — three roles, one repository
 
+> **Transport trees (2026-09-30).** Commands below use the active tree `gstreamer/` (fixed-profile sender:
+> `--bitrate-kbps`, `--gop`; no `--degradation`/`--start-bitrate-kbps`). The frozen `webrtc/` tree has the same
+> scripts under `webrtc/` (`webrtc/run_sender.sh 10.53.1.1 ...`, `make webrtc-build-apps`, `make run-local TREE=webrtc`);
+> the sections on start bitrate, degradation and ICE apply to that tree only. Both trees share `results/`,
+> `video/assets`, the sync LAN and `analysis/`.
+
 ```
 UE laptop ── USB ── Pixel ~~5G NR n78~~ USRP B210 ── gNB PC (srsRAN gNB + tracer, Open5GS) ── internet ── receiver host
 video_sender                                          results/<run>/gnb/                                video_receiver + signaling relay
@@ -17,7 +23,7 @@ K = the camera id this laptop plays (`cam0` -> K=0). Do these in order, in a ter
 # 0. cables: USB to the Pixel (tethering on), Ethernet to the sync switch (ipTIME H6008)
 # 1. code + binaries
 git clone https://github.com/songmuheo/private-5g-industrial.git && cd private-5g-industrial      # or: git pull
-mkdir -p build/apps && scp songmu@192.168.77.1:private-5g-industrial/build/apps/video_sender build/apps/  # the sender binary (built on the gNB PC)
+mkdir -p gstreamer/build/apps && scp songmu@192.168.77.1:private-5g-industrial/gstreamer/build/apps/video_sender build/apps/  # the sender binary (built on the gNB PC)
 # 2. clock-sync LAN + chrony (asks for sudo; must be run here, not over SSH)
 scripts/setup/sync_lan_client.sh K                 # wired port auto-detected -> 192.168.77.1K, chrony -> gNB PC
 # 3. video asset for this camera (415 MB from the gNB PC over the sync LAN)
@@ -30,14 +36,14 @@ ip route show default                              # exactly one line, via the p
 Then, from the gNB PC, once per laptop: `ssh-copy-id songmu@192.168.77.1K` and `ssh songmu@192.168.77.1K true`.
 
 After that a laptop needs nothing per experiment: phone attached, laptop on and awake, cable in. Everything
-else is driven from the gNB PC by run_experiment.sh. If the gNB PC's build/apps/video_sender changes (rebuild),
+else is driven from the gNB PC by run_experiment.sh. If the gNB PC's gstreamer/build/apps/video_sender changes (rebuild),
 repeat step 1's scp. If a laptop changes camera id, repeat steps 2-3 with the new K (and update the scenario).
 
 ## One command: run_experiment.sh
 
 ```bash
 ./run_gnb_core.sh 5ue                              # terminal 1 (stays in the foreground)
-./run_experiment.sh experiments/5ue-720p30.json    # terminal 2: everything else
+./gstreamer/run_experiment.sh gstreamer/experiments/5ue-720p30.json    # terminal 2: everything else
 ```
 
 The scenario JSON holds per-camera width / height / fps / start_kbps / max_kbps / source, the hosts
@@ -46,15 +52,15 @@ The scenario JSON holds per-camera width / height / fps / start_kbps / max_kbps 
 receivers, checks each laptop (repo HEAD, asset, chrony offset), launches every sender with `--start-at T`
 (T = now + start_delay_s), pulls the sender traces into `<run>/senders/camK/app`, stops the receivers and runs
 verify + report. Requirements: SSH keys to the laptops (`ssh-copy-id songmu@192.168.77.1K`), laptops pulled and
-with their asset (`video/fetch_asset.sh --cam K`). `experiments/demo-local.json` runs the whole flow on one PC
+with their asset (`video/fetch_asset.sh --cam K`). `gstreamer/experiments/demo-local.json` runs the whole flow on one PC
 over loopback (no RAN) as a smoke test.
 
 ## Manual path: three scripts, one per terminal / machine
 
 ```bash
 ./run_gnb_core.sh [label]       # gNB PC, terminal 1: core + gNB (foreground) + JSON metrics -> results/<ts>-<label>/{gnb,core}
-./run_receiver.sh [-n N]        # gNB PC (or internet host), terminal 2: relay :8765 + N video_receivers (recv0..) -> same run's app/ (via results/CURRENT)
-./run_sender.sh 10.53.1.1       # UE laptop, after the phone attached: video_sender (Kendo view K for camK, 720p30, 300 s) -> results/<ts>-sender-<stream>/app
+./gstreamer/run_receiver.sh [-n N]        # gNB PC (or internet host), terminal 2: relay :8765 + N video_receivers (recv0..) -> same run's app/ (via results/CURRENT)
+./gstreamer/run_sender.sh 10.53.1.1       # UE laptop, after the phone attached: video_sender (Kendo view K for camK, 720p30, 300 s) -> results/<ts>-sender-<stream>/app
 ```
 
 Each script owns its run directory, so nothing depends on shell variables shared between terminals
@@ -68,7 +74,7 @@ the core down. `make ota` / `make ota-stop` remain as the all-in-one background 
 One relay, one `video_receiver` **per UE**, one stream id per UE. One script starts all of them:
 
 ```bash
-./run_receiver.sh -n 3          # relay + recv0, recv1, recv2 in one terminal; Ctrl-C stops all (traces flush first)
+./gstreamer/run_receiver.sh -n 3          # relay + recv0, recv1, recv2 in one terminal; Ctrl-C stops all (traces flush first)
 ```
 
 Their output is shown live (tail of `app/receiver-recvK.log`). Extra flags after `-n N` go to every
@@ -77,7 +83,7 @@ receiver. (Separate terminals with `--receiver-id recvK` still work; the relay i
 On each UE laptop, point the sender at its own receiver and give the stream a distinct name:
 
 ```bash
-./run_sender.sh 10.53.1.1 --to recv1 --stream-id cam1      # -> results/<ts>-sender-cam1/app (cam1-tx-*, sender-cam1.log)
+./gstreamer/run_sender.sh 10.53.1.1 --to recv1 --stream-id cam1      # -> results/<ts>-sender-cam1/app (cam1-tx-*, sender-cam1.log)
 ```
 
 A second sender reusing a stream id is refused by the receiver ("duplicate offer for stream ... ignored")
@@ -125,8 +131,8 @@ received UL powers stay within ~15 dB of each other (near-far).
 
 ```bash
 sudo apt install -y libx11-6 libxext6 libxdamage1 libxfixes3 libxcomposite1 libxrandr2 libxtst6 python3
-python3 apps/signaling/signaling_server.py --host 0.0.0.0 --port 8765 &          # open TCP 8765 inbound
-build/apps/video_receiver --signaling-host 127.0.0.1 --signaling-port 8765 --session s1 \
+python3 gstreamer/apps/control/control_server.py --host 0.0.0.0 --port 8765 &          # open TCP 8765 inbound
+gstreamer/build/apps/video_receiver --control-host 127.0.0.1 --control-port 8765 --session s1 \
     --receiver-id recv0 --trace-dir $RD/app [--ice-servers stun:<stun-host>:3478]
 ```
 
@@ -147,7 +153,7 @@ video/fetch_asset.sh fade_walk_1280x720_30fps_300s_i420.yuv   # optional: 300 s 
 video/fetch_asset.sh --list                               # what the gNB PC has; P5G_ASSET_HOST=user@host to change the source
 video/prepare_test_sequence.sh crowd_run 1280 720        # alternative: download + convert a xiph test sequence (1.5 GB)
 video/prepare_test_sequence.sh --from file.y4m NAME 1280 720   # alternative: convert a local y4m
-build/apps/video_sender --signaling-host <receiver-public-ip> --signaling-port 8765 --session s1 \
+gstreamer/build/apps/video_sender --control-host <receiver-public-ip> --control-port 8765 --session s1 \
     --stream-id cam0 --to recv0 --trace-dir $RD/app \
     --yuv video/assets/crowd_run_1280x720_30fps_i420.yuv --width 1280 --height 720 --fps 30 \
     --codec H264 [--ice-servers stun:<stun-host>:3478] [--duration 90]
@@ -223,14 +229,14 @@ The laptops' default route must stay on the phone tether (the sync connection is
 Synchronised start: type the same absolute time on every laptop, a minute ahead:
 
 ```bash
-./run_sender.sh 10.53.1.1 --to recv0 --stream-id cam0 --start-at 18:30:00     # laptop 1
-./run_sender.sh 10.53.1.1 --to recv1 --stream-id cam1 --start-at 18:30:00     # laptop 2 ... 5
+./gstreamer/run_sender.sh 10.53.1.1 --to recv0 --stream-id cam0 --start-at 18:30:00     # laptop 1
+./gstreamer/run_sender.sh 10.53.1.1 --to recv1 --stream-id cam1 --start-at 18:30:00     # laptop 2 ... 5
 ```
 
 Each script waits until that second (sub-10 ms alignment once chrony reports < 1 ms), then starts
 video_sender; the actual start instant is logged in `app/clock-<stream>.txt`. Alternative without typing on
 five machines: from the gNB PC over the sync LAN, `for K in 0 1 2 3 4; do ssh 192.168.77.1$K "cd
-private-5g-industrial && ./run_sender.sh 10.53.1.1 --to recv$K --stream-id cam$K --start-at $T" & done`.
+private-5g-industrial/gstreamer && ./run_sender.sh 10.53.1.1 --to recv$K --stream-id cam$K --start-at $T" & done`.
 
 ## Teardown
 
@@ -243,12 +249,16 @@ All logs are continuous; note the measurement window (wall-clock start/end) in y
 Copy `app/` from both hosts and `gnb/`, `core/` from the gNB PC into one `results/<run>/` and run
 `make verify RD=results/<run>` (completeness check only). Downlink experiments swap the two apps.
 
-## Building the apps (any Ubuntu 22.04+ machine with the libwebrtc checkout)
+## Building the apps (any Ubuntu 22.04 machine)
 
-`make build-libwebrtc` fetches/builds stock libwebrtc M120 into `third_party/libwebrtc` (hours), or
-symlink an existing pristine checkout there. `make build-apps` then produces `build/apps/video_sender`
-and `video_receiver` (static libc++, need only glibc ≥ 2.35 + X11 client libs); copy them to the other
-hosts.
+Active tree: `make deps` (adds the GStreamer 1.20 dev packages and plugins) then `make build-apps` →
+`gstreamer/build/apps/video_{sender,receiver}` (system g++, dynamically linked against the distribution's
+GStreamer; every host needs the same packages, which the preflight of `run_experiment.sh` should be extended to
+check). `gstreamer/build/apps/BUILD_INFO.txt` records core/plugin/libx264 versions; the sender's `config:` line
+repeats them in every run.
+
+Frozen tree: `make webrtc-build-libwebrtc` fetches/builds stock libwebrtc M120 into `webrtc/libwebrtc` (hours),
+or symlink an existing pristine checkout there; `make webrtc-build-apps` → `webrtc/build/apps/` (static libc++).
 
 ## Code test without radios (one PC)
 

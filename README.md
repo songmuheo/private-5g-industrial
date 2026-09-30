@@ -2,21 +2,26 @@
 
 Research testbed for **video transmission over a private 5G NR SA network** (srsRAN gNB on a USRP
 B210, Open5GS core, Pixel phones as UEs) with cross-layer, real-time tracing: every video frame, every
-RTP/RTCP packet, every congestion-control decision and every gNB scheduling / HARQ / RLC / PDCP event
-is logged as it happens, with a common time base. All third-party code runs **stock**; the only
-changes are logging hooks.
+RTP/RTCP packet and every gNB scheduling / HARQ / RLC / PDCP event is logged as it happens, with a
+common time base. All third-party code runs **stock**; the only changes are logging hooks.
+
+Two transport trees, sharing no code: **`gstreamer/`** (active) — a fixed-profile camera model
+(resolution / fps / bitrate set from outside, GStreamer + x264, plain RTP, no congestion control), for the
+scenario in `docs/SCENARIO_EDGE_PROFILES.md`; **`webrtc/`** (frozen) — the libwebrtc M120 + GoogCC sender
+that produced the runs up to 2026-09-29 (tag `webrtc-baseline-2026-09-30`). They share only the run-directory /
+trace-file contract (`docs/TRACE_SCHEMA.md`) and the RAN.
 
 ```
-UE laptop ── USB ── Pixel ~~~ NR n78 TDD ~~~ B210 ── srsRAN gNB (+tracer) ── Open5GS ── internet ── receiver
-video_sender                                        gNB PC                                   video_receiver
-                                                                                              signaling relay
+UE laptop ── USB ── Pixel ~~~ NR n78 TDD ~~~ B210 ── srsRAN gNB (+tracer) ── Open5GS ── receiver host (gNB PC / internet)
+<tree>/video_sender                                 gNB PC                                <tree>/video_receiver + control server
 ```
 
 | part | what | where |
 |---|---|---|
 | gNB | srsRAN_Project `release_25_10`, native build, UHD | `third_party/srsRAN_Project` (submodule, stock) + `patches/srsran_gnb/` (tracer) + `ran/gnb/` |
 | 5G core | Open5GS 2.7.0, srsRAN's docker recipe, on the gNB PC | `ran/core/` |
-| video apps | libwebrtc M120 stock (no patches) — sender / receiver with app-side tracing, TCP-JSON signaling relay | `apps/` |
+| video apps (active) | GStreamer 1.20 (distribution packages) + x264: fixed-profile sender / receiver with app-side tracing, TCP-JSON control channel | `gstreamer/` |
+| video apps (frozen) | libwebrtc M120 stock (no patches) + GoogCC — sender / receiver with app-side tracing, TCP-JSON signaling relay | `webrtc/` |
 | check | completeness check of a run's real-time logs | `analysis/verify_run.py` |
 | code test | srsUE (srsRAN_4G, 5G SA over ZeroMQ) so the whole chain can be exercised on one PC without radios — not part of the measurement testbed | `third_party/srsRAN_4G` + `ran/ue_sim/` + `scripts/run/run_local_e2e.sh` |
 
@@ -32,8 +37,9 @@ One command from the gNB PC (after `./run_gnb_core.sh` is up): receivers, prefli
 sync LAN, per-camera settings from a JSON scenario, synchronised start, trace collection, verify and report.
 
 ```bash
-./run_experiment.sh experiments/5ue-720p30.json    # -> results/CURRENT/{scenario.json,experiment.json,app,senders/camK,report.txt}
-./run_experiment.sh experiments/demo-local.json    # smoke test on one PC (senders + receivers over loopback, no RAN)
+./gstreamer/run_experiment.sh gstreamer/experiments/5ue-720p30.json   # -> results/CURRENT/{scenario.json,experiment.json,app,senders/camK,report.txt}
+./gstreamer/run_experiment.sh gstreamer/experiments/demo-local.json   # smoke test on one PC (senders + receivers over loopback, no RAN)
+./webrtc/run_experiment.sh webrtc/experiments/2ue-720p30.json         # the frozen tree, same shape (needs webrtc/build/apps)
 ```
 
 Laptops need a one-time preparation only (docs/SETUP.md "Laptop checklist": clone, sender binary, sync-LAN +
@@ -42,9 +48,9 @@ chrony setup, camera asset, SSH key from the gNB PC); after that nothing is type
 Manual equivalent (one script per terminal / machine):
 
 ```bash
-./run_gnb_core.sh [label]                    # gNB PC: Open5GS + srsRAN gNB (tracer) + JSON metrics -> results/<ts>-<label>/{gnb,core}
-./run_receiver.sh -n 5                       # gNB PC: signaling relay + 5 video_receivers (recv0..4)  -> results/CURRENT/app (rx-*)
-./run_sender.sh 10.53.1.1 --to recv0 --stream-id cam0 [--start-at 18:30:00]   # each UE laptop: Kendo view K for camK, 720p30, 300 s -> results/<ts>-sender-cam0/app (tx-*)
+./run_gnb_core.sh [label]                              # gNB PC: Open5GS + srsRAN gNB (tracer) + JSON metrics -> results/<ts>-<label>/{gnb,core}
+./gstreamer/run_receiver.sh -n 5                       # gNB PC: control server + 5 video_receivers (recv0..4) -> results/CURRENT/app (rx-*)
+./gstreamer/run_sender.sh 10.53.1.1 --to recv0 --stream-id cam0 [--start-at 18:30:00]   # each UE laptop: Kendo view K for camK, 720p30 2500 kbps, 300 s -> results/<ts>-sender-cam0/app (tx-*)
 ```
 
 `--start-at` makes every laptop start at the same wall-clock second (clocks synced with chrony, see
@@ -72,12 +78,12 @@ The short version:
 
 ```bash
 git clone --recurse-submodules --shallow-submodules <repo> && cd private-5g-industrial
-make deps            # Ubuntu 22.04 packages
+make deps            # Ubuntu 22.04 packages (srsRAN build deps + GStreamer dev/plugins)
 make build-gnb       # gNB + tracer patches  (gNB PC)
-make build-libwebrtc # stock libwebrtc M120 (hours) — or symlink an existing checkout to third_party/libwebrtc
-make build-apps      # video_sender / video_receiver (copy build/apps/ to the laptops / receiver host)
+make build-apps      # gstreamer/build/apps/video_{sender,receiver} (system g++; copy to the laptops / receiver host)
 make build-ue-sim    # code test only: srsUE for the ZeroMQ loopback
-make run-local       # code test: core + gNB(zmq) + srsUE + sender(UE netns) -> receiver(host), then verify
+make run-local       # code test: core + gNB(zmq) + srsUE + sender(UE netns) -> receiver(host), then verify   [TREE=webrtc for the frozen tree]
+make webrtc-build-libwebrtc webrtc-build-apps   # frozen tree only: stock libwebrtc M120 (hours; or symlink a checkout to webrtc/libwebrtc)
 ```
 
 ## What a run produces (`results/<run>/`)
@@ -89,8 +95,8 @@ gnb/  gnb_sched_ul.csv gnb_sched_dl.csv   per-slot grants per UE (PRB, MCS, TBS,
       gnb_mac_ul_pdu.csv gnb_rlc_ul.csv   MAC PDUs, RLC PDU/SDU/reassembly events
       gnb_pdcp_ul.csv gnb_pdcp_dl.csv     IP packets leaving/entering the RAN, RTP header parsed (join key to app ledgers)
       gnb.log gnb_stdout.log gnb_metrics.jsonl   stock srsRAN log, 1 s metrics table, JSON metrics   [+ pcaps with P5G_GNB_PCAP=1]
-app/  <stream>-tx-frames.csv -tx-encoded.csv -tx-encoder-rates.csv -tx-cc.csv -tx-rtp.csv -tx-rtcp.csv -tx-events.csv -tx-stats.jsonl   sender
-      <stream>-rx-frames.csv -rx-decoded.csv -rx-rtp.csv -rx-rtcp.csv -rx-events.csv -rx-stats.jsonl       receiver
+app/  <stream>-tx-frames.csv -tx-encoded.csv -tx-encoder-rates.csv -tx-rtp.csv -tx-rtcp.csv -tx-stats.jsonl   sender  (+ -tx-cc.csv -tx-events.csv: webrtc tree only)
+      <stream>-rx-frames.csv -rx-decoded.csv -rx-rtp.csv -rx-rtcp.csv -rx-stats.jsonl                        receiver (+ -rx-events.csv: webrtc tree only)
 core/ open5gs.log
 ```
 
@@ -100,19 +106,21 @@ Everything is written in real time by the running processes; nothing is derived 
 ## Layout
 
 ```
-apps/common/    app_util.h trace_ring.h webrtc_tracing.h webrtc_session.h video_source.h signaling_client.h (+ json.hpp, nlohmann)
-apps/sender/ apps/receiver/ apps/signaling/
+gstreamer/      ACTIVE transport tree (README there): apps/{common,sender,receiver,control}, run_{sender,receiver,experiment}.sh,
+                experiments/, scripts/{build_apps,local_apps,fetch_gst_examples}.sh, gstreamer.lock; build/ and gstreamer-src/ ignored
+webrtc/         FROZEN libwebrtc tree (README there): apps/{common,sender,receiver,signaling}, run_*.sh, experiments/,
+                scripts/{build_libwebrtc,build_apps,local_apps}.sh, patches/libwebrtc/, libwebrtc.lock; libwebrtc/ and build/ ignored
 ran/gnb/        gnb_b210_n78_tdd_20mhz.yml (testbed), gnb_zmq_local.yml (code test), metrics_json_client.py
 ran/ue_sim/     srsUE config for the code test
 ran/core/       docker-compose.yml, open5gs.env, subscriber_db.csv (git-ignored; keys) / subscriber_db.example.csv
-patches/        srsran_gnb/ (tracer header + 6 patches), libwebrtc/ (README: no patches needed)
-scripts/build/  build_srsran_gnb.sh build_libwebrtc.sh build_apps.sh
-run_experiment.sh (orchestrator) run_gnb_core.sh run_receiver.sh run_sender.sh   (repo root)
-scripts/run/    ota_restart.sh (gNB PC one-shot, background) start_core.sh core_add_dnn.sh run_gnb.sh run_ue_sim.sh run_local_e2e.sh (last two: code test)
-scripts/setup/  sync_lan_server.sh sync_lan_client.sh sync_check.sh (wired clock-sync LAN: chrony + ICE firewall)
+patches/        srsran_gnb/ (tracer header + 6 patches)
+scripts/build/  build_srsran_gnb.sh build_srsran_ue_sim.sh
+run_gnb_core.sh (gNB PC, foreground RAN)   — the app scripts live in the transport trees
+scripts/run/    ota_restart.sh (gNB PC one-shot, background; P5G_TREE) start_core.sh core_add_dnn.sh run_gnb.sh run_ue_sim.sh
+                run_local_e2e.sh (code test; --tree, delegates the app phase to <tree>/scripts/local_apps.sh)
+scripts/setup/  sync_lan_server.sh sync_lan_client.sh sync_check.sh (wired clock-sync LAN: chrony + firewall)
 analysis/       verify_run.py trace_io.py exp_run_report.py (app + gNB report) exp_ran_audit.py (RAN audit)
-docker/         libwebrtc build toolchain image
+docker/         libwebrtc build toolchain image (webrtc tree)
 video/          fetch_asset.sh (copy assets from the gNB PC), prepare_kendo.sh (Nagoya multi-view Kendo, one view per camera), prepare_test_sequence.sh (xiph sequences)
-experiments/    scenario JSON files for run_experiment.sh (per-camera resolution / fps / bitrate / source, hosts, timing)
-third_party/    srsRAN_Project, srsRAN_4G (submodules, stock), libwebrtc (fetched; pinned by libwebrtc.lock)
+third_party/    srsRAN_Project, srsRAN_4G (submodules, stock)
 ```

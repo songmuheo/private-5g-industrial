@@ -10,9 +10,10 @@ def q(v,p): v=sorted(v); return v[min(len(v)-1,int(p*len(v)))] if v else None
 def f0(v): return "-" if v is None else f"{v:.0f}"
 def f1(v): return "-" if v is None else f"{v:.1f}"
 streams=sorted(os.path.basename(p).replace('-rx-frames.csv','') for p in glob.glob(f'{RD}/app/*-rx-frames.csv'))
-# ip -> stream from signaling
+# ip -> stream from the control channel log (webrtc: signaling.log, gstreamer: control.log; same line format)
 ip2s={}; last_ip=None
-for line in open(f'{RD}/app/signaling.log'):
+CTL_LOG=next((p for p in (f'{RD}/app/signaling.log', f'{RD}/app/control.log') if os.path.exists(p)), None)
+for line in (open(CTL_LOG) if CTL_LOG else []):
     m=re.search(r"connection from \('([\d.]+)'",line)
     if m: last_ip=m.group(1)
     m=re.search(r"sender (\w+) registered",line)
@@ -30,24 +31,23 @@ for s in streams:
     for r in rtp:
         if r['dir']=='in': byssrc[r['ssrc']].add(int(r['seq']))
     loss=sum((max(v)-min(v)+1-len(v)) for v in byssrc.values() if len(v)>10)
-    last=None
-    for line in open(f'{RD}/app/{s}-rx-stats.jsonl'):
+    # W3C getStats lines exist only in webrtc runs; gstreamer runs carry rtpsession stats instead -> last=None
+    last=None; STATS=f'{RD}/app/{s}-rx-stats.jsonl'
+    for line in (open(STATS) if os.path.exists(STATS) else []):
         j=json.loads(line)
-        for x in j['stats']:
+        for x in j.get('stats', []):
             if x['type']=='inbound-rtp' and x.get('kind')=='video': last=x
-    kb=collections.defaultdict(float); prev=None
-    for line in open(f'{RD}/app/{s}-rx-stats.jsonl'):
-        j=json.loads(line); t=j['mono_ns']/1e9-T0
-        for x in j['stats']:
-            if x['type']=='inbound-rtp' and x.get('kind')=='video':
-                if prev: kb[int(t//BIN)]+=(x['bytesReceived']-prev)*8/(BIN*1000)
-                prev=x['bytesReceived']
+    # received kbps per bin from the RTP ledger itself (transport-neutral)
+    kb=collections.defaultdict(float)
+    for r in rtp:
+        if r['dir']=='in': kb[int((int(r['log_mono_ns'])/1e9-T0)//BIN)]+=int(r['pkt_bytes'])*8/(BIN*1000)
+    last=last or {}
     net=collections.defaultdict(list); span=collections.defaultdict(list)
     for r in fr:
         cap=int(r['abs_capture_ntp_ms']); lp=int(r['last_pkt_mono_ns']); fp=int(r['first_pkt_mono_ns']); rm=int(r['recv_mono_ns']); rw=int(r['recv_wall_ns'])
         if cap<=0 or lp<=0: continue
         b=int((rm/1e9-T0)//BIN); net[b].append((lp+rw-rm)/1e6-(cap-NTP_UNIX_MS)); span[b].append((lp-fp)/1e6)
-    print(f"{s}: frames={len(fr)} span={t1-t0:.1f}s fps={len(fr)/(t1-t0):.1f} rtp_in={sum(len(v) for v in byssrc.values())} seq_loss={loss} | stats: lost={last.get('packetsLost')} nack={last.get('nackCount')} pli={last.get('pliCount')} freeze={last.get('freezeCount')}/{last.get('totalFreezesDuration')}s jbufDelay_avg={1000*last.get('jitterBufferDelay',0)/max(1,last.get('jitterBufferEmittedCount',1)):.0f}ms keyframes={last.get('keyFramesDecoded')} bytes={last.get('bytesReceived')/1e6:.2f}MB")
+    print(f"{s}: frames={len(fr)} span={t1-t0:.1f}s fps={len(fr)/(t1-t0):.1f} rtp_in={sum(len(v) for v in byssrc.values())} seq_loss={loss} | stats: lost={last.get('packetsLost')} nack={last.get('nackCount')} pli={last.get('pliCount')} freeze={last.get('freezeCount')}/{last.get('totalFreezesDuration')}s jbufDelay_avg={1000*last.get('jitterBufferDelay',0)/max(1,last.get('jitterBufferEmittedCount',1)):.0f}ms keyframes={last.get('keyFramesDecoded')} bytes={(last.get('bytesReceived') or sum(int(r['pkt_bytes']) for r in rtp if r['dir']=='in'))/1e6:.2f}MB")
     print(f"   kbps/{BIN}s: {[round(kb[i]) for i in range(0,NB)]}")
     print(f"   net OWD med/p90 (ms, offset unknown): {[f'{f0(st.median(net[i]))}/{f0(q(net[i],.9))}' for i in range(0,NB) if net.get(i)]}")
     print(f"   frame span med/p90/max (ms): {[f'{f0(st.median(span[i]))}/{f0(q(span[i],.9))}/{f0(max(span[i]))}' for i in range(0,NB) if span.get(i)]}")
@@ -57,10 +57,10 @@ for r in (rows(f'{RD}/gnb/gnb_pdcp_ul.csv') if os.path.exists(f'{RD}/gnb/gnb_pdc
     if r['rtp_like'] in ('1','true','True') and r['src_ip'].startswith('10.45'): pdcp_dst[r['src_ip']][r['dst_ip']]+=1
 s2ip={v:k for k,v in ip2s.items()}
 for s in streams:
-    cands={}; pairs={}; tr=None
-    for line in open(f'{RD}/app/{s}-rx-stats.jsonl'):
+    cands={}; pairs={}; tr=None; STATS=f'{RD}/app/{s}-rx-stats.jsonl'
+    for line in (open(STATS) if os.path.exists(STATS) else []):
         j=json.loads(line)
-        for x in j['stats']:
+        for x in j.get('stats', []):
             if x['type'] in ('local-candidate','remote-candidate'): cands[x['id']]=x
             elif x['type']=='candidate-pair': pairs[x['id']]=x
             elif x['type']=='transport': tr=x
@@ -70,7 +70,11 @@ for s in streams:
         ip=s2ip.get(s,'?'); dst=pdcp_dst.get(ip,{}); tot=sum(dst.values()) or 1; via5g=100*dst.get(l.get('address',''),0)/tot
         ok=(l.get('address')=='10.53.1.1' and via5g>90)
         print(f"  {s}: selected local {l.get('address')}:{l.get('port')}/{l.get('protocol')} <- remote {r.get('candidateType')} :{r.get('port')} (address redacted for prflx), {p.get('bytesReceived',0)/1e6:.2f} MB, RTT {1000*p.get('currentRoundTripTime',0):.0f} ms | gNB PDCP UL RTP from {ip}: {via5g:.0f}% to {l.get('address')} (n={tot}) -> {'OK: media went over the 5G link' if ok else 'WARNING: check path'}")
-    else: print(f"  {s}: no selected candidate pair in stats")
+    else:
+        # no ICE (gstreamer tree): the RTP destination is fixed by the control channel; judge by the gNB PDCP UL rows alone
+        ip=s2ip.get(s,'?'); dst=pdcp_dst.get(ip,{}); tot=sum(dst.values())
+        if tot: via5g=100*dst.get('10.53.1.1',0)/tot; print(f"  {s}: plain RTP | gNB PDCP UL RTP from {ip}: {via5g:.0f}% to 10.53.1.1 (n={tot}) -> {'OK: media went over the 5G link' if via5g>90 else 'WARNING: check path'}")
+        else: print(f"  {s}: plain RTP, no gNB PDCP UL RTP rows for {ip} (local run or path unknown)")
 if not os.path.exists(f'{RD}/gnb/gnb_sched_ul.csv'):
     print("## B. gNB: no gnb/ traces in this run (local smoke test) -> skipped"); sys.exit(0)
 print("## B. gNB")

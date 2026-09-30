@@ -41,6 +41,8 @@ plt.rcParams.update({'font.size': 9, 'axes.edgecolor': INK2, 'axes.labelcolor': 
 
 def rows(p):
     with open(p) as f: return list(csv.DictReader(l for l in f if not l.startswith('#')))
+def rows_opt(p):  # traces that exist in one transport tree only (tx-cc, tx-events: webrtc)
+    return rows(p) if os.path.exists(p) else []
 cams = sorted(os.path.basename(d) for d in glob.glob(f'{RD}/senders/cam*') if os.path.isdir(d) and os.path.isdir(f'{d}/app'))
 if not cams: sys.exit(f"no sender traces under {RD}/senders/ (run_experiment.sh collects them)")
 # common time origin: first received frame of the first camera (gNB PC wall clock)
@@ -57,7 +59,7 @@ def plot_bitrate():
     fig, ax = plt.subplots(figsize=(11, 4.2), dpi=130); cap = peak = 0.0
     for cam in cams:
         A = f'{RD}/senders/{cam}/app'; col = PALETTE.get(cam, INK2)
-        est = [(tw(int(r['log_wall_ns'])), int(r['target_bps'])/1e6) for r in rows(f'{A}/{cam}-tx-cc.csv') if r['target_bps'] not in ('-1', '')]
+        est = [(tw(int(r['log_wall_ns'])), int(r['target_bps'])/1e6) for r in rows_opt(f'{A}/{cam}-tx-cc.csv') if r['target_bps'] not in ('-1', '')]
         enc = [(tw(int(r['set_wall_ns'])), int(r['target_bps'])/1e6) for r in rows(f'{A}/{cam}-tx-encoder-rates.csv')]
         if est: ax.step(*zip(*est), where='post', color=col, lw=1.0, ls='--', alpha=0.9, label=f'{cam} GoogCC estimated bandwidth')
         if enc: ax.step(*zip(*enc), where='post', color=col, lw=1.8, label=f'{cam} encoder target')
@@ -93,12 +95,18 @@ def plot_delay():
             notes.append(f'{cam}: chrony {"absent" if s is None else f"{s:.1f} ms"} -> min-normalised')
         else: notes.append(f'{cam}: chrony RMS offset {s*1000:.0f} µs')
         if pkts: ax1.plot(*zip(*pkts), '.', ms=2.0, color=col, alpha=0.5, label=label, rasterized=True)
-        # per-frame delays: capture -> last packet (network), capture -> delivered (app)
+        # per-frame delays: capture -> last packet (network), capture -> delivered (app). Capture time: webrtc carries
+        # it in-band (abs-capture-time, NTP ms); gstreamer has no extension, but its wire rtp_ts equals the sender's
+        # tx-frames.rtp_ts, so the capture wall time is joined from the sender ledger instead.
+        capw = {r['rtp_ts']: int(r['capture_wall_ns']) for r in rows_opt(f'{A}/{cam}-tx-frames.csv')}
         net, app = [], []
         for r in frs:
             cap = int(r['abs_capture_ntp_ms']); lp = int(r['last_pkt_mono_ns']); rm = int(r['recv_mono_ns']); rw = int(r['recv_wall_ns'])
-            if cap <= 0 or lp <= 0: continue
-            cap_wall_ms = cap - NTP_UNIX_MS; t = tw(rw)
+            if cap > 0: cap_wall_ms = cap - NTP_UNIX_MS
+            elif r['rtp_ts'] in capw: cap_wall_ms = capw[r['rtp_ts']]/1e6
+            else: continue
+            if lp <= 0: continue
+            t = tw(rw)
             net.append((t, (lp + rw - rm)/1e6 - cap_wall_ms)); app.append((t, rw/1e6 - cap_wall_ms))
         if s is None or s > 1.0:
             b = min(v for _, v in net) if net else 0; net = [(t, v-b) for t, v in net]; app = [(t, v-b) for t, v in app]

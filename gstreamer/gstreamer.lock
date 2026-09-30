@@ -1,0 +1,11 @@
+# GStreamer pin. Binaries come from the distribution (Ubuntu 22.04: core 1.20.3, plugins-base 1.20.1,
+# plugins-good 1.20.3, plugins-bad 1.20.3, plugins-ugly 1.20.1 / x264enc); the upstream source is fetched
+# only as a reference for the examples our code follows (rule 4 in CLAUDE.md), never built.
+gstreamer_tag: 1.20.3
+gstreamer_repo: https://gitlab.freedesktop.org/gstreamer/gstreamer.git
+# sparse paths (examples we cite in file headers)
+sparse:
+  - subprojects/gst-docs/examples/tutorials
+  - subprojects/gst-plugins-base/tests/examples/app
+  - subprojects/gst-plugins-good/tests/examples/rtp
+  - subprojects/gst-rtsp-server/examples

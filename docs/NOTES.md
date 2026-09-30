@@ -607,3 +607,33 @@ can the bitrate be changed while PLAYING without touching either? Pipeline on th
   `pass`, `key-int-max`, `option-string` are not (NULL/READY only).
 * Not measured here: RTP packet counts (rtph264pay emits buffer lists for fragmented frames; the BUFFER probe under-counts),
   encode latency, CPU. Not a substitute for the OTA invariant check in §6.3.
+
+## 2026-09-30 — two transport trees: webrtc/ frozen, gstreamer/ built and verified (loopback + srsUE code test)
+Decision (docs/SCENARIO_EDGE_PROFILES.md §6.3): the fixed-profile sender is a GStreamer stack, not libwebrtc with
+overrides. Layout: `webrtc/` (moved as-is with git mv, tag `webrtc-baseline-2026-09-30` marks the last root-level
+state) and `gstreamer/` (new); no code shared, only the trace-file contract (TRACE_SCHEMA §0-a); shared RAN scripts
+take the tree as a parameter.
+* webrtc after the move: `make webrtc-build-apps` (6 s incremental), `webrtc/run_experiment.sh demo-local` PASS,
+  `make run-local TREE=webrtc` PASS (results/20260930-114022-webrtc-moved: 3782/3782 RTP, 0 lost, 681 frames in 15 s).
+  Behaviour unchanged (same binaries, only paths). The stale CMake cache had to be deleted once.
+* gstreamer loopback (results/20260930-120719-demo-local, 2 senders 12 s): cam0 720p30 2500 kbps -> 360 frames
+  delivered = 30.0 fps; cam1 640x360@15 800 kbps -> 180 frames = 15.0 fps; 0 RTP loss; verify PASS. The webrtc tree
+  on the identical scenario an hour earlier delivered 27.4 fps and 6.9 fps (GoogCC start-up + OpenH264 skipping).
+* gstreamer srsUE code test (results/20260930-120754-gst-first, 720p30 2500 kbps, 20 s window): 838 captured /
+  837 encoded / 837 decoded and delivered; 9689/9689 RTP through gNB PDCP (`pdcp_ul` 9712 incl. RTCP), 0 lost,
+  UL BLER 1.1 %. **All 837 frames join sender -> gNB PDCP -> receiver directly on `rtp_ts`** (no per-SSRC offset:
+  rtph264pay timestamp-offset 0, PTS from the capture grid). capture -> gNB PDCP marker packet 31.7 ms median /
+  49.1 p90 / 220 max; capture -> app 32.3 / 49.6 / 222 (decode + delivery add 0.6 ms; jitter buffer 50 ms did not add
+  waiting because frames arrive later than its schedule). 10 RTP packets per frame (mtu 1200).
+* Implementation facts worth knowing: (1) x264enc shifts output PTS by a constant and shifts its segment by the
+  same amount (gst_video_encoder_set_min_pts), so the encoded-frame probe must map PTS through the pad's segment to
+  running time before applying the 90 kHz scale — the first run logged rtp_ts 1877455799 for a frame whose wire value
+  was 3686 until this was done; (2) per-frame side info (rtp_ts, packet count, first/last arrival) rides from the
+  depayloader to the sink as untagged GstReferenceTimestampMeta, which GstVideoDecoder copies onto the decoded
+  frame — no lookup table, no lock; (3) rtph264depay pushes the AU synchronously while handling the marker packet,
+  so a sink-pad probe and a src-pad probe on the depayloader run on the same thread; (4) pipefail + `awk ... exit`
+  on gst-inspect output aborts a script (SIGPIPE) — the provenance loop in build_apps.sh must not exit awk early;
+  (5) the apt index was stale (404 on plugins-base dev) until `apt-get update`.
+* Not yet: OTA run of the gstreamer tree (laptops need `make deps` + `make build-apps`, and the preflight should
+  compare GStreamer versions), NACK/RTX (deliberately absent), profile changes of width/height/fps at run time
+  (refused with a warning; bitrate works), multi-stream receiver process.
