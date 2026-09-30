@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -137,24 +138,34 @@ class Sender {
     std::fflush(stats_);
   }
 
-  // Ordered teardown: control -> grid stops offering -> EOS through appsrc (this also releases a push
-  // blocked on a full queue) -> wait for EOS at the sink (<= 2 s: the last captured frame is encoded and
-  // sent, tx-frames == tx-encoded) -> pipeline NULL (releases anything still blocked) -> join the grid
-  // thread -> traces. The join comes last on purpose: joining a thread blocked in gst_app_src_push_buffer
-  // would deadlock if downstream had stopped consuming.
+  // Ordered teardown: control -> grid stops offering -> drain by observation: wait until the last pushed
+  // frame has come out of the encoder (encoder probe) and its marker packet has left the sender (udpsink
+  // probe), so tx-frames == tx-encoded == frames on the wire -> pipeline NULL -> join the grid thread ->
+  // traces. No EOS on the normal path: rtpgccbwe (0.13.7) forwards EOS without draining its pacing queue,
+  // which would lose the last frame in --cc gcc. EOS is the fallback only when the encoder does not drain
+  // by itself (it also releases a push blocked on a full appsrc queue). The join comes last on purpose:
+  // joining a thread blocked in gst_app_src_push_buffer would deadlock if downstream had stopped consuming.
   void Shutdown() {
     ctl_.Stop();
     if (source_) {
       source_->RequestStop();
       // up to 3 frame intervals for the loop to leave its current slot (a push blocked on a full queue
-      // does not finish here; EOS below releases it)
+      // does not finish here; the EOS fallback below releases it)
       if (!source_->WaitStopped(3 * 1000 / (g_cfg.video.fps > 0 ? g_cfg.video.fps : 30) + 5))
-        P5G_LOG_WARN << "grid thread still pushing at shutdown (blocked push?); sending EOS anyway";
+        P5G_LOG_WARN << "grid thread still pushing at shutdown (blocked push?)";
     }
     if (pipeline_ && started_) {
-      gst_app_src_end_of_stream(GST_APP_SRC(src_));
-      for (int i = 0; i < 200 && !eos_seen_.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));  // <= 2 s
-      if (!eos_seen_.load()) P5G_LOG_WARN << "EOS not seen within 2 s; frames still in the encoder are lost";
+      const uint32_t last_pushed = source_->last_pushed_rtp_ts();
+      auto wait_for = [](std::function<bool()> ok, int ms) { for (int i = 0; i < ms / 10 && !ok(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10)); return ok(); };
+      // 1) encoder: x264 zerolatency has no frame delay, appsrc hands the frame over within a few ms
+      if (!wait_for([&] { return last_encoded_ts_.load() == last_pushed; }, 1000)) {
+        P5G_LOG_WARN << "last pushed frame (rtp_ts " << last_pushed << ") not out of the encoder after 1 s; sending EOS to flush";
+        gst_app_src_end_of_stream(GST_APP_SRC(src_));
+        wait_for([&] { return eos_seen_.load(); }, 2000);
+      }
+      // 2) sender: the last frame's marker packet has passed the udpsink probe (rtpgccbwe pacing queue drained)
+      if (!wait_for([&] { return last_sent_ts_.load() == last_encoded_ts_.load(); }, 3000))
+        P5G_LOG_WARN << "last encoded frame (rtp_ts " << last_encoded_ts_.load() << ") not sent within 3 s; packets still queued are lost";
     }
     if (pipeline_) gst_element_set_state(pipeline_, GST_STATE_NULL);
     if (source_) {
@@ -262,8 +273,9 @@ class Sender {
       g_signal_emit_by_name(pay, "add-extension", twcc);
       gst_object_unref(twcc);
       bwe_ = Make("rtpgccbwe", "bwe");
-      const int max_kbps = g_cfg.gcc_max_kbps > 0 ? g_cfg.gcc_max_kbps : g_cfg.bitrate_kbps;
-      g_object_set(bwe_, "min-bitrate", (guint)g_cfg.gcc_min_kbps * 1000, "max-bitrate", (guint)max_kbps * 1000,
+      // bounds validated in main(): 0 < gcc_min <= bitrate <= gcc_max (rtpgccbwe clamps with (min, max) and
+      // panics on reversed bounds); the profile bitrate is the estimator's start value and x264's first target
+      g_object_set(bwe_, "min-bitrate", (guint)g_cfg.gcc_min_kbps * 1000, "max-bitrate", (guint)g_cfg.gcc_max_kbps * 1000,
                    "estimated-bitrate", (guint)g_cfg.bitrate_kbps * 1000, nullptr);
       gst_util_set_object_arg(G_OBJECT(rtpbin_), "rtp-profile", "avpf");
       gst_bin_add(GST_BIN(pipeline_), bwe_);
@@ -362,10 +374,16 @@ class Sender {
       r.is_idr = key ? 1 : 0;
       r.at_target_quality = -1;
       encoded_->Write(r);
+      last_encoded_ts_.store(r.rtp_ts, std::memory_order_relaxed);
     });
   }
   void OnRtpOut(GstPad*, GstPadProbeInfo* info) {
-    ForEachProbeBuffer(info, [&](GstBuffer* b) { RtpPacketRow r; if (FillRtpRow(b, 0, &r)) rtp_->Write(r); });
+    ForEachProbeBuffer(info, [&](GstBuffer* b) {
+      RtpPacketRow r;
+      if (!FillRtpRow(b, 0, &r)) return;
+      rtp_->Write(r);
+      if (r.marker) last_sent_ts_.store(r.rtp_ts, std::memory_order_relaxed);
+    });
   }
   void OnRtcpOut(GstPad*, GstPadProbeInfo* info) {
     ForEachProbeBuffer(info, [&](GstBuffer* b) { RtcpPacketRow r; FillRtcpRow(b, 0, &r); rtcp_->Write(r); });
@@ -421,6 +439,7 @@ class Sender {
       // are relative to it, so rtp_ts = PTS * 90 kHz is what rtph264pay puts on the wire.
       const int64_t base = static_cast<int64_t>(gst_element_get_base_time(pipeline_));
       rates_->Write(EncoderRateRow{NowMonoNs(), NowWallNs(), (int64_t)bitrate_kbps_ * 1000, (int64_t)bitrate_kbps_ * 1000, -1, (double)g_cfg.video.fps, 1});
+      if (cc_) cc_->Write(CcUpdateRow{NowMonoNs(), NowWallNs(), (int64_t)bitrate_kbps_ * 1000});  // start value (the estimator notifies on change only)
       source_->Start(base);
       started_ = true;
       P5G_LOG_INFO << "streaming " << g_cfg.stream_id << " -> " << dest_host_ << ":" << dest_rtp_port_ << " (rtcp " << dest_rtcp_port_
@@ -466,6 +485,7 @@ class Sender {
   int32_t enc_w_ = 0, enc_h_ = 0;
   GstSegment enc_segment_{};  // encoder output segment (encoder streaming thread only)
   std::atomic<int> bitrate_kbps_{0};
+  std::atomic<uint32_t> last_encoded_ts_{0}, last_sent_ts_{0};  // drain check at shutdown
   std::unique_ptr<GridVideoSource> source_;
   ControlClient ctl_;
   std::mutex mu_;  // control-thread state (never taken on a streaming thread)
@@ -518,6 +538,13 @@ int main(int argc, char** argv) {
   c.gcc_min_kbps = a.GetInt("gcc-min-kbps", c.gcc_min_kbps);
   c.gcc_max_kbps = a.GetInt("gcc-max-kbps", 0);
   if (c.cc != "profile" && c.cc != "gcc") P5G_FATAL("--cc must be profile or gcc");
+  if (c.cc == "gcc") {
+    if (c.gcc_max_kbps <= 0) c.gcc_max_kbps = c.bitrate_kbps;   // the profile bitrate is the ceiling unless said otherwise
+    if (c.gcc_min_kbps <= 0 || c.gcc_min_kbps > c.gcc_max_kbps)
+      P5G_FATAL("--gcc-min-kbps " << c.gcc_min_kbps << " must be > 0 and <= --gcc-max-kbps " << c.gcc_max_kbps);
+    if (c.bitrate_kbps < c.gcc_min_kbps || c.bitrate_kbps > c.gcc_max_kbps)
+      P5G_FATAL("--bitrate-kbps " << c.bitrate_kbps << " (the GCC start value) must lie within [" << c.gcc_min_kbps << ", " << c.gcc_max_kbps << "]");
+  }
   if (c.bitrate_kbps <= 0 || c.video.fps <= 0 || c.video.width <= 0 || c.video.height <= 0) P5G_FATAL("bad profile (width/height/fps/bitrate)");
 
   gst_init(nullptr, nullptr);
@@ -529,7 +556,7 @@ int main(int argc, char** argv) {
                << "@" << c.video.fps << " source=" << (c.video.yuv_path.empty() ? "pattern" : c.video.yuv_path)
                << " bitrate_kbps=" << c.bitrate_kbps << " gop=" << (c.gop_frames > 0 ? c.gop_frames : 2 * c.video.fps)
                << " vbv_ms=" << c.vbv_ms << " preset=" << c.preset << " threads=" << c.threads << " cc=" << c.cc
-               << (c.cc == "gcc" ? " gcc_min_kbps=" + std::to_string(c.gcc_min_kbps) + " gcc_max_kbps=" + std::to_string(c.gcc_max_kbps > 0 ? c.gcc_max_kbps : c.bitrate_kbps) + " rtpgccbwe=" + p5g::PluginVersion("rtpgccbwe") : "")
+               << (c.cc == "gcc" ? " gcc_min_kbps=" + std::to_string(c.gcc_min_kbps) + " gcc_max_kbps=" + std::to_string(c.gcc_max_kbps) + " rtpgccbwe=" + p5g::PluginVersion("rtpgccbwe") : "")
                << " mtu=" << c.mtu << " pt=" << c.pt
                << " stats_period_ms=" << c.stats_period_ms << " " << p5g::GstProvenance();
 

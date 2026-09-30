@@ -751,10 +751,22 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   (first GCC run: 0 estimates). Fixed by adding `payload` (`--pt`, 96) to the udpsrc caps.
 * Loopback (results/20260930-181328-demo-local-gcc, tc 2 Mbit/s on lo from 6 s to 16 s of the streams): cam0 estimate
   2000 -> 766 kbps in 2 s, +30-40 kbps/s recovery; 359 TWCC feedback packets received; 38 estimates / 39 encoder
-  changes in 12 s; verify PASS. Even without the limit the estimate fell in the first 2 s: two bursty senders on one
-  loopback (10 packets per frame, no pacing) look like inter-arrival delay growth to the delay estimator — expected
-  GCC behaviour with unpaced frames, to be kept in mind when reading OTA results.
+  changes in 12 s; verify PASS. Even without the limit the estimate fell in the first 2 s (HYPOTHESIS: two senders
+  starting together on one loopback; rtpgccbwe does pace its output at the estimated rate, so the first seconds of
+  delay-gradient measurements happen while the pacer queue fills from a 2500 kbps start — GCC's usual start-up
+  undershoot; not reproduced in isolation). To be kept in mind when reading OTA results.
 * srsUE code test in the GCC condition (results/20260930-181500-gst-gcc, `P5G_CC=gcc make run-local`): 840/840/839
   frames, estimate rose to the 2500 kbps ceiling in 1.2 s and stayed (ZMQ link has headroom), capture->app 34 ms
   median. Cost of the condition visible in the RAN trace: 1609 RTCP packets (TWCC feedback, ~80/s) vs 11 in profile
   mode -> pdcp_dl 1615 vs 18 rows.
+* Codex review of the --cc gcc commit, fixed the same day: (M) rtpgccbwe 0.13.7 forwards EOS without draining its
+  pacing queue, so the EOS-based shutdown lost the last frame on the wire in gcc mode -> the sender now drains by
+  observation (waits until the last pushed frame's rtp_ts has passed the encoder probe and its marker packet the
+  udpsink probe; EOS only as a fallback when the encoder does not drain); captured = encoded = on the wire = delivered
+  in both modes (results/20260930-183016-demo-local-gcc 361/361/361/361, 181/181/181/181; profile
+  results/20260930-183042-demo-local); (M) unchecked GCC bounds could reverse min/max (rtpgccbwe panics on
+  clamp) -> validated: 0 < gcc_min <= bitrate <= gcc_max; (M) exp_sender_report.py required signaling.log and
+  tx-events -> control.log / optional ledgers; (M) preflight only checked that the .so existed -> it now loads
+  rtpgccbwe on the laptop and aborts the run if a gcc camera cannot; (L) build_gst_rs.sh keeps --locked (the
+  crates.io tarball ships Cargo.lock); (L) the "no pacing" remark corrected (rtpgccbwe paces; start-up decline is a
+  hypothesis). tx-cc.csv now starts with the start value so it is never empty. run-local gcc: 20260930-183121-gst-gcc2.

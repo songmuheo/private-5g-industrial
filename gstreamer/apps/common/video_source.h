@@ -190,6 +190,7 @@ class GridVideoSource {
   void Stop() { RequestStop(); Join(); }
   int64_t frames_pushed() const { return pushed_.load(); }
   int64_t skipped_slots() const { return skipped_.load(); }
+  uint32_t last_pushed_rtp_ts() const { return last_pushed_ts_.load(); }  // for the owner's drain check at shutdown
 
  private:
   static void SleepUntilMonoUs(int64_t target_us) {
@@ -249,7 +250,7 @@ class GridVideoSource {
     GST_BUFFER_OFFSET(buf) = idx;
     const GstFlowReturn fr = gst_app_src_push_buffer(appsrc_, buf);  // takes ownership
     const bool ok = fr == GST_FLOW_OK;
-    if (ok) pushed_++;
+    if (ok) { pushed_++; last_pushed_ts_.store(rtp_ts); }
     if (trace_)
       trace_->Write(CaptureFrameRow{idx, slot, src_idx, rtp_ts, capture_wall_ns, capture_mono_ns, cfg_.width, cfg_.height, ok ? 1 : 0});
     ++idx;
@@ -263,6 +264,7 @@ class GridVideoSource {
   int64_t start_mono_ns_ = 0;
   std::atomic<int64_t> pushed_{0};
   std::atomic<int64_t> skipped_{0};
+  std::atomic<uint32_t> last_pushed_ts_{0};
   std::thread thread_;
   std::atomic<bool> running_{false};
   std::atomic<bool> loop_done_{false};

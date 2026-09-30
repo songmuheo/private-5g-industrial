@@ -17,7 +17,8 @@ fr0 = rows(f'{RD}/app/{cams[0]}-rx-frames.csv'); T0 = int(fr0[0]['recv_mono_ns']
 span = max(int(rows(f'{RD}/app/{c}-rx-frames.csv')[-1]['recv_mono_ns']) for c in cams)/1e9 - T0; NB = int(span//BIN) + 1
 # stream -> UE (ip -> rnti) via signaling + pdcp
 ip2s = {}; last = None
-for line in open(f'{RD}/app/signaling.log'):
+CTL = next((p for p in (f'{RD}/app/signaling.log', f'{RD}/app/control.log') if os.path.exists(p)), None)  # webrtc / gstreamer
+for line in (open(CTL) if CTL else []):
     m = re.search(r"connection from \('([\d.]+)'", line); last = m.group(1) if m else last
     m = re.search(r"sender (\w+) registered", line)
     if m and last and last.startswith('10.45'): ip2s[last] = m.group(1)
@@ -59,7 +60,8 @@ per = {}
 for cam in cams:
     A = f'{RD}/senders/{cam}/app'
     fr = rows(f'{A}/{cam}-tx-frames.csv'); t0 = int(fr[0]['capture_mono_ns'])/1e9
-    cc = rows(f'{A}/{cam}-tx-cc.csv'); ev = rows(f'{A}/{cam}-tx-events.csv'); enc = rows(f'{A}/{cam}-tx-encoded.csv'); tx = rows(f'{A}/{cam}-tx-rtp.csv'); rx = rows(f'{RD}/app/{cam}-rx-rtp.csv')
+    def rows_opt(p): return rows(p) if os.path.exists(p) else []   # tx-cc: webrtc or gstreamer --cc gcc; tx-events: webrtc only
+    cc = rows_opt(f'{A}/{cam}-tx-cc.csv'); ev = rows_opt(f'{A}/{cam}-tx-events.csv'); enc = rows(f'{A}/{cam}-tx-encoded.csv'); tx = rows(f'{A}/{cam}-tx-rtp.csv'); rx = rows(f'{RD}/app/{cam}-rx-rtp.csv')
     # laptop clock -> gNB clock offset estimate from the first matched packet (relative delays only)
     txi = collections.defaultdict(list)
     for r in tx:
@@ -131,9 +133,9 @@ if spikes and has_gnb:
             # per-second GCC target and overuse recomputed cheaply from cached bins is not exact; read once per cam
             if 'cc1' not in p:
                 p['cc1'] = collections.defaultdict(list); p['ov1'] = collections.Counter(); p['owd1'] = collections.defaultdict(list)
-                for r in rows(f'{A}/{cam}-tx-cc.csv'):
+                for r in rows_opt(f'{A}/{cam}-tx-cc.csv'):
                     if r['target_bps'] not in ('-1', ''): p['cc1'][int((int(r['log_mono_ns'])+off)/1e9 - T0)].append(int(r['target_bps'])/1e6)
-                for r in rows(f'{A}/{cam}-tx-events.csv'):
+                for r in rows_opt(f'{A}/{cam}-tx-events.csv'):
                     if r['event'] == 'bwe_delay' and r['b'] == '2': p['ov1'][int((int(r['log_mono_ns'])+off)/1e9 - T0)] += 1
                 for d_, tt, c_ in spikes:
                     if c_ == cam: p['owd1'][int(tt)].append(d_)

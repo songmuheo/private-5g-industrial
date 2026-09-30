@@ -14,7 +14,8 @@ mkdir -p "$OUT/src"
 if [ ! -f "$SRC/Cargo.toml" ]; then
   curl -sSL "https://crates.io/api/v1/crates/$CRATE/$VER/download" | tar -xz -C "$OUT/src"
 fi
-( cd "$SRC" && cargo build --release --locked 2>/dev/null || cargo build --release )
+# The crates.io tarball ships its Cargo.lock: build exactly that dependency set (a failure is a real failure).
+( cd "$SRC" && cargo build --release --locked )
 cp "$SRC/target/release/libgstrsrtp.so" "$OUT/"
 GST_PLUGIN_PATH="$OUT" gst-inspect-1.0 rtpgccbwe | grep -E "^  (Version|Long-name)|estimated-bitrate|min-bitrate|max-bitrate" | head -8
 echo "rsrtp=$VER" > "$OUT/BUILD_INFO.txt"; echo "[build_gst_rs] $OUT/libgstrsrtp.so"

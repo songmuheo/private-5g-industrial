@@ -86,10 +86,11 @@ fi
 declare -A STATUS
 for c in "${CAMS[@]}"; do
   var="CAM_ARGS_$c"; args="${!var}"; src="$(sed -n 's/.*--yuv \([^ ]*\).*/\1/p' <<<"$args")"   # repo-relative; on_host cd's into gstreamer/ -> ../
-  gccchk=""; case " $args " in *" --cc gcc "*) gccchk="[ -f build/gst-plugins-rs/libgstrsrtp.so ] && echo rtpgccbwe=ok || echo rtpgccbwe=MISSING;";; esac   # --cc gcc needs the Rust plugin on the laptop (make build-gst-rs)
+  gccchk=""; case " $args " in *" --cc gcc "*) gccchk="GST_PLUGIN_PATH=build/gst-plugins-rs gst-inspect-1.0 rtpgccbwe >/dev/null 2>&1 && echo rtpgccbwe=ok || echo rtpgccbwe=MISSING;";; esac   # --cc gcc: the Rust plugin must LOAD on the laptop (make build-gst-rs)
   out="$(on_host "$c" "git rev-parse --short HEAD 2>/dev/null; [ -z '$src' ] || { [ -f '../$src' ] && echo asset=ok || echo asset=MISSING; }; $gccchk chronyc tracking 2>/dev/null | awk '/RMS offset/{print \"rms_ms=\" \$4*1000}' || echo chrony=none" 2>&1 | tr '\n' ' ')" \
     && STATUS[$c]="ok: $out" || STATUS[$c]="UNREACHABLE: $out"
   log "preflight $c @ $( [ "$HOST_MODE" = local ] && echo local || host_of "$c"): ${STATUS[$c]}"
+  case "${STATUS[$c]}" in *rtpgccbwe=MISSING*) log "ABORT: $c uses --cc gcc but rtpgccbwe does not load on its host (run: make build-gst-rs there)"; exit 1;; esac
 done
 log "gNB PC HEAD $(git rev-parse --short HEAD)"
 # ---- radio link check from the live gNB table (last ~10 s of gnb_stdout.log): CQI and power headroom per UE ----
