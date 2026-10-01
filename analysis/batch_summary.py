@@ -43,7 +43,7 @@ def main(session):
             r = json.load(open(f)); gl = r["1_group_latency"]
             groups.append(dict(g, met=gl["group"]["deadline_met"], median=gl["group"]["median"], p99=gl["group"]["p99"],
                                per_camera=gl["per_camera"]))
-        invalid = os.path.exists(f"{rd}/analysis/INVALID")
+        invalid = os.path.exists(f"{rd}/analysis/INVALID") or os.path.exists(f"{rd}/analysis/VERIFY_FAILED")   # excluded from comparisons
         runs.append(dict(rd=rd, name=sc["name"], rot=exp.get("rotation", 0), host=host, prof=prof, groups=groups, invalid=invalid))
     if not runs: sys.exit(f"no runs under {session}/runs/")
     out = f"{session}/analysis"; os.makedirs(f"{out}/graphs", exist_ok=True)

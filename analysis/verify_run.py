@@ -122,10 +122,8 @@ def main(run_dir: str) -> int:
                 g[name]["lines"] = line_count(f)
         # radio statistics: only this run's window when the gNB traces are a whole session's (sub-run of run_batch.sh /
         # run_experiment.sh inside a live gNB session) -> experiment.json start + duration; otherwise the whole trace
-        win = None
-        if (rd / "experiment.json").exists():
-            e = json.loads((rd / "experiment.json").read_text())
-            t0 = int(e["start_time_epoch"] * 1e9); win = (t0, t0 + (int(e["scenario"].get("duration_s", 300)) + 5) * 1_000_000_000)
+        from trace_io import run_window
+        win = run_window(str(rd))
         inwin = (lambda r: win[0] <= int(r["wall_ns"]) < win[1]) if win else (lambda r: True)
         g["radio_stats_scope"] = "run window (experiment.json)" if win else "whole trace"
         per_rnti: dict = collections.defaultdict(collections.Counter)

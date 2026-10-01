@@ -6,10 +6,9 @@ RD=sys.argv[1]; NTP_UNIX_MS=2208988800000; SPF=20  # slots per frame @30 kHz
 TDD_PERIOD=int(sys.argv[2]) if len(sys.argv)>2 else 10
 # gNB traces of a sub-run are the whole session's (results/<session>/runs/<run>/gnb -> ../../gnb): keep only this run's
 # window (experiment.json start .. start + duration + 5 s) so earlier experiments never enter this run's report
-WIN=None
-if os.path.exists(f'{RD}/experiment.json'):
-    _e=json.load(open(f'{RD}/experiment.json')); _t0=int(_e['start_time_epoch']*1e9)
-    WIN=(_t0, _t0+(int(_e['scenario'].get('duration_s',300))+5)*1_000_000_000)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from trace_io import run_window
+WIN=run_window(RD)   # recorded execution bounds (see trace_io.run_window)
 def rows(p):
     with open(p) as f:
         r=[x for x in csv.DictReader(l for l in f if not l.startswith('#')) if None not in x.values()]

@@ -43,6 +43,7 @@ plt.rcParams.update({"font.size": 9, "axes.edgecolor": INK2, "axes.labelcolor": 
                      "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.6, "legend.frameon": False})
 
 BASE_FPS = 30                   # capture base grid (every profile's fps divides it; prepare_video.sh)
+BASE_PERIOD_NS = (1_000_000 // BASE_FPS) * 1000   # the sender's grid uses integer microseconds (video_sender.cc: 1000000 / fps)
 SLOT_NS = 500_000               # UL slot duration at 30 kHz SCS (ran/gnb/configs/gnb_b210_n78_tdd_20mhz.yml common_scs: 30)
 SPREAD_MEANINGFUL_MS = 5.0      # items 5, 6: a straggler "counts" when it completes this much after the first member
 DECISION_OFFSETS_MS = (0, 5, 10)  # item 6: decision instants after the first member's frame-k data reaches the gNB
@@ -53,6 +54,7 @@ INF = float("inf")
 
 
 def rows(path):
+    if not os.path.exists(path): return   # e.g. a loopback run has no gNB traces
     with open(path) as f:   # skips a torn last line (a trace still being written by a live gNB session)
         yield from (r for r in csv.DictReader(l for l in f if not l.startswith("#")) if None not in r.values())
 
@@ -82,42 +84,44 @@ def load(rd, cams, warmup_s):
     for c in cams:
         a = f"{rd}/senders/{c}/app"; step = BASE_FPS // fps[c]
         enc = {r["rtp_ts"]: r for r in rows(f"{a}/{c}-tx-encoded.csv")}
-        s0 = {}; s1 = {}; ssrc = None
+        s0 = {}; s1 = {}; pay = collections.Counter(); ssrc = None
         for r in rows(f"{a}/{c}-tx-rtp.csv"):
             ssrc = ssrc or r["ssrc"]; w = int(r["log_wall_ns"]); ts = r["rtp_ts"]
-            s0[ts] = min(w, s0.get(ts, w)); s1[ts] = max(w, s1.get(ts, w))
+            s0[ts] = min(w, s0.get(ts, w)); s1[ts] = max(w, s1.get(ts, w)); pay[ts] += int(r["payload_bytes"])
         fr = {}
         for r in rows(f"{a}/{c}-tx-frames.csv"):
             ts = r["rtp_ts"]; e = enc.get(ts)
             fr[int(r["grid_slot"]) * step] = dict(ts=ts, cap=int(r["capture_wall_ns"]), src=int(r["src_frame_idx"]),
                                                   submitted=r["to_encoder"] == "1", sent0=s0.get(ts), sent1=s1.get(ts),
-                                                  idr=(e is not None and e["is_idr"] == "1"), bytes=int(e["bytes"]) if e else 0)
+                                                  idr=(e is not None and e["is_idr"] == "1"), bytes=int(e["bytes"]) if e else 0,
+                                                  payload=pay.get(ts, 0))   # RTP payload bytes of the frame (descriptor size in packetization units)
         app = {r["rtp_ts"]: int(r["recv_wall_ns"]) for r in rows(f"{rd}/app/{c}-rx-frames.csv") if r["ssrc"] == ssrc}
         C[c] = dict(ssrc=ssrc, frames=fr, app=app, fps=fps[c])
     by_ssrc = {v["ssrc"]: c for c, v in C.items()}
     pk = {c: collections.defaultdict(list) for c in cams}   # (wall, sdu_bytes, marker) per rtp_ts, in arrival order
-    ue = {}
+    lo = T + int(warmup_s * 1e9); hi = T + dur * 1_000_000_000
+    ue = collections.defaultdict(set)                       # camera -> UE indexes its SSRC used inside this run's window
     for r in rows(f"{rd}/gnb/gnb_pdcp_ul.csv"):
         if r["rtp_like"] != "1": continue
         c = by_ssrc.get(r["rtp_ssrc"])
         if c is None: continue
-        ue[c] = r["ue_index"]
+        if T <= int(r["wall_ns"]) < hi + 5_000_000_000: ue[c].add(r["ue_index"])
         pk[c][r["rtp_ts"]].append((int(r["wall_ns"]), int(r["sdu_bytes"]), r["rtp_marker"] == "1"))
     sched = []
     for r in rows(f"{rd}/gnb/gnb_sched_ul.csv"):
         r["dec_ns"] = int(r["wall_ns"]) - int(r["k_offset"] or 0) * SLOT_NS   # DCI (decision) instant
         sched.append(r)
     sched.sort(key=lambda r: r["dec_ns"])
-    lo = T + int(warmup_s * 1e9); hi = T + dur * 1_000_000_000
-    rn_cnt = collections.defaultdict(collections.Counter)   # UE index -> RNTI within THIS run's window (session traces may
-    for r in sched:                                          # hold earlier connections that reused the UE index)
-        if T <= r["dec_ns"] < hi: rn_cnt[r["ue_index"]][r["rnti"]] += 1
-    rnti = {u: c.most_common(1)[0][0] for u, c in rn_cnt.items()}
-    reconnect = {u: list(c) for u, c in rn_cnt.items() if len(c) > 1}
+    # RAN rows are matched to cameras by UE index (grants, BSR and RLC rows all carry it), and only inside this run's
+    # window: a reconnection that changes the RNTI keeps working; a UE index used by two cameras makes RAN metrics ambiguous.
+    owners = collections.defaultdict(set)
+    for c, us in ue.items():
+        for u in us: owners[u].add(c)
+    shared_ue = {u: sorted(cs) for u, cs in owners.items() if len(cs) > 1}
+    ran_ok = all(ue.get(c) for c in cams) and not shared_ue
     no_marker = 0
     for c in cams:
-        if c not in ue: sys.exit(f"{c}: no RTP rows at the gNB PDCP for ssrc {C[c]['ssrc']} (not an OTA run?)")
-        C[c]["ue"] = ue[c]; C[c]["rnti"] = rnti.get(ue[c])
+        C[c]["ue"] = ue.get(c, set())
         for k, f in C[c]["frames"].items():
             p = pk[c].get(f["ts"], [])
             f["g0"] = p[0][0] if p else None
@@ -129,12 +133,13 @@ def load(rd, cams, warmup_s):
     # A2: expected group frames come from the schedule (epoch T, duration, task rate), not from the rows that happen to
     # exist: a frame a member never captured or sent (sender died, slot missed) is a placeholder and counts as a miss.
     step_g = max(BASE_FPS // fps[c] for c in cams)
-    E = [k for k in range(0, dur * BASE_FPS + 1, step_g) if lo <= T + k * 1e9 / BASE_FPS < hi]
+    E = [k for k in range(0, dur * BASE_FPS + 1, step_g) if lo <= T + k * BASE_PERIOD_NS < hi]
     for c in cams:
         for k in E:
-            C[c]["frames"].setdefault(k, dict(ts=None, cap=int(T + k * 1e9 / BASE_FPS), src=-1, submitted=False, sent0=None, sent1=None,
-                                              idr=False, bytes=0, g0=None, g1=None, gpk=[], app=None, absent=True))
-    return T, dur, C, E, sched, no_marker, reconnect
+            C[c]["frames"].setdefault(k, dict(ts=None, cap=T + k * BASE_PERIOD_NS, src=-1, submitted=False, sent0=None, sent1=None,
+                                              idr=False, bytes=0, payload=0, g0=None, g1=None, gpk=[], app=None, absent=True))
+    reconnect = {c: sorted(us) for c, us in ue.items() if len(us) > 1}
+    return T, dur, C, E, sched, no_marker, dict(ran_ok=ran_ok, shared_ue=shared_ue, multi_ue=reconnect)
 
 
 # ------------------------------------------------------------------------------------------------ analysis
@@ -159,14 +164,15 @@ def write(out, gid, res, txt):
 
 def analyse_group(rd, g, warmup_s, out, gdir):
     gid, cams, D = g["id"], list(g["cams"]), float(g["deadline_ms"])
-    T, dur, C, E, sched, no_marker, reconnect = load(rd, cams, warmup_s)
+    T, dur, C, E, sched, no_marker, ranmap = load(rd, cams, warmup_s)
     if not E: print(f"[fusion_report] group {gid}: no common capture instants in the window"); return
     F = lambda c, k: C[c]["frames"][k]
     fps_g = min(C[c]["fps"] for c in cams); period = 1000.0 / fps_g          # group frame period (ms)
     res = {"group": gid, "cams": cams, "deadline_ms": D, "warmup_s": warmup_s, "expected_frames": len(E), "group_fps": fps_g,
            "member_fps": {c: C[c]["fps"] for c in cams}, "frames_without_marker_at_gnb": no_marker,
-           "member_frames_absent": {c: sum(1 for k in E if F(c, k).get("absent")) for c in cams}, "rnti_changes_in_run": reconnect}
-    if reconnect: print(f"[fusion_report] WARNING: UE index -> RNTI changed inside the run window: {reconnect} (the most frequent RNTI is used)")
+           "member_frames_absent": {c: sum(1 for k in E if F(c, k).get("absent")) for c in cams}, "ran_mapping": ranmap}
+    if ranmap["multi_ue"]: print(f"[fusion_report] note: a camera used several UE indexes in this run (reconnection): {ranmap['multi_ue']} - all are attributed to it")
+    if not ranmap["ran_ok"]: print(f"[fusion_report] WARNING: RAN metrics unavailable (camera without gNB PDCP rows, or UE index shared: {ranmap['shared_ue']}); items 1-2 only")
     txt = [f"# fusion analysis {rd}  group {gid} = {'+'.join(cams)}  deadline {D:.0f} ms  group rate {fps_g} fps "
            f"(expected group frames with capture >= T+{warmup_s:g} s: {len(E)})",
            f"# same content frame at every member: {all(len({F(c, k)['src'] * (BASE_FPS // C[c]['fps']) for c in cams if not F(c, k).get('absent')}) <= 1 for k in E)}"
@@ -252,6 +258,11 @@ def analyse_group(rd, g, warmup_s, out, gdir):
     ax[1].set_xlabel("spread (ms)"); ax[1].set_ylabel("group latency (ms)"); ax[1].set_title(f"spread vs group latency (r = {corr:.2f})", fontsize=9, loc="left")
     fig.tight_layout(); fig.savefig(f"{gdir}/fusion_{gid}_2_spread.png", dpi=130); plt.close(fig)
 
+    if not ranmap["ran_ok"]:
+        txt.append("", ) if False else None
+        txt.append(f"  (RAN-side items 3-8 unavailable: {'no gNB PDCP rows for ' + ','.join(c for c in cams if not C[c]['ue']) if any(not C[c]['ue'] for c in cams) else 'UE index shared ' + str(ranmap['shared_ue'])})")
+        write(out, gid, res, txt); return
+
     # ---------------------------------------------------------------- 3. frontier lag (gNB view)
     # f_i(t) = index (in E) of the last frame such that member i's frames E[0..f] all reached the gNB (marker) by t.
     # A frame that never completes blocks the frontier, as it would block the fusion.
@@ -306,11 +317,11 @@ def analyse_group(rd, g, warmup_s, out, gdir):
     # the group minimum, strictly below u's, and the laptop has started sending j's next frame (first sendto <= t). The
     # laptop sendto is a proxy: it does not prove the bytes are queued in the phone (tethering delay, or already in the air).
     sent0 = {c: [F(c, k)["sent0"] or INF for k in E] for c in cams}
-    rnti2cam = {C[c]["rnti"]: c for c in cams}
+    ue2cam = {u: c for c in cams for u in C[c]["ue"]}
     lo, hi = cap[E[0]], cap[E[-1]] + int(period * 1e6)
     cls = collections.Counter(); per_s = collections.defaultdict(collections.Counter)
     for r in sched:
-        w = r["dec_ns"]; c = rnti2cam.get(r["rnti"])
+        w = r["dec_ns"]; c = ue2cam.get(r["ue_index"])
         if c is None or not lo <= w < hi: continue
         prb = int(r["rb_count"]); fi = {x: frontier_idx(x, w) for x in cams}; Fmin = min(fi.values())
         behind = [j for j in cams if j != c and fi[j] == Fmin and fi[j] < fi[c] and fi[j] + 1 < len(E) and sent0[j][fi[j] + 1] <= w]
@@ -341,17 +352,18 @@ def analyse_group(rd, g, warmup_s, out, gdir):
         for r in rs: d[key(r)].append(r)
         for v in d.values(): v.sort(key=tkey)
         return {k: (v, [tkey(r) for r in v]) for k, v in d.items()}
-    SU = idx(sched, lambda r: r["rnti"], lambda r: r["dec_ns"])
-    RL = idx((r for r in rows(f"{rd}/gnb/gnb_rlc_ul.csv") if r["event"] == "reassembly_expired"), lambda r: r["ue_index"], lambda r: int(r["wall_ns"]))
+    SU = idx((r for r in sched if r["ue_index"] in ue2cam), lambda r: ue2cam[r["ue_index"]], lambda r: r["dec_ns"])
+    RL = idx((r for r in rows(f"{rd}/gnb/gnb_rlc_ul.csv") if r["event"] == "reassembly_expired" and r["ue_index"] in ue2cam),
+             lambda r: ue2cam[r["ue_index"]], lambda r: int(r["wall_ns"]))
     def win(I, key, a, b):
         v, ts = I.get(key, ([], [])); return v[bisect.bisect_left(ts, a):bisect.bisect_right(ts, b)]
     def feats(c, k):   # events inside this member frame's own transport window [first sendto, marker at gNB]
         f = F(c, k); a, b = f["sent0"], f["g1"]
         if a is None or b is None: return None
-        g = win(SU, C[c]["rnti"], a, b)
+        g = win(SU, c, a, b)
         first_grant = g[0]["dec_ns"] if g else b
         return dict(access=(first_grant - a) / 1e6, drain=(b - first_grant) / 1e6, retx=sum(r["new_data"] == "0" for r in g),
-                    rlc=len(win(RL, C[c]["ue"], a, b)), idr=f["idr"])
+                    rlc=len(win(RL, c, a, b)), idr=f["idr"])
     assoc = collections.Counter(); assoc_big = collections.Counter()
     for k, s in strag.items():
         fs = feats(s, k); fo = [x for x in (feats(c, k) for c in cams if c != s) if x]
@@ -396,15 +408,15 @@ def analyse_group(rd, g, warmup_s, out, gdir):
     # ---------------------------------------------------------------- 6. can the RAN identify the straggler from what it observes?
     BS = collections.defaultdict(list)
     for r in rows(f"{rd}/gnb/gnb_bsr.csv"):
-        if r["rnti"] in rnti2cam: BS[r["rnti"]].append((int(r["wall_ns"]), r["lcg_id"], int(r["buffer_bytes"])))
+        if r["ue_index"] in ue2cam: BS[ue2cam[r["ue_index"]]].append((int(r["wall_ns"]), (r["ue_index"], r["lcg_id"]), int(r["buffer_bytes"])))
     BSt, BSv = {}, {}
     for rn, v in BS.items():   # per RNTI: total = sum over LCGs of each LCG's latest report, after every report
         v.sort(); state = {}; ts = []; tot = []
         for w, lcg, b in v: state[lcg] = b; ts.append(w); tot.append(sum(state.values()))
         BSt[rn], BSv[rn] = ts, tot
     def bsr_total(c, t):
-        rn = C[c]["rnti"]; i = bisect.bisect_right(BSt.get(rn, []), t) - 1
-        return BSv[rn][i] if i >= 0 else 0
+        i = bisect.bisect_right(BSt.get(c, []), t) - 1
+        return BSv[c][i] if i >= 0 else 0
     def received(c, k, t): return sum(max(0, b - RTP_IP_UDP_OVERHEAD) for w, b, _ in F(c, k)["gpk"] if w <= t)
     gnb_strag = [k for k in strag if all(F(c, k)["g1"] and F(c, k)["g0"] for c in cams)]
     done_list = sorted((max(F(c, k)["g1"] for c in cams), max(cams, key=lambda c: F(c, k)["g1"]))   # every group frame complete at the gNB
@@ -423,7 +435,7 @@ def analyse_group(rd, g, warmup_s, out, gdir):
                 names[0]: {c: bsr_total(c, t) for c in cams},
                 names[1]: {c: -frontier_idx(c, t) for c in cams},
                 names[2]: {c: (F(c, k)["g0"] if F(c, k)["g0"] <= t else INF) for c in cams},
-                names[3]: {c: -min(1.0, received(c, k, t) / max(1, F(c, k)["bytes"])) for c in cams},   # RTP payload vs Annex-B size: < 0.5 % unit mismatch, capped
+                names[3]: {c: -received(c, k, t) / max(1, F(c, k)["payload"]) for c in cams},   # RTP payload received / RTP payload size (same units)
                 names[4]: {c: (1 if c == last_s else 0) for c in cams},
             }
             for nm, sc in choices.items():

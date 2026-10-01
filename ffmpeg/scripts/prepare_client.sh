@@ -40,9 +40,14 @@ echo "[prepare_client] 3/6 SSH keys both ways (laptop -> gNB for the rungs; gNB 
 [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/id_ed25519 -C "$(whoami)@cam$K"
 ssh -o BatchMode=yes -o ConnectTimeout=5 "$GNB" true 2>/dev/null || { echo "   laptop -> $GNB: installing this laptop's key (asks the gNB PC's password once)"; ssh-copy-id -o StrictHostKeyChecking=accept-new "$GNB"; }
 mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
-for k in $(ssh -o BatchMode=yes "$GNB" 'cat ~/.ssh/id_*.pub' | awk '{print $1"|"$2}'); do   # the gNB PC's public keys -> authorized here
-  grep -qF "${k#*|}" ~/.ssh/authorized_keys || { echo "${k%|*} ${k#*|} gnb-pc" >> ~/.ssh/authorized_keys; echo "   gNB -> laptop: key authorized"; }; done
 systemctl is-active --quiet ssh || { sudo apt-get install -y openssh-server >/dev/null && sudo systemctl enable --now ssh; echo "   sshd installed/started"; }
+GKEYS="$(ssh -o BatchMode=yes "$GNB" 'cat ~/.ssh/id_*.pub 2>/dev/null')" || { echo "[prepare_client] cannot read the gNB PC's public keys over SSH" >&2; exit 1; }
+GKEYS="$(grep -E '^(ssh-|ecdsa-)[^ ]+ [A-Za-z0-9+/=]+' <<<"$GKEYS" || true)"
+[ -n "$GKEYS" ] || { echo "[prepare_client] the gNB PC account has no public key (~/.ssh/id_*.pub): run ssh-keygen there first" >&2; exit 1; }
+while read -r t b _; do grep -qF "$b" ~/.ssh/authorized_keys || { echo "$t $b gnb-pc" >> ~/.ssh/authorized_keys; echo "   gNB -> laptop: key authorized"; }; done <<<"$GKEYS"
+ME="$(whoami)@192.168.77.1$K"   # verify the reverse direction from the gNB PC (what run_experiment.sh will do)
+ssh -o BatchMode=yes "$GNB" "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 $ME true" \
+  && echo "   gNB -> laptop ($ME): verified" || { echo "[prepare_client] the gNB PC cannot log in here as $ME without a password (sync LAN up? sshd running?)" >&2; exit 1; }
 echo "[prepare_client] 4/6 build";    "$TREE/scripts/build_apps.sh" | tail -1
 echo "[prepare_client] 5/6 pre-encoded rungs of all scenario cameras (${#FILES[@]} files) from $GNB (sync LAN)"; mkdir -p video/assets
 if [ "$CLEAN" = 1 ]; then

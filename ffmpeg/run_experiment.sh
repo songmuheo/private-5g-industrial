@@ -105,17 +105,47 @@ kill -0 "$RECV_PID" 2>/dev/null || { cat "$RD/app/run_receiver.log"; echo "[exp]
 log "receivers up (pid $RECV_PID): $(grep -c 'pid=' "$RD/app/run_receiver.log") of $N"
 # stop: TERM run_receiver.sh (its EXIT trap INTs the receivers so traces flush, then stops the control server); bounded
 # wait; then, as a fallback, stop whatever of THIS run is still alive from receiver.pids (INT, then KILL after 10 s)
-declare -A LPID
-stop_senders() {   # aborted run (Ctrl-C, error): stop the senders on their hosts too, not only the local ssh clients
-  local c alive=""
-  for c in "${!LPID[@]}"; do kill -0 "${LPID[$c]}" 2>/dev/null && alive="$alive $c"; done
-  [ -n "$alive" ] || return 0
-  log "aborting: stopping the senders still running on their hosts:$alive"
-  for c in $alive; do on_host "$c" "pkill -INT -x video_sender || true" >/dev/null 2>&1 & done; wait_bg=$!
-  for i in $(seq 1 100); do local a=0; for c in $alive; do kill -0 "${LPID[$c]}" 2>/dev/null && a=1; done; [ $a = 0 ] && break; sleep 0.1; done
-  for c in $alive; do kill -0 "${LPID[$c]}" 2>/dev/null && { log "WARNING: $c's launcher still alive after 10 s"; kill -TERM "${LPID[$c]}" 2>/dev/null; }; done
+declare -A LPID; LAUNCHED=(); FINISHED=0
+# The senders of THIS launch carry P5G_RUN_ID=<RUN_ID> in their environment (run_sender.sh is started with it): only those
+# are signalled, never another experiment's or another tree's video_sender on the same laptop.
+owned_stop_cmd() {   # remote shell snippet: INT this run's senders, wait up to 10 s, print how many are left
+  local id; id="$(printf %q "P5G_RUN_ID=$RUN_ID")"
+  echo "mine() { for p in \$(pgrep -x video_sender); do tr '\\0' '\\n' </proc/\$p/environ 2>/dev/null | grep -qxF $id && echo \$p; done; };" \
+       "for p in \$(mine); do kill -INT \$p; done; for i in \$(seq 1 50); do [ -z \"\$(mine)\" ] && break; sleep 0.2; done; echo remaining=\$(mine | wc -l)"
 }
-cleanup() { set +e; stop_senders; log "stopping receivers"; kill -TERM "$RECV_PID" 2>/dev/null
+stop_senders() {   # aborted run: stop this run's senders on every host they were launched on (launcher alive or not)
+  [ "${#LAUNCHED[@]}" -gt 0 ] || return 0
+  log "aborting: stopping this run's senders on their hosts: ${LAUNCHED[*]}"
+  local c; declare -A SP
+  for c in "${LAUNCHED[@]}"; do on_host "$c" "$(owned_stop_cmd)" > "$RD/senders/$c.stop.log" 2>&1 & SP[$c]=$!; done
+  for c in "${LAUNCHED[@]}"; do wait "${SP[$c]}" 2>/dev/null
+    grep -q "remaining=0" "$RD/senders/$c.stop.log" && log "$c: sender stopped" || log "WARNING: $c: sender stop not confirmed ($(tail -1 "$RD/senders/$c.stop.log"))"; done
+  for c in "${LAUNCHED[@]}"; do kill -0 "${LPID[$c]}" 2>/dev/null && kill -TERM "${LPID[$c]}" 2>/dev/null; done
+}
+collect_senders() {   # this launch's sender directories only (results/<RUN_ID>-sender-<cam>); missing/failed -> MISSING
+  local c src
+  for c in "${CAMS[@]}"; do
+    case "${STATUS[$c]:-}" in UNREACHABLE*) log "$c: unreachable, no traces"; MISSING="${MISSING:-} $c(unreachable)"; continue;; esac
+    mkdir -p "$RD/senders/$c"
+    src="results/$RUN_ID-sender-$c"   # (results/ is at the repo root; on_host cd's into ffmpeg/)
+    if [ "$HOST_MODE" = "local" ]; then
+      if [ -d "$src/app" ] && cp -r "$src/app" "$RD/senders/$c/"; then log "collected $c from $src"; else log "$c: no sender traces ($src missing or copy failed)"; MISSING="${MISSING:-} $c"; fi
+    else
+      if rsync -aq "$HOST_USER@$(host_of "$c"):~/$(repo_of "$c")/$src/app/" "$RD/senders/$c/app/" 2>/dev/null; then log "collected $c from $(host_of "$c"):$src"
+      else log "$c: no sender traces on $(host_of "$c") ($src missing)"; MISSING="${MISSING:-} $c"; fi
+    fi
+    if [ -n "${FAILED[$c]:-}" ]; then MISSING="${MISSING:-} $c(failed)"; fi
+  done
+  return 0   # (a false test as the last command would make the function "fail" under set -e)
+}
+finalize_abort() {   # EXIT before the normal end: stop + collect what exists, mark the run aborted
+  [ "$FINISHED" = 1 ] && return 0
+  [ "${#LAUNCHED[@]}" -gt 0 ] || return 0
+  stop_senders; collect_senders
+  mkdir -p "$RD/analysis"; echo "INVALID: run aborted before its end (senders stopped, traces collected as far as they exist)" >> "$RD/analysis/INVALID"
+  log "RESULT INVALID: aborted"
+}
+cleanup() { set +e; finalize_abort; log "stopping receivers"; kill -TERM "$RECV_PID" 2>/dev/null
   for i in $(seq 1 150); do kill -0 "$RECV_PID" 2>/dev/null || break; sleep 0.1; done
   local left=""; [ -f "$RD/app/receiver.pids" ] && left="$(sed -n 's/^[a-z]*=//p' "$RD/app/receiver.pids" | tr ' ' '\n' | while read -r p; do [ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo "$p"; done)"
   if [ -n "$left" ] || kill -0 "$RECV_PID" 2>/dev/null; then
@@ -189,7 +219,7 @@ for c in "${CAMS[@]}"; do
   cmd="P5G_RUN_ID=$(printf %q "$RUN_ID") P5G_SYNC=$SYNC_MODE P5G_SYNC_MAX_MS=$SYNC_MAX_MS P5G_CONTROL_PORT=${P5G_CONTROL_PORT:-8765} ./run_sender.sh $RELAY_HOST --to recv$K --stream-id $c ${!var} --duration $DURATION --start-at $T"
   log "launch $c: $cmd"
   on_host "$c" "$cmd" > "$RD/senders/$c.launch.log" 2>&1 &
-  LPID[$c]=$!
+  LPID[$c]=$!; LAUNCHED+=("$c")
 done
 # resolved configuration record
 "$PY" - "$RD" "$T" "$HOST_MODE" "$SCEN" "$ROTATE" <<'PYEOF' $(for c in "${CAMS[@]}"; do printf '%s=%s=%s ' "$c" "$(host_cam "$c")" "$([ "$HOST_MODE" = local ] && echo local || host_of "$c")"; done)
@@ -204,25 +234,15 @@ json.dump(rec, open(f"{rd}/experiment.json", "w"), indent=2)
 PYEOF
 
 # ---- wait for the senders ----
-declare -A FAILED
+declare -A FAILED=()
 for c in "${!LPID[@]}"; do
   if wait "${LPID[$c]}"; then log "$c finished"; else log "$c FAILED (see senders/$c.launch.log)"; FAILED[$c]=1; fi
 done
 sleep 2
 
 # ---- collect sender traces ----
-for c in "${CAMS[@]}"; do
-  case "${STATUS[$c]}" in UNREACHABLE*) log "$c: unreachable, no traces"; MISSING="${MISSING:-} $c(unreachable)"; continue;; esac
-  mkdir -p "$RD/senders/$c"
-  src="results/$RUN_ID-sender-$c"   # this launch's directory (results/ is at the repo root; on_host cd's into ffmpeg/)
-  if [ "$HOST_MODE" = "local" ]; then
-    if [ -d "$src/app" ] && cp -r "$src/app" "$RD/senders/$c/"; then log "collected $c from $src"; else log "$c: no sender traces ($src missing or copy failed)"; MISSING="${MISSING:-} $c"; fi
-  else
-    if rsync -aq "$HOST_USER@$(host_of "$c"):~/$(repo_of "$c")/$src/app/" "$RD/senders/$c/app/" 2>/dev/null; then log "collected $c from $(host_of "$c"):$src"
-    else log "$c: no sender traces on $(host_of "$c") ($src missing)"; MISSING="${MISSING:-} $c"; fi
-  fi
-  [ -n "${FAILED[$c]:-}" ] && MISSING="${MISSING:-} $c(failed)"
-done
+collect_senders
+FINISHED=1
 
 # ---- stop receivers, verify, report ----
 cleanup; trap - EXIT

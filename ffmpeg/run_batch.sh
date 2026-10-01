@@ -20,7 +20,9 @@ if [ "${1:-}" = "post" ]; then
   FAILS=0
   for RD in "$SESSION"/runs/*/; do   # every step guarded: one failing run never stops the others or the summary
     RD="${RD%/}"; echo "== $RD"; mkdir -p "$RD/analysis"
-    if "$PY" analysis/verify_run.py "$RD" > "$RD/analysis/verify.log" 2>&1; then tail -1 "$RD/analysis/verify.log"; else echo "   verify FAILED (see $RD/analysis/verify.log)"; FAILS=$((FAILS + 1)); fi
+    rm -f "$RD/analysis/VERIFY_FAILED"
+    if "$PY" analysis/verify_run.py "$RD" > "$RD/analysis/verify.log" 2>&1; then tail -1 "$RD/analysis/verify.log"
+    else echo "   verify FAILED (see $RD/analysis/verify.log)"; FAILS=$((FAILS + 1)); tail -3 "$RD/analysis/verify.log" > "$RD/analysis/VERIFY_FAILED"; fi   # summary excludes it
     "$PY" analysis/exp_run_report.py "$RD" 5 > "$RD/analysis/report.txt" 2>&1 || { echo "   report failed"; FAILS=$((FAILS + 1)); }
     if "$PY" -c "import json,sys; sys.exit(0 if json.load(open('$RD/scenario.json')).get('groups') else 1)" 2>/dev/null; then
       "$PY" analysis/fusion_report.py "$RD" > "$RD/analysis/fusion_run.log" 2>&1 || { echo "   fusion failed (see $RD/analysis/fusion_run.log)"; FAILS=$((FAILS + 1)); }

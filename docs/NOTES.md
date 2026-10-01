@@ -1036,3 +1036,14 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   an aborted run stops the remote senders before the receivers (verified locally: Ctrl-C mid-run -> 0 senders, 0 receivers,
   port free). Design judgement recorded (Codex): 2 rounds = a screening design; it cannot separate rotation from round/time,
   phone hardware from placement, profile from its competing profiles, nor repeatability (one observation per cell).
+* Codex pass 3 (2026-10-01) fixes: aborting a run now signals ONLY this run's senders (video_sender processes whose
+  environment carries P5G_RUN_ID=<this run>), on every host it launched on, waits up to 10 s and logs confirmation per
+  host; the abort path collects the sender traces and marks the run `INVALID: aborted` (shared collect_senders). Verified
+  locally: Ctrl-C mid-run -> 5/5 "sender stopped", traces collected, INVALID written, 0 senders/receivers left; an unrelated
+  video_sender with another P5G_RUN_ID survived. A refactoring regression found while testing (a function ending in a false
+  `[ ] && ...` returned 1 under set -e and turned a normal end into "aborted") fixed before commit. Also: prepare_client.sh
+  checks it could read the gNB PC's public keys and verifies the gNB -> laptop login; run windows for verify/report come
+  from recorded execution bounds (last decoded frame), not only start + duration (gstreamer/webrtc start later);
+  run_batch post writes VERIFY_FAILED and batch_summary excludes such runs; fusion_report maps RAN rows to cameras by UE
+  index inside the run window (reconnections keep working, a shared index disables RAN items), reports items 1-2 even
+  without gNB data, measures progress in RTP-payload units on both sides, and uses the sender's integer-µs grid.
