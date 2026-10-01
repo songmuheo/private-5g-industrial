@@ -954,3 +954,14 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   HYPOTHESIS: external burst interference in n78 at the gNB receiver (simultaneous on both UEs, link otherwise
   unchanged) — not verified (no spectrum capture). Also: CPU governor was `powersave` (srsRAN warns at start);
   no late HARQs observed, but set `performance` before the next run to remove it as a variable.
+* Follow-up (same run): CRC failure by UEs sharing the UL slot (grant instances grouped by slot + 1 ms wall):
+  outside the event 3.4 % alone vs 5.5 % shared; inside 205-245 s 5.8 % alone vs 11.1 % shared. Sharing a slot
+  costs ~1.6-1.9x in both windows — consistent with the user's hypothesis that the two closely placed UEs disturb
+  each other (in-band emission / adjacent-PRB leakage into the other UE's PRBs at the gNB) — but the event window is
+  also worse for single-UE slots (5.8 vs 3.4 %), so co-location alone does not explain the burst. Next run: the
+  phones apart (> 1 m) with everything else equal.
+* Performance mode (2026-10-01): scripts/setup/performance_mode.sh (srsran_performance settings, non-interactive):
+  gNB PC 16 CPUs powersave -> performance (applied at every run_gnb_core.sh start, recorded in
+  gnb/performance_mode.txt); laptops 4 CPUs schedutil -> performance. Laptop net.core.wmem_max was 212992, so the
+  sender's 4 MiB SO_SNDBUF request had been capped at ~416 KiB (no missed slots or send failures resulted); now
+  32 MiB. ffmpeg preflight reports gov= per laptop and warns if not performance. Not persistent across reboots.
