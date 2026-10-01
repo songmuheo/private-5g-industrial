@@ -415,12 +415,12 @@ def analyse_group(rd, g, warmup_s, out, gdir):
     for r in rows(f"{rd}/gnb/gnb_bsr.csv"):
         if r["ue_index"] in ue2cam: BS[ue2cam[r["ue_index"]]].append((int(r["wall_ns"]), (r["ue_index"], r["rnti"], r["lcg_id"]), int(r["buffer_bytes"])))
     BSt, BSv = {}, {}
-    for rn, v in BS.items():   # per camera: sum over LCGs of the latest report of its CURRENT connection (UE index)
+    for cam_k, v in BS.items():   # per camera: sum over LCGs of the latest reports of its CURRENT UE context
         v.sort(); state = {}; cur = None; ts = []; tot = []
-        for w, (u, rn, lcg), b in v:
-            if (u, rn) != cur: cur = (u, rn); state = {}   # new UE context (index or RNTI changed): start from an empty state,
+        for w, (u, rnti_v, lcg), b in v:
+            if (u, rnti_v) != cur: cur = (u, rnti_v); state = {}   # new UE context (index or RNTI changed): start empty,
             state[lcg] = b; ts.append(w); tot.append(sum(state.values()))   # even when an old index is reused later
-        BSt[rn], BSv[rn] = ts, tot
+        BSt[cam_k], BSv[cam_k] = ts, tot
     def bsr_total(c, t):
         i = bisect.bisect_right(BSt.get(c, []), t) - 1
         return BSv[c][i] if i >= 0 else 0
