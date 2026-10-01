@@ -999,3 +999,26 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   frames: +1.9 ms median (p99 +88), +4.9 ms (cam0) / +1.7 ms (cam1) at the IDR frame, small after it (HRD-CBR IDRs are
   only 1.37 x a P frame). Without the phase correction the IDR frames looked FASTER (both origins 0 and 3 sit on the
   favourable phase) — a confounder to keep in mind for the 5-UE design (origins 3 apart = same phase).
+
+## 2026-10-01 — Codex review of the fusion analysis and the 5-UE matrix: corrections (supersedes parts of the entry above)
+* Fixed in analysis/fusion_report.py: (a) every EXPECTED group frame is in the denominator, a member frame never decoded is a
+  miss (was dropped); (b) frame identity = capture instant on the 30 fps base grid, so mixed 15/30 fps groups join on the
+  common instants; (c) gNB completion = the MARKER packet (was the last packet seen); (d) scheduler decisions reconstructed as
+  wall - k2 slots (the sched_ul row is logged for the PUSCH slot); (e) predictors use only information observable at the
+  decision instant (persistence = straggler of the last group frame already complete), BSR summed over LCGs, progress
+  normalised by the descriptor frame size, and an arrival-order baseline added; (f) persistence runs and their i.i.d.
+  expectation on the same (qualifying) sequence; (g) waiting share divided by member time to GROUP completion; (h) labels
+  derived from the group rate; (i) per-second frontier occupancy split at second boundaries; (j) item 4 renamed a proxy and
+  item 5 a heuristic association. ffmpeg/scripts/prepare_client.sh: TREE was used before it was set (would have failed on a
+  fresh laptop) — fixed and tested.
+* Corrected 2-UE numbers (g1 = cam0 + cam1, D = 100 ms): unchanged where the definitions held (met 98.02 %, independent
+  97.19 %, spread median 10.0 / p99 50.3 ms, frontier >= 2 frames 1.1 % of the time); waiting share 14.0 % (was 16.3 %);
+  item 4 proxy 4.2 % of UL PRBs (was 7.1 %, wrong decision instant); stragglers alternate (mean runs 1.17 / 1.76 vs i.i.d.
+  1.66 / 2.51 on the same sequence).
+* Conclusion RETRACTED: "early straggler identification needs the frame structure". An arrival-order predictor (which member's
+  frame-k data reached the gNB later / not yet) is already 93.4 % right at +0 ms without any frame size; size-aware progress
+  adds ~3 pp at +10 ms. What stays: stock BSR is misleading early (20 % at +0 ms) and PDCP frontiers are near random at +0 ms.
+  So group MEMBERSHIP and the frame-number mapping across flows remain necessary (to know whose arrival order matters),
+  frame sizes much less so. Associations in item 5 and the IDR residual in item 8 are descriptive, not causal.
+* 5-UE matrix comparison axes reworded (SCENARIO §8.1): only A vs D isolates one factor (load); A vs C and D vs B change the
+  whole task structure at similar load (descriptive comparisons).

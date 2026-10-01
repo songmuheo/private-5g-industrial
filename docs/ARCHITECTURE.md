@@ -103,3 +103,8 @@ tx-events (GoogCC: delay/loss estimate, probes, ALR; ICE/DTLS)        rx-events 
   the scenario's `groups` (the edge descriptor; later carried by the profile) or `--group`. Reason: the research
   question is group-level (an inference needs frame k from every member), which per-camera reports cannot answer.
   Outputs only under `<run>/analysis/`; `ffmpeg/run_experiment.sh` runs it when the scenario declares groups.
+* `ffmpeg/run_batch.sh`, `ffmpeg/experiments/batch-5ue*.json`, `analysis/batch_summary.py` (2026-10-01): repeated runs with a
+  camera-to-phone rotation inside one gNB session (docs/SCENARIO_EDGE_PROFILES.md §8.2). Reason: the phones' placement is fixed,
+  so profile effects and phone effects are only separable by moving profiles across phones (`run_experiment.sh --rotate R`), and
+  a 5-UE matrix needs several runs per gNB session (each run in `<session>/runs/`, gNB traces linked); the summary compares
+  scenarios, rotations, and phone x profile cells. `run_batch.sh post` re-analyses every run once the gNB traces are complete.

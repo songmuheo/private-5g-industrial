@@ -1,0 +1,40 @@
+{
+  "tree": "ffmpeg",
+  "name": "batch-5ue",
+  "pause_s": 10,
+  "_note": "Compact 5-UE baseline batch (docs/SCENARIO_EDGE_PROFILES.md \u00a78.2): round 1 rotate 0 A-B-C-D, round 2 rotate 2 D-C-B-A. Rotation moves every profile/group to other phones (camK runs on cam((K+2) mod 5)'s laptop) to separate phone placement from profile effects; the reversed order balances slow drifts (e.g. interference windows) across scenarios. 8 x ~5.7 min = ~46 min. batch-5ue-round3.json adds a third rotation (4) if time allows.",
+  "runs": [
+    {
+      "scenario": "ffmpeg/experiments/5ue-A-uniform1500.json",
+      "rotate": 0
+    },
+    {
+      "scenario": "ffmpeg/experiments/5ue-B-tasks-3x720p30-2x1080p15.json",
+      "rotate": 0
+    },
+    {
+      "scenario": "ffmpeg/experiments/5ue-C-mixed-2-2-1.json",
+      "rotate": 0
+    },
+    {
+      "scenario": "ffmpeg/experiments/5ue-D-uniform2000.json",
+      "rotate": 0
+    },
+    {
+      "scenario": "ffmpeg/experiments/5ue-D-uniform2000.json",
+      "rotate": 2
+    },
+    {
+      "scenario": "ffmpeg/experiments/5ue-C-mixed-2-2-1.json",
+      "rotate": 2
+    },
+    {
+      "scenario": "ffmpeg/experiments/5ue-B-tasks-3x720p30-2x1080p15.json",
+      "rotate": 2
+    },
+    {
+      "scenario": "ffmpeg/experiments/5ue-A-uniform1500.json",
+      "rotate": 2
+    }
+  ]
+}

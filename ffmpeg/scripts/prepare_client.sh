@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # One-shot preparation of a UE laptop for the ffmpeg tree (run ON the laptop, from the repo root or anywhere):
 #   ffmpeg/scripts/prepare_client.sh <K> [gnb-pc-user@host] [--clean]
-# K = the camera id this laptop plays (cam<K>). Steps: packages, build, this camera's pre-encoded rungs from the gNB
-# PC over the sync LAN — exactly the files cam<K> uses in the ffmpeg/experiments/*.json that use idr_origin (rotated MOT17-03 ladders per
+# K = the camera id this laptop plays by default (cam<K>; sync-LAN address). Steps: packages, build, the pre-encoded
+# rungs from the gNB PC over the sync LAN — every file any camera uses in the ffmpeg/experiments/*.json that use
+# idr_origin (with run_experiment.sh --rotate any laptop may play any camera; ~450 MB) (rotated MOT17-03 ladders per
 # profile and IDR origin, encoded once there by prepare_video.sh --source mot17-03, so every host has bit-identical
 # sources; P5G_ASSETS=all fetches every *.h264 instead), sha256 check against the manifest,
 # sync-LAN/chrony setup if missing, and a go/no-go check. --clean first deletes every other video file in
@@ -11,27 +12,29 @@ set -euo pipefail
 K="${1:?camera id K (this laptop plays cam<K>)}"; shift
 GNB=songmu@192.168.77.1; CLEAN=0
 for a in "$@"; do case "$a" in --clean) CLEAN=1;; *) GNB="$a";; esac; done
-# this camera's files = every rung file cam<K> uses in any ffmpeg scenario (resolved exactly as run_experiment.sh does)
+TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; ROOT="$(cd "$TREE/.." && pwd)"; cd "$ROOT"
+# the files = every rung file of every camera in the current-design scenarios (resolved exactly as run_experiment.sh does)
 mapfile -t FILES < <(python3 - "$K" "$TREE/experiments" <<'PY'
 import json, sys, glob
 K, d = sys.argv[1], sys.argv[2]; out = set()
 for f in sorted(glob.glob(f"{d}/*.json")):
-    s = json.load(open(f)); v = s.get("cams", {}).get(f"cam{K}")
-    if not v or not v.get("source") or s.get("hosts", {}).get("mode") == "local": continue
+    s = json.load(open(f))
+    if s.get("hosts", {}).get("mode") == "local": continue
     if not any("idr_origin" in c for c in s.get("cams", {}).values()): continue   # current design only (aligned frames, per-camera IDR origin)
-    src = v["source"]
-    if "idr_origin" in v: name, rest = src.split("_", 1); src = f"{name}-o{int(v['idr_origin'])}_{rest}"
-    for k in v.get("rungs") or [v.get("kbps", 2500)]: out.add(f"{src}_{int(k)}k.h264")
+    for v in s["cams"].values():   # every camera: with run_experiment.sh --rotate any laptop may play any camera
+        if not v.get("source"): continue
+        src = v["source"]
+        if "idr_origin" in v: name, rest = src.split("_", 1); src = f"{name}-o{int(v['idr_origin'])}_{rest}"
+        for k in v.get("rungs") or [v.get("kbps", 2500)]: out.add(f"{src}_{int(k)}k.h264")
 print("\n".join(sorted(out)))
 PY
-)
+) || { echo "[prepare_client] could not read the scenarios in $TREE/experiments" >&2; exit 1; }
 [ "${P5G_ASSETS:-}" = all ] && FILES=('*.h264')
-[ "${#FILES[@]}" -gt 0 ] || { echo "no scenario uses cam$K" >&2; exit 1; }
-TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; ROOT="$(cd "$TREE/.." && pwd)"; cd "$ROOT"
+[ "${#FILES[@]}" -gt 0 ] || { echo "no idr_origin scenario found in $TREE/experiments" >&2; exit 1; }
 echo "[prepare_client] 1/5 packages"; sudo apt-get install -y --no-install-recommends cmake ninja-build build-essential pkg-config \
   libavformat-dev libavcodec-dev libavutil-dev ffmpeg python3 chrony rsync >/dev/null
 echo "[prepare_client] 2/5 build";    "$TREE/scripts/build_apps.sh" | tail -1
-echo "[prepare_client] 3/5 cam$K's pre-encoded rungs (${#FILES[@]} files from the scenarios) from $GNB (sync LAN)"; mkdir -p video/assets
+echo "[prepare_client] 3/5 pre-encoded rungs of all scenario cameras (${#FILES[@]} files) from $GNB (sync LAN)"; mkdir -p video/assets
 if [ "$CLEAN" = 1 ]; then
   n=0; for f in video/assets/*.h264 video/assets/*.264 video/assets/*.yuv video/assets/*.y4m video/assets/*.mp4 video/assets/*.mkv; do [ -e "$f" ] || continue
     keep=0; for w in "${FILES[@]}"; do case "$(basename "$f")" in $w) keep=1;; esac; done; [ "$keep" = 1 ] || { rm -f "$f"; n=$((n + 1)); }; done

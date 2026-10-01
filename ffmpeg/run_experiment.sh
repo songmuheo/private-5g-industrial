@@ -20,8 +20,13 @@ set -euo pipefail
 # Layout: this script lives in ffmpeg/ (SMEC-style transport tree). results/, analysis/, video/assets and
 # scripts/setup are shared at the repo root (working directory); receivers/senders come from ffmpeg/.
 TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(cd "$TREE/.." && pwd)"; cd "$ROOT"
-SCEN="${1:?usage: run_experiment.sh ffmpeg/experiments/<scenario>.json}"
+SCEN="${1:?usage: run_experiment.sh ffmpeg/experiments/<scenario>.json [--rotate R]}"; shift
 [ -f "$SCEN" ] || { echo "no such scenario: $SCEN" >&2; exit 1; }
+# --rotate R: camK (its profile, groups, stream id, receiver) runs on the host of cam((K+R) mod N). Same profiles, other
+# phones: separates phone/placement effects from profile effects (the phones' deployment is fixed). 0 = as written.
+ROTATE=0
+while [ $# -gt 0 ]; do case "$1" in --rotate) ROTATE="$2"; shift 2;; *) echo "unknown arg $1" >&2; exit 1;; esac; done
+[[ "$ROTATE" =~ ^[0-9]+$ ]] || { echo "--rotate needs a non-negative integer" >&2; exit 1; }
 PY="$ROOT/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 
 # ---- scenario -> shell (python does the JSON; jq is not assumed) ----
@@ -59,8 +64,12 @@ PYEOF
 [ -n "${NAME:-}" ] || exit 1   # the scenario parser aborted (wrong tree / bad JSON)
 N=${#CAMS[@]}
 camK() { echo "${1//[!0-9]/}"; }
-host_of() { local v="CAM_HOST_$1"; echo "${!v:-${HOST_PATTERN//\{K\}/$(camK "$1")}}"; }      # cams.camK.host overrides the pattern
-repo_of() { local v="CAM_REPO_$1"; echo "${!v:-$HOST_REPO}"; }                                 # cams.camK.repo overrides hosts.repo
+base_host() { local v="CAM_HOST_$1"; echo "${!v:-${HOST_PATTERN//\{K\}/$(camK "$1")}}"; }    # cams.camK.host overrides the pattern
+base_repo() { local v="CAM_REPO_$1"; echo "${!v:-$HOST_REPO}"; }                               # cams.camK.repo overrides hosts.repo
+cam_index() { local i; for i in "${!CAMS[@]}"; do [ "${CAMS[$i]}" = "$1" ] && { echo "$i"; return; }; done; }
+host_cam() { echo "${CAMS[$(( ($(cam_index "$1") + ROTATE) % N ))]}"; }                      # whose host this cam runs on
+host_of() { base_host "$(host_cam "$1")"; }
+repo_of() { base_repo "$(host_cam "$1")"; }
 # run a command on a camera host (ssh) or locally
 on_host() { local cam="$1"; shift
   if [ "$HOST_MODE" = "local" ]; then bash -lc "cd '$TREE' && $*"
@@ -69,10 +78,17 @@ on_host() { local cam="$1"; shift
 # ---- run directory ----
 if [ "$REQUIRE_GNB" = 1 ]; then pgrep -x gnb >/dev/null || { echo "[exp] gNB is not running: start ./run_gnb_core.sh first (or set require_gnb=false for a local smoke test)" >&2; exit 1; }; fi
 # join the live gNB run only for a RAN experiment; a loopback smoke test (require_gnb=false) always gets its own directory
-if [ "$REQUIRE_GNB" = 1 ] && [ -L results/CURRENT ] && pgrep -x gnb >/dev/null; then RD="results/$(readlink results/CURRENT)"; else RD="results/$(date +%Y%m%d-%H%M%S)-$NAME"; fi
+# Inside a live gNB session (results/CURRENT, ./run_gnb_core.sh) every experiment gets its own sub-run
+# results/<session>/runs/<ts>-<name>-r<R>/ with gnb/ and core/ linked to the session's (one gNB, many experiments; each
+# run's window is its experiment.json start time + duration).
+TAG="$(date +%Y%m%d-%H%M%S)-$NAME-r$ROTATE"
+if [ "$REQUIRE_GNB" = 1 ] && [ -L results/CURRENT ] && pgrep -x gnb >/dev/null; then
+  SESSION="results/$(readlink results/CURRENT)"; RD="$SESSION/runs/$TAG"; mkdir -p "$RD"; ln -sfn ../../gnb "$RD/gnb"; ln -sfn ../../core "$RD/core"
+else RD="results/$TAG"; fi
 mkdir -p "$RD/app" "$RD/senders"; cp "$SCEN" "$RD/scenario.json"
 LOG="$RD/experiment.log"; log() { echo "[exp $(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
-log "scenario $NAME: $N cams, ${DURATION}s, start in ${START_DELAY}s, hosts=$HOST_MODE, relay=$RELAY_HOST -> $RD"
+log "scenario $NAME: $N cams, ${DURATION}s, start in ${START_DELAY}s, hosts=$HOST_MODE, relay=$RELAY_HOST, rotate=$ROTATE -> $RD"
+[ "$ROTATE" = 0 ] || log "rotation $ROTATE: $(for c in "${CAMS[@]}"; do printf '%s->%s ' "$c" "$(host_cam "$c")"; done)(camK runs on that cam's host)"
 
 # ---- receivers ----
 # leftovers of an earlier run (receivers, control server on the port) would mix into this run: refuse to start
@@ -165,12 +181,14 @@ for c in "${CAMS[@]}"; do
   LPID[$c]=$!
 done
 # resolved configuration record
-"$PY" - "$RD" "$T" "$HOST_MODE" "$SCEN" <<'PYEOF' "${CAMS[@]}"
+"$PY" - "$RD" "$T" "$HOST_MODE" "$SCEN" "$ROTATE" <<'PYEOF' $(for c in "${CAMS[@]}"; do printf '%s=%s=%s ' "$c" "$(host_cam "$c")" "$([ "$HOST_MODE" = local ] && echo local || host_of "$c")"; done)
 import json, sys, subprocess, datetime
-rd, T, mode, scen, *cams = sys.argv[1:]
+rd, T, mode, scen, rot, *cams = sys.argv[1:]
+m = [c.split("=") for c in cams]
 rec = {"scenario": json.load(open(scen)), "start_time_epoch": float(T), "start_time_local": datetime.datetime.fromtimestamp(float(T)).isoformat(),
        "host_mode": mode, "gnb_pc_git_head": subprocess.run(["git","rev-parse","HEAD"],capture_output=True,text=True).stdout.strip(),
-       "launch_logs": {c: f"senders/{c}.launch.log" for c in cams}}
+       "rotation": int(rot), "cam_host": {c: {"as_host_of": hc, "host": h} for c, hc, h in m},   # camK's profile ran on this host/phone
+       "launch_logs": {c: f"senders/{c}.launch.log" for c, _, _ in m}}
 json.dump(rec, open(f"{rd}/experiment.json", "w"), indent=2)
 PYEOF
 

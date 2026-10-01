@@ -1,0 +1,24 @@
+{
+  "tree": "ffmpeg",
+  "name": "batch-5ue-round3",
+  "pause_s": 10,
+  "_note": "optional third round of batch-5ue.json: rotate 4, order A-B-C-D (~23 min).",
+  "runs": [
+    {
+      "scenario": "ffmpeg/experiments/5ue-A-uniform1500.json",
+      "rotate": 4
+    },
+    {
+      "scenario": "ffmpeg/experiments/5ue-B-tasks-3x720p30-2x1080p15.json",
+      "rotate": 4
+    },
+    {
+      "scenario": "ffmpeg/experiments/5ue-C-mixed-2-2-1.json",
+      "rotate": 4
+    },
+    {
+      "scenario": "ffmpeg/experiments/5ue-D-uniform2000.json",
+      "rotate": 4
+    }
+  ]
+}
