@@ -1069,3 +1069,7 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
 * Lessons: (1) laptops need system suspend masked (default desktop idle-suspend hit during the batch's pauses / idle hosts);
   (2) the orchestrator must not wait for a vanished host's SSH timeout (keepalive/timeout); (3) after resume, chrony takes
   minutes to converge (.12 1.9 ms, .14 12.5 ms right after wake-up) - the preflight's 1 ms gate catches that.
+* Fixes applied (2026-10-01): (1) system suspend masked on all five laptops (`systemctl mask sleep.target suspend.target
+  hibernate.target hybrid-sleep.target`; prepare_client.sh now does it too); (2) every ssh/rsync to a laptop in the three
+  orchestrators uses ServerAliveInterval=5 / ServerAliveCountMax=3. Test: blocking .10 on the gNB PC firewall mid-session ->
+  the old options were still waiting after 60 s, the new ones gave up after 19 s (rule removed afterwards).

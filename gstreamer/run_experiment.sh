@@ -60,9 +60,12 @@ camK() { echo "${1//[!0-9]/}"; }
 host_of() { local v="CAM_HOST_$1"; echo "${!v:-${HOST_PATTERN//\{K\}/$(camK "$1")}}"; }      # cams.camK.host overrides the pattern
 repo_of() { local v="CAM_REPO_$1"; echo "${!v:-$HOST_REPO}"; }                                 # cams.camK.repo overrides hosts.repo
 # run a command on a camera host (ssh) or locally
+# SSH to the laptops: a host that vanishes (suspend, power, cable) is detected within ~15 s instead of the TCP timeout
+# (it stretched a run from 6 to 22 min on 2026-10-01): keepalive every 5 s, give up after 3 missed replies.
+SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
 on_host() { local cam="$1"; shift
   if [ "$HOST_MODE" = "local" ]; then bash -lc "cd '$TREE' && $*"
-  else ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST_USER@$(host_of "$cam")" "cd ~/$(repo_of "$cam")/gstreamer && $*"; fi; }
+  else ssh $SSH_OPTS "$HOST_USER@$(host_of "$cam")" "cd ~/$(repo_of "$cam")/gstreamer && $*"; fi; }
 
 # ---- run directory ----
 if [ "$REQUIRE_GNB" = 1 ]; then pgrep -x gnb >/dev/null || { echo "[exp] gNB is not running: start ./run_gnb_core.sh first (or set require_gnb=false for a local smoke test)" >&2; exit 1; }; fi
@@ -162,7 +165,7 @@ for c in "${CAMS[@]}"; do
   if [ "$HOST_MODE" = "local" ]; then
     if [ -d "$src/app" ] && cp -r "$src/app" "$RD/senders/$c/"; then log "collected $c from $src"; else log "$c: no sender traces ($src missing or copy failed)"; MISSING="${MISSING:-} $c"; fi
   else
-    if rsync -aq "$HOST_USER@$(host_of "$c"):~/$(repo_of "$c")/$src/app/" "$RD/senders/$c/app/" 2>/dev/null; then log "collected $c from $(host_of "$c"):$src"
+    if rsync -aq -e "ssh $SSH_OPTS" "$HOST_USER@$(host_of "$c"):~/$(repo_of "$c")/$src/app/" "$RD/senders/$c/app/" 2>/dev/null; then log "collected $c from $(host_of "$c"):$src"
     else log "$c: no sender traces on $(host_of "$c") ($src missing)"; MISSING="${MISSING:-} $c"; fi
   fi
   [ -n "${FAILED[$c]:-}" ] && MISSING="${MISSING:-} $c(failed)"

@@ -68,7 +68,9 @@ bad=0; for w in "${FILES[@]}"; do for f in video/assets/$w; do b="$(basename "$f
   [ -n "$h" ] && [ "$h" = "$(sha256sum "$f" | cut -c1-64)" ] || { echo "   sha256 MISMATCH: $b" >&2; bad=1; }; done; done
 [ "$bad" = 0 ] || { echo "[prepare_client] rung files do not match the gNB manifest" >&2; exit 1; }
 echo "   ${#FILES[@]} rung files, sha256 verified; video/assets now: $(du -sh video/assets | cut -f1)"
-echo "[prepare_client] 6/6 checks"; scripts/setup/performance_mode.sh | sed "s/^/   performance: /"; scripts/setup/sync_check.sh 1 || echo "   chrony not yet within 1 ms (give it a minute)"
+echo "[prepare_client] 6/6 checks"; scripts/setup/performance_mode.sh | sed "s/^/   performance: /";
+# no automatic suspend: an idle laptop suspended in the middle of a 5-UE batch on 2026-10-01 (docs/NOTES.md)
+sudo systemctl mask -q sleep.target suspend.target hibernate.target hybrid-sleep.target && echo "   suspend: $(systemctl is-enabled suspend.target)"; scripts/setup/sync_check.sh 1 || echo "   chrony not yet within 1 ms (give it a minute)"
 ip route show default | sed 's/^/   default route: /'
 "$TREE/build/apps/video_sender" --help 2>&1 | head -1 | sed 's/^/   /'
 echo "[prepare_client] done: this laptop plays cam$K; the gNB PC runs ffmpeg/run_experiment.sh"
