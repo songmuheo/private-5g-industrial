@@ -95,13 +95,14 @@ mot17_seq() {
 }
 if [ "$SOURCE" = mot17-03 ]; then
   IMG="$(mot17_seq 03)"; N=$(ls "$IMG"/*.jpg | wc -l); echo "[prepare] mot17-03: $N frames at $IMG, origins: $ORIGINS"
-  [ "$N" -ge 1500 ] || { echo "[prepare] MOT17-03 extraction incomplete ($N frames, expected 1500)" >&2; exit 1; }
+  [ "$N" = 1500 ] || { echo "[prepare] MOT17-03 has $N frames, expected exactly 1500 (re-extract: rm -rf $IMG/..)" >&2; exit 1; }
   [ $((N % GOP)) = 0 ] || { echo "[prepare] $N frames is not a multiple of GOP $GOP: the loop seam would break the IDR cadence" >&2; exit 1; }
   for P in $ORIGINS; do
     [ "$P" -ge 0 ] && [ "$P" -lt "$GOP" ] || { echo "[prepare] origin $P outside 0..$((GOP - 1))" >&2; exit 1; }
-    ROT="$SRC/mot17/rot/MOT17-03-o$P"; mkdir -p "$ROT"   # rotated view of the frames: link i -> content frame (i-1+P) mod N
+    ROT="$SRC/mot17/rot/MOT17-03-o$P"; rm -rf "$ROT"; mkdir -p "$ROT"   # fresh rotated view: link i -> content frame (i-1+P) mod N
     for i in $(seq 1 "$N"); do ln -sfn "$IMG/$(printf %06d $(( (i - 1 + P) % N + 1 )))".jpg "$ROT/$(printf %06d "$i").jpg"; done
-    for k in $RUNGS; do encode "$N" -framerate "$FPS" -i "$ROT/%06d.jpg" -- 1280 720 "$k" "$ASSETS/mot17-03-o${P}_1280x720_${FPS}_${k}k.h264"; done
+    [ "$(ls "$ROT" | wc -l)" = "$N" ] || { echo "[prepare] rotation dir $ROT does not hold exactly $N frames" >&2; exit 1; }
+    for k in $RUNGS; do encode "$N" -framerate "$FPS" -start_number 1 -i "$ROT/%06d.jpg" -- 1280 720 "$k" "$ASSETS/mot17-03-o${P}_1280x720_${FPS}_${k}k.h264"; done
   done
 fi
 if [ "$SOURCE" = kendo ] || [ "$SOURCE" = all ]; then

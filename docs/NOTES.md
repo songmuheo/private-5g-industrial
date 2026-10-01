@@ -914,3 +914,9 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
 * Scenarios: `5ue-720p30.json` (start bitrate 1500 kbps: 5 x 2500 exceeds the DDDSU UL capacity measured on
   2026-09-30), `2ue-720p30-mot03.json` (2500 kbps), `demo-local-5cam.json`. The profile's bitrate = `kbps` (start)
   + `profile` messages (rung switch at the camera's own next IDR).
+* Codex review (2026-10-01): mapping, rotation, seam (1499 -> 0 across file wrap), late start and rung switching
+  verified correct. Fixed: preflight now checks every rung file of a camera against its manifest sha256 (was the
+  first file only; verified: a missing 3000k rung aborts at preflight); `idr_origin` + `phase_slots` together are
+  refused (they break the alignment); rotation directory rebuilt fresh with `-start_number 1` and exactly N frames.
+  Clarified in the README: with origins 0/3/6/9/12 the IDRs come in a 5-burst cluster (100 ms apart) then 1.6 s
+  without IDR — evenly spread would be 0/12/24/36/48 (user's choice); slots < 12 are not covered by every camera.

@@ -46,6 +46,8 @@ for c, v in cams.items():
     if v.get('source'):
         rungs = v.get('rungs') or [int(v.get('kbps', 2500))]
         src = v['source']
+        if 'idr_origin' in v and int(v.get('phase_slots', 0)):
+            sys.exit(f"ABORT: {c}: idr_origin and phase_slots together break the frame-number alignment (content = (slot+phase) mod N); use one")
         if 'idr_origin' in v:   # per-camera rotated ladder (prepare_video.sh --source mot17-03): <seq>-o<P>_<WxH>_<fps>; same frame numbers, IDRs at P+GOP*m
             name, rest = src.split('_', 1); src = f"{name}-o{int(v['idr_origin'])}_{rest}"
             args.append(f"--content-origin {int(v['idr_origin'])}")
@@ -88,8 +90,12 @@ if [ "$HOST_MODE" = "ssh" ] && ! sudo -n iptables -S P5G_SYNC_OUT 2>/dev/null | 
 fi
 declare -A STATUS
 for c in "${CAMS[@]}"; do
-  var="CAM_ARGS_$c"; args="${!var}"; src="$(sed -n 's/.*--source \([^ @,]*\).*/\1/p' <<<"$args")"   # repo-relative; on_host cd's into ffmpeg/ -> ../
-  out="$(on_host "$c" "git rev-parse --short HEAD 2>/dev/null; [ -z '$src' ] || { [ -f '../$src' ] && echo asset=ok || echo asset=MISSING; }; chronyc tracking 2>/dev/null | awk '/RMS offset/{print \"rms_ms=\" \$4*1000}' || echo chrony=none" 2>&1 | tr '\n' ' ')" \
+  var="CAM_ARGS_$c"; args="${!var}"
+  # every rung file of the camera (the sender loads them all), each checked against the sha256 in the manifest
+  srcs="$(sed -n 's/.*--source \([^ ]*\).*/\1/p' <<<"$args" | tr ',' '\n' | sed 's/@.*//' | tr '\n' ' ')"   # repo-relative; on_host cd's into ffmpeg/ -> ../
+  chk="for f in $srcs; do b=\$(basename \$f); [ -f ../\$f ] || { echo asset=MISSING:\$b; continue; }; w=\$(grep \"^file=\$b \" ../video/assets/h264_ladders.txt | sed -n 's/.* sha256=//p'); [ -n \"\$w\" ] && [ \"\$w\" = \"\$(sha256sum ../\$f | cut -c1-64)\" ] || echo asset=MISSING:\$b:sha; done; echo assets_checked=\$(echo $srcs | wc -w);"
+  [ -n "$srcs" ] || chk=""
+  out="$(on_host "$c" "git rev-parse --short HEAD 2>/dev/null; $chk chronyc tracking 2>/dev/null | awk '/RMS offset/{print \"rms_ms=\" \$4*1000}' || echo chrony=none" 2>&1 | tr '\n' ' ')" \
     && STATUS[$c]="ok: $out" || STATUS[$c]="UNREACHABLE: $out"
   log "preflight $c @ $( [ "$HOST_MODE" = local ] && echo local || host_of "$c"): ${STATUS[$c]}"
   case "${STATUS[$c]}" in *asset=MISSING*) log "ABORT: $c: pre-encoded source missing on its host (run ffmpeg/scripts/prepare_client.sh there)"; exit 1;; esac

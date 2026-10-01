@@ -70,9 +70,12 @@ a sender that starts after T enters at the next IDR slot of its timeline.
 the longest MOT17 sequence (1500 frames, 50 s, static) once per camera, rotated so camera K's file starts at content
 frame P_K = 3K. In a scenario, `"source": "mot17-03_1280x720_30", "idr_origin": P` selects `mot17-03-oP_*` and passes
 `--content-origin P`: every camera sends content frame k mod 1500 in slot k (same frame number at the same instant,
-`tx-frames.src_frame_idx` = content frame), while camera K's IDRs fall on content frames P_K + 60m (100 ms apart for
-3-frame spacing). 1500 is a multiple of the GOP, so the loop seam adds no IDR. A camera starts at its first IDR slot
-(P_K, at most 0.4 s after T); measure from T + 5 s. Scenarios: `5ue-720p30.json`, `2ue-720p30-mot03.json`,
+`tx-frames.src_frame_idx` = content frame), while camera K's IDRs fall on content frames P_K + 60m: with origins
+0/3/6/9/12 the five IDRs of a GOP come 100 ms apart, then 1.6 s without an IDR (each camera's own period stays 2 s;
+evenly spread would be 0/12/24/36/48). `phase_slots` must stay 0 with `idr_origin` (run_experiment.sh refuses the
+mix). 1500 is a multiple of the GOP, so the loop seam adds no IDR. A camera starts at its first IDR slot
+(P_K, at most 0.4 s after T), so slots before 12 are not covered by every camera; measure from T + 5 s (a sender that
+joins late enters at its next IDR, visible as `late_start_slots`). Scenarios: `5ue-720p30.json`, `2ue-720p30-mot03.json`,
 `demo-local-5cam.json`.
 
 **Bitrate in the profile.** Each camera's profile is (1280x720, 30 fps, bitrate): `kbps` in the scenario is the start
