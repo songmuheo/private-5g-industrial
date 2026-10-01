@@ -1,0 +1,105 @@
+{
+  "tree": "ffmpeg",
+  "duration_s": 300,
+  "start_delay_s": 20,
+  "relay_host": "10.53.1.1",
+  "require_gnb": true,
+  "hosts": {
+    "mode": "ssh",
+    "user": "songmu",
+    "ip_pattern": "192.168.77.1{K}",
+    "repo": "private-5g-industrial"
+  },
+  "sync": {
+    "mode": "auto",
+    "max_ms": 1
+  },
+  "receiver": {
+    "extra_args": []
+  },
+  "name": "5ue-B-tasks-3x720p30-2x1080p15",
+  "_note": "B: two task types, partition 3+2: safety-tracking fusion (3 x 720p30 1500 kbps, D 100 ms) and detail-inspection fusion (2 x 1080p15 2500 kbps, D 200 ms; 2x larger, half-rate bursts) -> 9.5 Mbps. Question: does a big-burst low-fps group hurt the other group (cross-group interference)? 5-UE matrix (docs/SCENARIO_EDGE_PROFILES.md \u00a78.1): one MOT17-03 view on every camera, aligned frame numbers, per-camera IDR offsets 0/133/267/467/533 ms (phases k mod 3 mixed). The stock RAN does not know the groups, so the radio traffic depends only on the profiles: every run can additionally be analysed under any other partition offline (fusion_report.py --group).",
+  "cams": {
+    "cam0": {
+      "fps": 30,
+      "source": "mot17-03_1280x720_30",
+      "idr_origin": 0,
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2000,
+        2500
+      ],
+      "kbps": 1500
+    },
+    "cam1": {
+      "fps": 30,
+      "source": "mot17-03_1280x720_30",
+      "idr_origin": 4,
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2000,
+        2500
+      ],
+      "kbps": 1500
+    },
+    "cam2": {
+      "fps": 30,
+      "source": "mot17-03_1280x720_30",
+      "idr_origin": 8,
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2000,
+        2500
+      ],
+      "kbps": 1500
+    },
+    "cam3": {
+      "fps": 15,
+      "source": "mot17-03_1920x1080_15",
+      "idr_origin": 7,
+      "rungs": [
+        1500,
+        2500,
+        4000
+      ],
+      "kbps": 2500
+    },
+    "cam4": {
+      "fps": 15,
+      "source": "mot17-03_1920x1080_15",
+      "idr_origin": 8,
+      "rungs": [
+        1500,
+        2500,
+        4000
+      ],
+      "kbps": 2500
+    }
+  },
+  "groups": [
+    {
+      "id": "g1",
+      "cams": [
+        "cam0",
+        "cam1",
+        "cam2"
+      ],
+      "deadline_ms": 100
+    },
+    {
+      "id": "g2",
+      "cams": [
+        "cam3",
+        "cam4"
+      ],
+      "deadline_ms": 200
+    }
+  ],
+  "_load_kbps": 9500
+}

@@ -18,7 +18,7 @@
   "receiver": {
     "extra_args": []
   },
-  "_note": "MOT17-03 (1500 frames, 50 s loop) on every camera; camK's ladder is rotated to start at content frame 3K (idr_origin), so in every slot all cameras send the SAME frame number and only the IDR instants differ (3 frames = 100 ms apart). kbps = the profile's bitrate (start rung); a `profile` message with bitrate_kbps switches the rung at the camera's next IDR.",
+  "_note": "MOT17-03 (1500 frames, 50 s loop) on every camera; camK's ladder is rotated to start at the 5-UE design's origin (cam0 0, cam1 4 frames) (idr_origin), so in every slot all cameras send the SAME frame number and only the IDR instants differ (3 frames = 100 ms apart). kbps = the profile's bitrate (start rung); a `profile` message with bitrate_kbps switches the rung at the camera's next IDR.",
   "cams": {
     "cam0": {
       "fps": 30,
@@ -36,7 +36,7 @@
     "cam1": {
       "fps": 30,
       "source": "mot17-03_1280x720_30",
-      "idr_origin": 3,
+      "idr_origin": 4,
       "rungs": [
         500,
         1000,

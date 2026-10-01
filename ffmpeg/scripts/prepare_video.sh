@@ -5,8 +5,9 @@
 # frame sizes are what the RAN-facing profile says), same frame count and IDR positions across the rungs of
 # one source so the sender can switch rungs at an IDR.
 #
-#   ffmpeg/scripts/prepare_video.sh [--source mot17|kendo|mot17-03|all] [--rungs "500 1000 1500 2500 4000"] [--gop 60]
-#                                   [--origins "0 3 6 9 12"]
+#   ffmpeg/scripts/prepare_video.sh [--source mot17|kendo|mot17-03|all] [--rungs "500 1000 1500 2500 4000"]
+#                                   [--gop FRAMES (default 2 s = 2*fps)] [--origins "0 3 6 9 12"]
+#                                   [--size 1280x720] [--fps 30]          (--size/--fps: mot17-03 only)
 #
 # Sources
 #   mot17 : MOT17-02 (MOTChallenge MOT17.zip, 5.9 GB, cached in video/sources/mot17/; only the 600 frames of
@@ -21,11 +22,16 @@
 #           k mod N in slot k on every camera -> same frame number at the same instant, only the IDR instants differ.
 #           N (1500) is a multiple of the GOP (60), so the loop seam adds no extra IDR. Files: mot17-03-o<P>_...
 #           (only included in --source all when requested explicitly, it is not part of the default set).
+#           --fps F < 30 (a divisor of 30) takes every (30/F)-th content frame (N = 1500*F/30 frames, e.g. 750 at 15 fps)
+#           and the origins are in frames of that rate; --size scales (e.g. 1920x1080, 640x360). File:
+#           mot17-03-o<P>_<WxH>_<F>_<kbps>k.h264. Every profile of the 5-UE scenarios is made this way (ffmpeg/experiments/5ue-*.json).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # repo
 ASSETS="$ROOT/video/assets"; SRC="$ROOT/video/sources"
-SOURCE=all; RUNGS="500 1000 1500 2500 4000"; GOP=60; FPS=30; ORIGINS="0 3 6 9 12"
-while [ $# -gt 0 ]; do case "$1" in --source) SOURCE="$2"; shift 2;; --rungs) RUNGS="$2"; shift 2;; --gop) GOP="$2"; shift 2;; --origins) ORIGINS="$2"; shift 2;; *) echo "unknown arg $1" >&2; exit 1;; esac; done
+SOURCE=all; RUNGS="500 1000 1500 2500 4000"; GOP=""; FPS=30; ORIGINS="0 3 6 9 12"; SIZE=1280x720
+while [ $# -gt 0 ]; do case "$1" in --source) SOURCE="$2"; shift 2;; --rungs) RUNGS="$2"; shift 2;; --gop) GOP="$2"; shift 2;; --origins) ORIGINS="$2"; shift 2;; --size) SIZE="$2"; shift 2;; --fps) FPS="$2"; shift 2;; *) echo "unknown arg $1" >&2; exit 1;; esac; done
+GOP="${GOP:-$((2 * FPS))}"   # 2 s GOP unless given (60 at 30 fps, as before)
+[ "$SOURCE" = mot17-03 ] || [ "$FPS" = 30 ] || { echo "--fps applies to --source mot17-03 only" >&2; exit 1; }
 mkdir -p "$ASSETS" "$SRC/mot17"
 command -v ffmpeg >/dev/null || { echo "ffmpeg missing (make deps)" >&2; exit 1; }
 
@@ -94,15 +100,18 @@ mot17_seq() {
   echo "$dir"
 }
 if [ "$SOURCE" = mot17-03 ]; then
-  IMG="$(mot17_seq 03)"; N=$(ls "$IMG"/*.jpg | wc -l); echo "[prepare] mot17-03: $N frames at $IMG, origins: $ORIGINS"
-  [ "$N" = 1500 ] || { echo "[prepare] MOT17-03 has $N frames, expected exactly 1500 (re-extract: rm -rf $IMG/..)" >&2; exit 1; }
+  IMG="$(mot17_seq 03)"; N0=$(ls "$IMG"/*.jpg | wc -l)
+  [ "$N0" = 1500 ] || { echo "[prepare] MOT17-03 has $N0 frames, expected exactly 1500 (re-extract: rm -rf $IMG/..)" >&2; exit 1; }
+  [ $((30 % FPS)) = 0 ] || { echo "[prepare] --fps $FPS must divide 30 (frames of a lower rate are a subset of the 30 fps capture grid)" >&2; exit 1; }
+  STEP=$((30 / FPS)); N=$((N0 / STEP)); W="${SIZE%x*}"; H="${SIZE#*x}"
+  echo "[prepare] mot17-03: $N frames at ${FPS} fps (every ${STEP}th of $N0), ${W}x${H}, GOP $GOP, origins: $ORIGINS, rungs: $RUNGS"
   [ $((N % GOP)) = 0 ] || { echo "[prepare] $N frames is not a multiple of GOP $GOP: the loop seam would break the IDR cadence" >&2; exit 1; }
   for P in $ORIGINS; do
     [ "$P" -ge 0 ] && [ "$P" -lt "$GOP" ] || { echo "[prepare] origin $P outside 0..$((GOP - 1))" >&2; exit 1; }
-    ROT="$SRC/mot17/rot/MOT17-03-o$P"; rm -rf "$ROT"; mkdir -p "$ROT"   # fresh rotated view: link i -> content frame (i-1+P) mod N
-    for i in $(seq 1 "$N"); do ln -sfn "$IMG/$(printf %06d $(( (i - 1 + P) % N + 1 )))".jpg "$ROT/$(printf %06d "$i").jpg"; done
+    ROT="$SRC/mot17/rot/MOT17-03-f${FPS}-o$P"; rm -rf "$ROT"; mkdir -p "$ROT"   # fresh rotated view: link i -> frame ((i-1+P) mod N)*STEP of the 30 fps sequence
+    for i in $(seq 1 "$N"); do ln -sfn "$IMG/$(printf %06d $(( ((i - 1 + P) % N) * STEP + 1 )))".jpg "$ROT/$(printf %06d "$i").jpg"; done
     [ "$(ls "$ROT" | wc -l)" = "$N" ] || { echo "[prepare] rotation dir $ROT does not hold exactly $N frames" >&2; exit 1; }
-    for k in $RUNGS; do encode "$N" -framerate "$FPS" -start_number 1 -i "$ROT/%06d.jpg" -- 1280 720 "$k" "$ASSETS/mot17-03-o${P}_1280x720_${FPS}_${k}k.h264"; done
+    for k in $RUNGS; do encode "$N" -framerate "$FPS" -start_number 1 -i "$ROT/%06d.jpg" -- "$W" "$H" "$k" "$ASSETS/mot17-03-o${P}_${W}x${H}_${FPS}_${k}k.h264"; done
   done
 fi
 if [ "$SOURCE" = kendo ] || [ "$SOURCE" = all ]; then

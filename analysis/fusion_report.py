@@ -125,6 +125,7 @@ def main():
 def analyse_group(rd, g, warmup_s, out, gdir):
     gid, cams, D = g["id"], list(g["cams"]), float(g["deadline_ms"])
     T, dur, C, K, sched = load(rd, cams, warmup_s)
+    if not K: print(f"[fusion_report] group {gid}: no common frames (members at different fps? a group shares the task's frame rate)"); return
     F = lambda c, k: C[c]["frames"][k]
     res = {"group": gid, "cams": cams, "deadline_ms": D, "warmup_s": warmup_s, "frames": len(K)}
     txt = [f"# fusion analysis {rd}  group {gid} = {'+'.join(cams)}  deadline {D:.0f} ms  (frames k with capture >= T+{warmup_s:g} s: {len(K)})",
@@ -177,6 +178,12 @@ def analyse_group(rd, g, warmup_s, out, gdir):
     bs = sorted(miss_bins); ax2.step([10 * b + 5 for b in bs], [100 * miss_bins[b][0] / miss_bins[b][1] for b in bs], where="mid", color=INK2, lw=1)
     ax2.set_ylabel("miss rate per 10 s (%)", color=INK2); ax2.spines["right"].set_visible(True)
     fig.tight_layout(); fig.savefig(f"{gdir}/fusion_{gid}_1_group_latency.png", dpi=130); plt.close(fig)
+
+    if len(cams) == 1:   # a single-camera task: only the deadline view applies
+        txt.append("  (single-member group: items 2-8 do not apply)")
+        with open(f"{out}/fusion_{gid}.json", "w") as f: json.dump(res, f, indent=2)
+        with open(f"{out}/fusion_{gid}.txt", "w") as f: f.write("\n".join(txt) + "\n")
+        print("\n".join(txt)); return
 
     # ---------------------------------------------------------------- 2. intra-group spread and waiting
     arr = {k: {c: F(c, k)["app"] for c in cams} for k in K}
@@ -408,7 +415,8 @@ def analyse_group(rd, g, warmup_s, out, gdir):
     with_idr = [glat[pos_k[k]] - phase_med[k % PHASE_FRAMES] for k in idr_frames]
     miss_idr = sum(glat[pos_k[k]] > D for k in idr_frames) / max(1, len(idr_frames))
     miss_same_phase = {ph: sum(x > D for x in v) / len(v) for ph, v in phase_lat.items()}
-    idr_per_gop = len(idr_frames) / max(1, len(K) / 60)
+    ik = sorted(k for k in K if F(cams[0], k)["idr"]); gop = st.mode([b - a for a, b in zip(ik, ik[1:])]) if len(ik) > 1 else 60
+    idr_per_gop = len(idr_frames) / max(1, len(K) / gop)
     res["8_idr"] = {"phase_frames": PHASE_FRAMES,
                     "group_latency_median_by_phase_k_mod": {str(ph): round(m, 1) for ph, m in sorted(phase_med.items())},
                     "group_miss_rate_by_phase": {str(ph): round(v, 4) for ph, v in sorted(miss_same_phase.items())},

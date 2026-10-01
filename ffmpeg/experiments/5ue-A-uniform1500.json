@@ -1,6 +1,5 @@
 {
   "tree": "ffmpeg",
-  "name": "5ue-720p30",
   "duration_s": 300,
   "start_delay_s": 20,
   "relay_host": "10.53.1.1",
@@ -18,7 +17,8 @@
   "receiver": {
     "extra_args": []
   },
-  "_note": "MOT17-03 (1500 frames, 50 s loop) on every camera; camK's ladder is rotated to start at content frame 3K (idr_origin), so in every slot all cameras send the SAME frame number and only the IDR instants differ (3 frames = 100 ms apart). kbps = the profile's bitrate (start rung); a `profile` message with bitrate_kbps switches the rung at the camera's next IDR. 1500 kbps start: 5 x 2500 exceeds the DDDSU UL capacity measured on 2026-09-30 (~10 Mbps payload).",
+  "name": "5ue-A-uniform1500",
+  "_note": "A: control. Uniform task profile 720p30 1500 kbps on all cameras (7.5 Mbps); partition 3+2. 5-UE matrix (docs/SCENARIO_EDGE_PROFILES.md \u00a78.1): one MOT17-03 view on every camera, aligned frame numbers, per-camera IDR offsets 0/133/267/467/533 ms (phases k mod 3 mixed). The stock RAN does not know the groups, so the radio traffic depends only on the profiles: every run can additionally be analysed under any other partition offline (fusion_report.py --group).",
   "cams": {
     "cam0": {
       "fps": 30,
@@ -28,62 +28,82 @@
         500,
         1000,
         1500,
-        2500,
-        4000
+        2000,
+        2500
       ],
       "kbps": 1500
     },
     "cam1": {
       "fps": 30,
       "source": "mot17-03_1280x720_30",
-      "idr_origin": 3,
+      "idr_origin": 4,
       "rungs": [
         500,
         1000,
         1500,
-        2500,
-        4000
+        2000,
+        2500
       ],
       "kbps": 1500
     },
     "cam2": {
       "fps": 30,
       "source": "mot17-03_1280x720_30",
-      "idr_origin": 6,
+      "idr_origin": 8,
       "rungs": [
         500,
         1000,
         1500,
-        2500,
-        4000
+        2000,
+        2500
       ],
       "kbps": 1500
     },
     "cam3": {
       "fps": 30,
       "source": "mot17-03_1280x720_30",
-      "idr_origin": 9,
+      "idr_origin": 14,
       "rungs": [
         500,
         1000,
         1500,
-        2500,
-        4000
+        2000,
+        2500
       ],
       "kbps": 1500
     },
     "cam4": {
       "fps": 30,
       "source": "mot17-03_1280x720_30",
-      "idr_origin": 12,
+      "idr_origin": 16,
       "rungs": [
         500,
         1000,
         1500,
-        2500,
-        4000
+        2000,
+        2500
       ],
       "kbps": 1500
     }
-  }
+  },
+  "groups": [
+    {
+      "id": "g1",
+      "cams": [
+        "cam0",
+        "cam1",
+        "cam2"
+      ],
+      "deadline_ms": 100
+    },
+    {
+      "id": "g2",
+      "cams": [
+        "cam3",
+        "cam4"
+      ],
+      "deadline_ms": 100
+    }
+  ],
+  "_load_kbps": 7500
 }

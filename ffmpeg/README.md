@@ -75,8 +75,10 @@ frame P_K = 3K. In a scenario, `"source": "mot17-03_1280x720_30", "idr_origin": 
 evenly spread would be 0/12/24/36/48). `phase_slots` must stay 0 with `idr_origin` (run_experiment.sh refuses the
 mix). 1500 is a multiple of the GOP, so the loop seam adds no IDR. A camera starts at its first IDR slot
 (P_K, at most 0.4 s after T), so slots before 12 are not covered by every camera; measure from T + 5 s (a sender that
-joins late enters at its next IDR, visible as `late_start_slots`). Scenarios: `5ue-720p30.json`, `2ue-720p30-mot03.json`,
-`demo-local-5cam.json`.
+joins late enters at its next IDR, visible as `late_start_slots`). Scenarios: the 5-UE baseline matrix `5ue-A-uniform1500`, `5ue-B-tasks-3x720p30-2x1080p15`,
+`5ue-C-mixed-2-2-1`, `5ue-D-uniform2000` (10 min each; profiles, groups and the reasoning in docs/SCENARIO_EDGE_PROFILES.md
+§8.1), `2ue-720p30-mot03.json`, `demo-local-5cam.json`. Lower-rate or other-size profiles: `prepare_video.sh --source mot17-03
+--size 1920x1080 --fps 15 --origins ...` (15 fps = every other content frame; origins in that rate's frames).
 
 **Fusion groups.** A scenario may declare `"groups": [{"id": "g1", "cams": ["cam0", "cam1"], "deadline_ms": 100}]`
 (an inference needs frame k from every member within the deadline; docs/SCENARIO_EDGE_PROFILES.md §5.6). It is not sent to

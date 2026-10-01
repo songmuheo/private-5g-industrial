@@ -1,0 +1,115 @@
+{
+  "tree": "ffmpeg",
+  "duration_s": 300,
+  "start_delay_s": 20,
+  "relay_host": "10.53.1.1",
+  "require_gnb": true,
+  "hosts": {
+    "mode": "ssh",
+    "user": "songmu",
+    "ip_pattern": "192.168.77.1{K}",
+    "repo": "private-5g-industrial"
+  },
+  "sync": {
+    "mode": "auto",
+    "max_ms": 1
+  },
+  "receiver": {
+    "extra_args": []
+  },
+  "name": "5ue-D-uniform2000",
+  "_note": "D: load. Same uniform profile shape as A at 2000 kbps (10 Mbps, ~1.33x A); partition 3+1+1. Question: how group deadlines degrade with load (A vs D). 5-UE matrix (docs/SCENARIO_EDGE_PROFILES.md \u00a78.1): one MOT17-03 view on every camera, aligned frame numbers, per-camera IDR offsets 0/133/267/467/533 ms (phases k mod 3 mixed). The stock RAN does not know the groups, so the radio traffic depends only on the profiles: every run can additionally be analysed under any other partition offline (fusion_report.py --group).",
+  "cams": {
+    "cam0": {
+      "fps": 30,
+      "source": "mot17-03_1280x720_30",
+      "idr_origin": 0,
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2000,
+        2500
+      ],
+      "kbps": 2000
+    },
+    "cam1": {
+      "fps": 30,
+      "source": "mot17-03_1280x720_30",
+      "idr_origin": 4,
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2000,
+        2500
+      ],
+      "kbps": 2000
+    },
+    "cam2": {
+      "fps": 30,
+      "source": "mot17-03_1280x720_30",
+      "idr_origin": 8,
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2000,
+        2500
+      ],
+      "kbps": 2000
+    },
+    "cam3": {
+      "fps": 30,
+      "source": "mot17-03_1280x720_30",
+      "idr_origin": 14,
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2000,
+        2500
+      ],
+      "kbps": 2000
+    },
+    "cam4": {
+      "fps": 30,
+      "source": "mot17-03_1280x720_30",
+      "idr_origin": 16,
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2000,
+        2500
+      ],
+      "kbps": 2000
+    }
+  },
+  "groups": [
+    {
+      "id": "g1",
+      "cams": [
+        "cam0",
+        "cam1",
+        "cam2"
+      ],
+      "deadline_ms": 100
+    },
+    {
+      "id": "g2",
+      "cams": [
+        "cam3"
+      ],
+      "deadline_ms": 100
+    },
+    {
+      "id": "g3",
+      "cams": [
+        "cam4"
+      ],
+      "deadline_ms": 100
+    }
+  ],
+  "_load_kbps": 10000
+}
