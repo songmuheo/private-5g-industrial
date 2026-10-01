@@ -76,6 +76,9 @@ struct SenderConfig {
   int duration_s = 0;
   int64_t start_wall_ns = 0;    // --start-at-epoch: wall-clock epoch of the capture grid (0 = now); slots are T + k/fps on every host
   int phase_slots = 0;          // --phase-slots: source frame of slot k = (k + phase) mod N -> shifts this camera's IDR slots (IDR staggering)
+  int content_origin = 0;       // --content-origin P: the file is the content rotated to start at content frame P (file index i =
+                                // content frame (i + P) mod N); slot k still sends content frame (k + phase) mod N, so cameras whose
+                                // files have different origins send the SAME frame number per slot but have their IDRs at P + GOP*m
 };
 static SenderConfig g_cfg;
 std::string TracePrefix() { return g_cfg.trace_dir + "/" + g_cfg.stream_id + "-tx"; }
@@ -116,10 +119,10 @@ class Sender {
     if (next_stats_ == 0) next_stats_ = now;
     if (now < next_stats_) return;
     next_stats_ += (int64_t)g_cfg.stats_period_ms * 1000000; if (next_stats_ < now) next_stats_ = now;
-    std::fprintf(stats_, "{\"mono_ns\":%lld,\"wall_ns\":%lld,\"frames_sent\":%lld,\"missed_slots\":%lld,\"packets_sent\":%lld,\"bytes_sent\":%lld,\"send_failures\":%lld,\"rtcp_send_failures\":%lld,\"frames_with_send_failure\":%lld,\"mux_failures\":%lld,\"late_start_slots\":%lld,\"phase_slots\":%d,\"rung_kbps\":%d}\n",
+    std::fprintf(stats_, "{\"mono_ns\":%lld,\"wall_ns\":%lld,\"frames_sent\":%lld,\"missed_slots\":%lld,\"packets_sent\":%lld,\"bytes_sent\":%lld,\"send_failures\":%lld,\"rtcp_send_failures\":%lld,\"frames_with_send_failure\":%lld,\"mux_failures\":%lld,\"late_start_slots\":%lld,\"phase_slots\":%d,\"content_origin\":%d,\"rung_kbps\":%d}\n",
                  (long long)now, (long long)NowWallNs(), (long long)frames_sent_.load(), (long long)missed_.load(),
                  (long long)pkts_sent_.load(), (long long)bytes_sent_.load(), (long long)send_fail_.load(), (long long)rtcp_send_fail_.load(),
-                 (long long)frames_send_failed_.load(), (long long)mux_fail_.load(), (long long)late_start_slots_.load(), g_cfg.phase_slots, g_cfg.rungs[cur_rung_.load()].kbps);
+                 (long long)frames_send_failed_.load(), (long long)mux_fail_.load(), (long long)late_start_slots_.load(), g_cfg.phase_slots, g_cfg.content_origin, g_cfg.rungs[cur_rung_.load()].kbps);
     std::fflush(stats_);
     // send failures are counted on the grid thread (no I/O there); reported here as they happen
     const int64_t sf = send_fail_.load();
@@ -183,6 +186,7 @@ class Sender {
       if (idx < 0) P5G_FATAL("--bitrate-kbps " << g_cfg.start_kbps << " is not one of the rungs");
     }
     cur_rung_ = idx; want_rung_ = idx;
+    if (g_cfg.content_origin < 0 || g_cfg.content_origin >= (int)a0.size()) P5G_FATAL("--content-origin " << g_cfg.content_origin << " outside 0.." << a0.size() - 1);
     ProbeResolution(g_cfg.rungs[0].aus[0]);
     int64_t idr = 0; for (auto& au : a0) idr += au.is_idr;
     P5G_LOG_INFO << "source: " << g_cfg.rungs.size() << " rung(s), " << a0.size() << " AUs (" << idr << " IDR), " << width_ << "x" << height_
@@ -314,12 +318,13 @@ class Sender {
       start_us_ = (mono_now - (wall_now - epoch_wall)) / 1000;              // epoch in CLOCK_MONOTONIC µs
       WriteHeader(epoch_wall);                                              // one-off: allocates, then logs
       P5G_LOG_INFO << "capture grid: epoch wall_ns=" << epoch_wall << " (" << (g_cfg.start_wall_ns ? "--start-at-epoch" : "now") << "), " << n_src
-                   << " source frames per loop, phase " << g_cfg.phase_slots << " slots (first IDR slot " << FirstIdrSlot() << ")";
+                   << " source frames per loop, phase " << g_cfg.phase_slots << " slots, content origin " << g_cfg.content_origin
+                   << " (first IDR slot " << FirstIdrSlot() << ")";
     }
     int64_t slot = FirstIdrSlot(), idx = 0;                 // a phased camera begins at its first IDR slot (decodable start)
     if (const int64_t t0_us = NowMonoNs() / 1000; t0_us >= start_us_ + interval_us) {   // behind by a whole slot or more
       slot = std::max(slot, (t0_us - start_us_) / interval_us + 1);
-      while (!g_cfg.rungs[0].aus[SrcOf(slot)].is_idr) ++slot;    // next IDR on this camera's timeline
+      while (!g_cfg.rungs[0].aus[FileIdx(slot)].is_idr) ++slot;  // next IDR on this camera's timeline
       P5G_LOG_WARN << "capture epoch was " << (t0_us - start_us_) / 1000 << " ms ago: slots 0.." << slot - 1 << " not sent, starting at slot " << slot << " (source frame " << SrcOf(slot) << ", IDR)";
       late_start_slots_ = slot;
     }
@@ -341,8 +346,10 @@ class Sender {
     for (; start_us_ + (slot + 1) * interval_us <= now_us; ++slot) EmitMissed(slot, idx, interval_us);
   }
   uint32_t RtpTsForPts(int64_t pts) const { return (uint32_t)pts + wire_base_; }
+  // SrcOf: content frame number sent in a slot (logged as src_frame_idx); FileIdx: where that frame sits in this camera's file
   int64_t SrcOf(int64_t slot) const { const int64_t n = (int64_t)g_cfg.rungs[0].aus.size(); return ((slot + g_cfg.phase_slots) % n + n) % n; }
-  int64_t FirstIdrSlot() const { int64_t s = 0; while (!g_cfg.rungs[0].aus[SrcOf(s)].is_idr) ++s; return s; }
+  int64_t FileIdx(int64_t slot) const { const int64_t n = (int64_t)g_cfg.rungs[0].aus.size(); return ((SrcOf(slot) - g_cfg.content_origin) % n + n) % n; }
+  int64_t FirstIdrSlot() const { int64_t s = 0; while (!g_cfg.rungs[0].aus[FileIdx(s)].is_idr) ++s; return s; }
   void EmitMissed(int64_t slot, int64_t& idx, int64_t interval_us) {
     const int64_t pts = slot * interval_us * 90 / 1000;
     frames_->Write(CaptureFrameRow{idx, slot, SrcOf(slot), RtpTsForPts(pts), NowWallNs(), NowMonoNs(), width_, height_, 0});
@@ -350,14 +357,15 @@ class Sender {
   }
   void EmitSlot(int64_t slot, int64_t& idx, int64_t target_us, int64_t interval_us) {
     const int64_t capture_wall = NowWallNs(), capture_mono = NowMonoNs();
-    const int64_t src = SrcOf(slot);                       // shared timeline (+ this camera's phase) picks the source frame
+    const int64_t src = SrcOf(slot);                       // content frame of this slot (shared timeline + phase)
+    const int64_t fi = FileIdx(slot);                      // its position in this camera's (possibly rotated) file
     // rung switch only at an IDR (all rungs share IDR positions), so the decoder never sees a reference gap
     const int want = want_rung_.load(std::memory_order_relaxed);
-    if (want != cur_rung_.load() && g_cfg.rungs[0].aus[src].is_idr) {
+    if (want != cur_rung_.load() && g_cfg.rungs[0].aus[fi].is_idr) {
       cur_rung_.store(want);
       rates_->Write(EncoderRateRow{NowMonoNs(), NowWallNs(), (int64_t)g_cfg.rungs[want].kbps * 1000, (int64_t)g_cfg.rungs[want].kbps * 1000, -1, (double)g_cfg.fps, 1});
     }
-    const AccessUnit& au = g_cfg.rungs[cur_rung_.load()].aus[src];
+    const AccessUnit& au = g_cfg.rungs[cur_rung_.load()].aus[fi];
     const int64_t pts = (target_us - start_us_) * 90 / 1000;
     cur_pts_ = pts; au_send_failed_ = false;
     AVPacket pkt; av_init_packet(&pkt);
@@ -406,7 +414,7 @@ class Sender {
       ctl_.Send({{"type", "stream-start"}, {"to", g_cfg.receiver_id}, {"stream", g_cfg.stream_id}, {"ssrc", g_cfg.ssrc}, {"pt", g_cfg.pt},
                  {"clock_rate", kVideoClockRate}, {"rtcp_port_local", rtcp_port_local_}, {"width", width_}, {"height", height_},
                  {"fps", g_cfg.fps}, {"bitrate_kbps", g_cfg.rungs[cur_rung_].kbps}, {"rungs_kbps", rungs}, {"cc", "profile"},
-                 {"transport", "ffmpeg"}, {"source", g_cfg.rungs[cur_rung_].path}, {"aus", g_cfg.rungs[0].aus.size()}, {"phase_slots", g_cfg.phase_slots}});
+                 {"transport", "ffmpeg"}, {"source", g_cfg.rungs[cur_rung_].path}, {"aus", g_cfg.rungs[0].aus.size()}, {"phase_slots", g_cfg.phase_slots}, {"content_origin", g_cfg.content_origin}});
       awaiting_ack_ = true; ack_deadline_ = NowMonoNs() + 5LL * 1000000000LL;
     } else if (type == "stream-ack") {
       if (m.value("stream", "") != g_cfg.stream_id) return;
@@ -467,12 +475,14 @@ static void Usage() {
                "             --source a.h264@2500[,b.h264@1000,...] [--bitrate-kbps START_RUNG] [--fps 30]\n"
                "             [--mtu 1200] [--pt 96] [--ssrc N] [--stats-period-ms 1000] [--duration S] [--start-at-epoch T.sss] [--phase-slots K]\n"
                "  --start-at-epoch: wall-clock (UNIX seconds) epoch of the capture grid, shared by all senders of a run\n"
-               "  --phase-slots K : slot k sends source frame (k+K) mod N; different K per camera staggers the IDR bursts\n");
+               "  --phase-slots K : slot k sends source frame (k+K) mod N; different K per camera staggers the IDR bursts\n"
+               "  --content-origin P: the file starts at content frame P (prepare_video.sh --source mot17-03: <seq>-o<P>_...);\n"
+               "                     frame numbers stay aligned across cameras, only the IDR positions differ\n");
 }
 
 int main(int argc, char** argv) {
   p5g::CliArgs a(argc, argv, {"help", "control-host", "control-port", "session", "stream-id", "to", "trace-dir", "source", "bitrate-kbps",
-                              "fps", "mtu", "pt", "ssrc", "stats-period-ms", "duration", "start-at-epoch", "phase-slots"});
+                              "fps", "mtu", "pt", "ssrc", "stats-period-ms", "duration", "start-at-epoch", "phase-slots", "content-origin"});
   if (a.Has("help")) { Usage(); return 0; }
   auto& c = p5g::g_cfg;
   c.control_host = a.Get("control-host", c.control_host); c.control_port = a.GetInt("control-port", c.control_port);
@@ -480,7 +490,7 @@ int main(int argc, char** argv) {
   c.trace_dir = a.Get("trace-dir", c.trace_dir); c.fps = a.GetInt("fps", c.fps); c.mtu = a.GetInt("mtu", c.mtu); c.pt = a.GetInt("pt", c.pt);
   c.ssrc = (uint32_t)std::strtoul(a.Get("ssrc", "0").c_str(), nullptr, 10);
   c.stats_period_ms = a.GetInt("stats-period-ms", c.stats_period_ms); c.duration_s = a.GetInt("duration", 0);
-  c.start_kbps = a.GetInt("bitrate-kbps", 0); c.phase_slots = a.GetInt("phase-slots", 0);
+  c.start_kbps = a.GetInt("bitrate-kbps", 0); c.phase_slots = a.GetInt("phase-slots", 0); c.content_origin = a.GetInt("content-origin", 0);
   if (a.Has("start-at-epoch")) { const double t = std::atof(a.Get("start-at-epoch", "0").c_str()); if (t <= 0) P5G_FATAL("--start-at-epoch must be UNIX seconds"); c.start_wall_ns = (int64_t)(t * 1e9); }
   {  // --source a@kbps,b@kbps
     std::string s = a.Get("source", ""); size_t pos = 0;
@@ -500,7 +510,7 @@ int main(int argc, char** argv) {
   if (const char* lv = std::getenv("P5G_AV_LOG")) av_log_set_level(!std::strcmp(lv, "debug") ? AV_LOG_DEBUG : !std::strcmp(lv, "verbose") ? AV_LOG_VERBOSE : AV_LOG_INFO);
   P5G_LOG_INFO << "config: transport=ffmpeg stream_id=" << c.stream_id << " to=" << c.receiver_id << " session=" << c.session << " control="
                << c.control_host << ":" << c.control_port << " codec=H264 fps=" << c.fps << " source=" << a.Get("source", "")
-               << " start_rung_kbps=" << c.start_kbps << " start_at_epoch_wall_ns=" << c.start_wall_ns << " phase_slots=" << c.phase_slots << " mtu=" << c.mtu << " pt=" << c.pt << " stats_period_ms=" << c.stats_period_ms
+               << " start_rung_kbps=" << c.start_kbps << " start_at_epoch_wall_ns=" << c.start_wall_ns << " phase_slots=" << c.phase_slots << " content_origin=" << c.content_origin << " mtu=" << c.mtu << " pt=" << c.pt << " stats_period_ms=" << c.stats_period_ms
                << " libavformat=" << LIBAVFORMAT_VERSION_MAJOR << "." << LIBAVFORMAT_VERSION_MINOR << "." << LIBAVFORMAT_VERSION_MICRO
                << " libavcodec=" << LIBAVCODEC_VERSION_MAJOR << "." << LIBAVCODEC_VERSION_MINOR << "." << LIBAVCODEC_VERSION_MICRO;
   p5g::InstallSignalHandlers();

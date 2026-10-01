@@ -896,3 +896,21 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   warning). The OTA streams themselves were unaffected (announced first, decoded throughout; demo traffic was
   loopback). Fixed the day before it could recur: require_gnb=false never joins CURRENT. Rule from now on: no script
   edits and no smoke tests on the gNB PC while an OTA session is live.
+
+## 2026-10-01 — ffmpeg/: aligned frame numbers with staggered IDRs (`idr_origin`), 5-UE scenario
+* Requirement (user): one sequence for all cameras (the longest), every camera sends the same frame number at the same
+  instant, only the IDR instants differ, IDR spacing much smaller than 1 s.
+* Sequence choice: MOT17 has 14 sequences; checked by thumbnails: 01/02 are the same plaza, 03/04 the same elevated
+  street, 10/11 are moving cameras; 05/06 are 14 fps 640x480, 13/14 25 fps. Longest = MOT17-03, 1500 frames (50 s),
+  1080p30, static.
+* Mechanism: `prepare_video.sh --source mot17-03 [--origins "0 3 6 9 12"]` encodes one ladder per camera from a
+  rotated view of the frames (camera K's file starts at content frame P_K); x264's fixed GOP puts the IDRs at
+  P_K + 60m in content terms. `--content-origin P` makes the sender send content frame k mod N in slot k (file
+  index (k - P) mod N) and log the content frame as `src_frame_idx`. 1500 % 60 = 0, so the loop seam adds no IDR.
+  25 encodes, ~25 min on the gNB PC, all validated (1500 frames, IDR every 60).
+* Loopback `demo-local-5cam` (results/20261001-151103-demo-local-5cam): cam K first slot = 3K (its first IDR), IDR
+  slots 0/3/6/9/12 + 60m; in all 349 slots where the 5 cameras overlap the frame numbers are identical
+  (src_frame_idx == grid_slot for every camera); 0 loss, 0 incomplete AUs, 0 decode failures, 0 decoder messages.
+* Scenarios: `5ue-720p30.json` (start bitrate 1500 kbps: 5 x 2500 exceeds the DDDSU UL capacity measured on
+  2026-09-30), `2ue-720p30-mot03.json` (2500 kbps), `demo-local-5cam.json`. The profile's bitrate = `kbps` (start)
+  + `profile` messages (rung switch at the camera's own next IDR).

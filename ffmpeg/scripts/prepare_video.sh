@@ -5,7 +5,8 @@
 # frame sizes are what the RAN-facing profile says), same frame count and IDR positions across the rungs of
 # one source so the sender can switch rungs at an IDR.
 #
-#   ffmpeg/scripts/prepare_video.sh [--source mot17|kendo|all] [--rungs "500 1000 1500 2500 4000"] [--gop 60]
+#   ffmpeg/scripts/prepare_video.sh [--source mot17|kendo|mot17-03|all] [--rungs "500 1000 1500 2500 4000"] [--gop 60]
+#                                   [--origins "0 3 6 9 12"]
 #
 # Sources
 #   mot17 : MOT17-02 (MOTChallenge MOT17.zip, 5.9 GB, cached in video/sources/mot17/; only the 600 frames of
@@ -13,11 +14,18 @@
 #           = 20 s, looped). Rungs at 1280x720 (default) and one 1920x1080 8000k rung like SMEC's 8 Mbps.
 #   kendo : the Nagoya Kendo views already in video/assets (kendo_view<K>_1280x720_30.yuv), one set per view,
 #           for comparability with the gstreamer/webrtc runs (same content, same frame count 300).
+#   mot17-03 : the longest MOT17 sequence (1500 frames = 50 s, 1080p30, static elevated street view), one ladder PER
+#           CAMERA: camera K's file is the content rotated to start at content frame P_K (--origins, default
+#           "0 3 6 9 12" = 5 cameras, 3 frames = 100 ms apart). x264 puts an IDR every GOP from file frame 0, so in
+#           content terms camera K's IDRs are at P_K + GOP*m; the sender (--content-origin P_K) sends content frame
+#           k mod N in slot k on every camera -> same frame number at the same instant, only the IDR instants differ.
+#           N (1500) is a multiple of the GOP (60), so the loop seam adds no extra IDR. Files: mot17-03-o<P>_...
+#           (only included in --source all when requested explicitly, it is not part of the default set).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # repo
 ASSETS="$ROOT/video/assets"; SRC="$ROOT/video/sources"
-SOURCE=all; RUNGS="500 1000 1500 2500 4000"; GOP=60; FPS=30
-while [ $# -gt 0 ]; do case "$1" in --source) SOURCE="$2"; shift 2;; --rungs) RUNGS="$2"; shift 2;; --gop) GOP="$2"; shift 2;; *) echo "unknown arg $1" >&2; exit 1;; esac; done
+SOURCE=all; RUNGS="500 1000 1500 2500 4000"; GOP=60; FPS=30; ORIGINS="0 3 6 9 12"
+while [ $# -gt 0 ]; do case "$1" in --source) SOURCE="$2"; shift 2;; --rungs) RUNGS="$2"; shift 2;; --gop) GOP="$2"; shift 2;; --origins) ORIGINS="$2"; shift 2;; *) echo "unknown arg $1" >&2; exit 1;; esac; done
 mkdir -p "$ASSETS" "$SRC/mot17"
 command -v ffmpeg >/dev/null || { echo "ffmpeg missing (make deps)" >&2; exit 1; }
 
@@ -74,6 +82,27 @@ if [ "$SOURCE" = mot17 ] || [ "$SOURCE" = all ]; then
   [ "$N" -ge 600 ] || { echo "[prepare] MOT17-02 extraction incomplete ($N frames, expected 600); delete $SRC/mot17/MOT17-02-FRCNN and rerun" >&2; exit 1; }
   for k in $RUNGS; do encode "$N" -framerate "$FPS" -i "$IMG/%06d.jpg" -- 1280 720 "$k" "$ASSETS/mot17-02_1280x720_${FPS}_${k}k.h264"; done
   encode "$N" -framerate "$FPS" -i "$IMG/%06d.jpg" -- 1920 1080 8000 "$ASSETS/mot17-02_1920x1080_${FPS}_8000k.h264"   # SMEC's 1080p 8 Mbps
+fi
+# mot17_seq <NN> -> extracts MOT17-<NN>-FRCNN/img1 (train or test) from the cached zip, prints the image dir
+mot17_seq() {
+  local nn="$1" zip="$SRC/mot17/MOT17.zip" dir="$SRC/mot17/MOT17-$1-FRCNN/img1"
+  if [ ! -d "$dir" ]; then
+    [ -f "$zip" ] && [ "$(stat -c %s "$zip")" -ge 5860000000 ] || { echo "[prepare] downloading MOT17.zip (5.9 GB) ..." >&2; curl -sSL -C - -o "$zip" https://motchallenge.net/data/MOT17.zip; }
+    echo "[prepare] extracting MOT17-$nn-FRCNN/img1 ..." >&2
+    ( cd "$SRC/mot17" && unzip -q -o "$zip" "MOT17/*/MOT17-$nn-FRCNN/img1/*" && mv -f MOT17/*/MOT17-$nn-FRCNN . 2>/dev/null && rm -rf MOT17 )
+  fi
+  echo "$dir"
+}
+if [ "$SOURCE" = mot17-03 ]; then
+  IMG="$(mot17_seq 03)"; N=$(ls "$IMG"/*.jpg | wc -l); echo "[prepare] mot17-03: $N frames at $IMG, origins: $ORIGINS"
+  [ "$N" -ge 1500 ] || { echo "[prepare] MOT17-03 extraction incomplete ($N frames, expected 1500)" >&2; exit 1; }
+  [ $((N % GOP)) = 0 ] || { echo "[prepare] $N frames is not a multiple of GOP $GOP: the loop seam would break the IDR cadence" >&2; exit 1; }
+  for P in $ORIGINS; do
+    [ "$P" -ge 0 ] && [ "$P" -lt "$GOP" ] || { echo "[prepare] origin $P outside 0..$((GOP - 1))" >&2; exit 1; }
+    ROT="$SRC/mot17/rot/MOT17-03-o$P"; mkdir -p "$ROT"   # rotated view of the frames: link i -> content frame (i-1+P) mod N
+    for i in $(seq 1 "$N"); do ln -sfn "$IMG/$(printf %06d $(( (i - 1 + P) % N + 1 )))".jpg "$ROT/$(printf %06d "$i").jpg"; done
+    for k in $RUNGS; do encode "$N" -framerate "$FPS" -i "$ROT/%06d.jpg" -- 1280 720 "$k" "$ASSETS/mot17-03-o${P}_1280x720_${FPS}_${k}k.h264"; done
+  done
 fi
 if [ "$SOURCE" = kendo ] || [ "$SOURCE" = all ]; then
   for yuv in "$ASSETS"/kendo_view*_1280x720_30.yuv; do

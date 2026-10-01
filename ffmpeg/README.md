@@ -64,5 +64,19 @@ of all cameras are aligned (chrony, ~50 µs) and pts 0 = T on every host; the RT
 ends at T + duration on every host. `phase_slots` per camera (`--phase-slots`) staggers the IDR bursts: with phase 0
 everywhere all cameras send their IDR in the same slot every GOP (worst case for the RAN); the 2-UE scenarios use
 0 and 30 (GOP 60), so IDRs alternate every second. A phased camera begins at its first IDR slot (cam1: slot 30), and
-a sender that starts after T enters at the next IDR slot of its timeline. Derived files (verify summary, report, graphs, INVALID)
+a sender that starts after T enters at the next IDR slot of its timeline.
+
+**Aligned frame numbers, staggered IDRs (`idr_origin`, the 5-UE design).** `prepare_video.sh --source mot17-03` encodes
+the longest MOT17 sequence (1500 frames, 50 s, static) once per camera, rotated so camera K's file starts at content
+frame P_K = 3K. In a scenario, `"source": "mot17-03_1280x720_30", "idr_origin": P` selects `mot17-03-oP_*` and passes
+`--content-origin P`: every camera sends content frame k mod 1500 in slot k (same frame number at the same instant,
+`tx-frames.src_frame_idx` = content frame), while camera K's IDRs fall on content frames P_K + 60m (100 ms apart for
+3-frame spacing). 1500 is a multiple of the GOP, so the loop seam adds no IDR. A camera starts at its first IDR slot
+(P_K, at most 0.4 s after T); measure from T + 5 s. Scenarios: `5ue-720p30.json`, `2ue-720p30-mot03.json`,
+`demo-local-5cam.json`.
+
+**Bitrate in the profile.** Each camera's profile is (1280x720, 30 fps, bitrate): `kbps` in the scenario is the start
+bitrate, and `{"type":"profile","stream":"camK","bitrate_kbps":B}` switches to rung B at that camera's next IDR (with
+staggered IDRs the cameras switch at their own IDR instants). Pre-encoded means B must be one of the rungs (default
+500/1000/1500/2500/4000; another value = one more `--rungs` encode). Derived files (verify summary, report, graphs, INVALID)
 go to `results/<run>-analysis/`, never into the run directory.

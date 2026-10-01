@@ -1,0 +1,50 @@
+{
+  "tree": "ffmpeg",
+  "name": "2ue-720p30-mot03",
+  "duration_s": 300,
+  "start_delay_s": 20,
+  "relay_host": "10.53.1.1",
+  "require_gnb": true,
+  "hosts": {
+    "mode": "ssh",
+    "user": "songmu",
+    "ip_pattern": "192.168.77.1{K}",
+    "repo": "private-5g-industrial"
+  },
+  "sync": {
+    "mode": "auto",
+    "max_ms": 1
+  },
+  "receiver": {
+    "extra_args": []
+  },
+  "_note": "MOT17-03 (1500 frames, 50 s loop) on every camera; camK's ladder is rotated to start at content frame 3K (idr_origin), so in every slot all cameras send the SAME frame number and only the IDR instants differ (3 frames = 100 ms apart). kbps = the profile's bitrate (start rung); a `profile` message with bitrate_kbps switches the rung at the camera's next IDR.",
+  "cams": {
+    "cam0": {
+      "fps": 30,
+      "source": "mot17-03_1280x720_30",
+      "idr_origin": 0,
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2500,
+        4000
+      ],
+      "kbps": 2500
+    },
+    "cam1": {
+      "fps": 30,
+      "source": "mot17-03_1280x720_30",
+      "idr_origin": 3,
+      "rungs": [
+        500,
+        1000,
+        1500,
+        2500,
+        4000
+      ],
+      "kbps": 2500
+    }
+  }
+}

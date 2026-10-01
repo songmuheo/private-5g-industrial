@@ -45,7 +45,11 @@ for c, v in cams.items():
     if int(v.get('phase_slots', 0)): args.append(f"--phase-slots {int(v['phase_slots'])}")   # IDR staggering: source index offset of this camera
     if v.get('source'):
         rungs = v.get('rungs') or [int(v.get('kbps', 2500))]
-        args.append("--source " + ",".join(f"video/assets/{v['source']}_{int(k)}k.h264@{int(k)}" for k in rungs))
+        src = v['source']
+        if 'idr_origin' in v:   # per-camera rotated ladder (prepare_video.sh --source mot17-03): <seq>-o<P>_<WxH>_<fps>; same frame numbers, IDRs at P+GOP*m
+            name, rest = src.split('_', 1); src = f"{name}-o{int(v['idr_origin'])}_{rest}"
+            args.append(f"--content-origin {int(v['idr_origin'])}")
+        args.append("--source " + ",".join(f"video/assets/{src}_{int(k)}k.h264@{int(k)}" for k in rungs))
     args += v.get('extra_args', [])
     print(f"CAM_ARGS_{c}={q(' '.join(args))}")
 PYEOF

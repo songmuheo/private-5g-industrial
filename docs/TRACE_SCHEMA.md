@@ -32,7 +32,9 @@ RFC 3550 A.1: 앞으로 ≤3000 = 손실, 뒤로 ≤100 = 지연/중복 → `lat
 (packetize됨); 소켓 거부는 별개(해당 tx-rtp 행 없음). `tx-encoder-rates`는 시작 + rung 전환마다 1행. 캡처 격자는 wall-clock
 epoch T(`--start-at-epoch`, run_experiment.sh의 T; 없으면 now+100 ms)에 고정: 모든 호스트에서 slot k = T + k/fps, **source
 frame = (k + phase_slots) mod N**(`--phase-slots`, 시나리오 `phase_slots`; 카메라별로 다르게 주면 IDR 시점이 분산되고, 위상이
-있는 카메라는 자기 첫 IDR slot부터 송신; `tx-stats.phase_slots`, `tx-frames.src_frame_idx`로 확인), pts 0 = T, RTCP SR의 epoch도 T(rtpenc `start_time_realtime`),
+있는 카메라는 자기 첫 IDR slot부터 송신; `tx-stats.phase_slots`, `tx-frames.src_frame_idx`로 확인). `--content-origin P`(시나리오
+`idr_origin`): 파일이 콘텐츠 프레임 P에서 시작하도록 회전 인코딩된 경우, `src_frame_idx`는 **콘텐츠 프레임 번호**(카메라 간 같은 slot =
+같은 번호)이고 IDR만 P + GOP·m에 위치(`tx-stats.content_origin`, stream-start `content_origin`), pts 0 = T, RTCP SR의 epoch도 T(rtpenc `start_time_realtime`),
 `--duration`은 T 기준 절대 마감. 늦게 시작하면 공유 타임라인의 다음 IDR slot부터(`grid_slot` 열에 위상이 남음). 코드 테스트의
 `run.json.source`는 `app/source.json`(실제 보낸 rung 목록).
 어느 트리가 만든 run인지는 `run.json`의 `transport`(코드 테스트) 또는 `app/*.log`의 `config: transport=` 줄로 안다.
