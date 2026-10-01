@@ -41,7 +41,8 @@ if [ "$CLEAN" = 1 ]; then
   echo "   --clean: removed $n other video file(s)"
 fi
 SRCS=(); for w in "${FILES[@]}"; do SRCS+=("$GNB:private-5g-industrial/video/assets/$w"); done
-rsync -a --info=progress2 "${SRCS[@]}" "$GNB:private-5g-industrial/video/assets/h264_ladders.txt" video/assets/
+rsync -a --info=progress2 "${SRCS[@]}" "$GNB:private-5g-industrial/video/assets/h264_ladders.txt" video/assets/ \
+  || { echo "[prepare_client] rsync from $GNB failed: a scenario file is missing there (encode it with prepare_video.sh) or the sync LAN/SSH key is not set up" >&2; exit 1; }
 bad=0; for w in "${FILES[@]}"; do for f in video/assets/$w; do b="$(basename "$f")"
   h="$(grep "^file=$b " video/assets/h264_ladders.txt | sed -n 's/.* sha256=//p')"
   [ -n "$h" ] && [ "$h" = "$(sha256sum "$f" | cut -c1-64)" ] || { echo "   sha256 MISMATCH: $b" >&2; bad=1; }; done; done
