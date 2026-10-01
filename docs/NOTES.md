@@ -934,3 +934,23 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   (missing rung); leftover listener on 8765 -> ABORT; TERM to the orchestrator mid-run -> receivers stopped with
   trace footers; ssh preflight against both laptops -> ABORT "route_dev=wlp1s0" (their Wi-Fi was on), no sender
   started. Test result directories deleted afterwards.
+
+## 2026-10-01 — 2-UE run, MOT17-03 with aligned frame numbers and staggered IDRs (results/20261001-160451-2ue-mot03)
+* Setup: cam0 origin 0 / cam1 origin 3, 2500 kbps, 300 s; preflight route_dev = phone tethering on both (route=ok),
+  chrony 12 µs. Links much better than 09-30: PUSCH SINR 30-31 / 29-30 dB, MCS 27 (table max) most of the time.
+* Integrity: verify PASS; 9001 / 8998 frames, 113755 / 113421 packets, 0 loss, 0 incomplete AUs, 0 late/dup, 0
+  decode failures, 0 missed slots, 0 send failures; gNB tracer overflow 0; media 100 % over the 5G link.
+* Alignment verified on air: all 8998 common slots carry the same content frame number on both cameras; same-slot
+  capture offset median 1 µs (p99 79 µs); IDR slots 0,60,.. vs 3,63,.. (151 / 150 IDRs).
+* Latency (t >= 5 s, capture -> decoded): cam0 median 37.1 / p90 46.1 / p99 105.8 / max 237 ms; cam1 35.9 / 50.3 /
+  125.6 / 279. Stages: send 0.3-0.5 ms, UL wait (last sendto -> first at gNB) 27-29 ms, UL drain 5-8 ms, gNB ->
+  decoded 2.1 ms. IDR frames no slower than P (33.7 vs 37.2 median).
+* Tail: 69/89 (cam0) and 67/89 (cam1) of the >= p99 frames fall in t = 210-240 s, a smaller cluster at 150-165 s.
+  In those windows BOTH UEs show BLER spikes of 20-26 % in the SAME seconds (205, 213, 215, 220, 227, 233, 237, ..)
+  with SINR only 1-2 dB lower; gNB health counters stay clean there (late UL/DL HARQ 0, no RF real-time failure in
+  the run window, scheduler latency max 26 us). Mechanism per frame: CRC failure -> HARQ up to the 4th attempt ->
+  RLC reassembly timer expiry -> RLC AM retransmission (tail frames: 67-69 % with a reassembly expiry, 63-71 % with
+  a 4th HARQ attempt, vs 0 % for median frames). Outside 205-245 s: p99 74.9 / 82.8 ms, max 133 / 178 ms.
+  HYPOTHESIS: external burst interference in n78 at the gNB receiver (simultaneous on both UEs, link otherwise
+  unchanged) — not verified (no spectrum capture). Also: CPU governor was `powersave` (srsRAN warns at start);
+  no late HARQs observed, but set `performance` before the next run to remove it as a variable.
