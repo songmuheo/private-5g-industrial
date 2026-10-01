@@ -920,3 +920,17 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   refused (they break the alignment); rotation directory rebuilt fresh with `-start_number 1` and exactly N frames.
   Clarified in the README: with origins 0/3/6/9/12 the IDRs come in a 5-burst cluster (100 ms apart) then 1.6 s
   without IDR — evenly spread would be 0/12/24/36/48 (user's choice); slots < 12 are not covered by every camera.
+
+## 2026-10-01 — ffmpeg/run_experiment.sh hardening before the 2-UE MOT17-03 run
+* Orphans: receivers + control server of an aborted run were found still alive (port 8765 held) — a next run would
+  have mixed into them (run_receiver.sh even reused a foreign control server on the port). Fixes: run_receiver.sh
+  traps TERM/INT so its EXIT cleanup always runs, writes app/receiver.pids, and refuses to share the port in
+  orchestrated mode; run_experiment.sh refuses to start while a `video_receiver` (by process name) or a listener on
+  the control port exists, and its stop is bounded (15 s) with a pid-file fallback (INT, then KILL).
+* Media-route preflight: each laptop's route to the receiver host must use the phone's tethering interface, not
+  Wi-Fi and not the sync LAN (`route_dev=` in the preflight line; ABORT otherwise). Before, a Wi-Fi route was only
+  detected after the run (report A2 -> INVALID).
+* Tests (all with 0 leftover receivers/servers/port afterwards): normal 5-cam loopback PASS; preflight abort
+  (missing rung); leftover listener on 8765 -> ABORT; TERM to the orchestrator mid-run -> receivers stopped with
+  trace footers; ssh preflight against both laptops -> ABORT "route_dev=wlp1s0" (their Wi-Fi was on), no sender
+  started. Test result directories deleted afterwards.

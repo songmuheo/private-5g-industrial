@@ -75,11 +75,27 @@ LOG="$RD/experiment.log"; log() { echo "[exp $(date +%H:%M:%S)] $*" | tee -a "$L
 log "scenario $NAME: $N cams, ${DURATION}s, start in ${START_DELAY}s, hosts=$HOST_MODE, relay=$RELAY_HOST -> $RD"
 
 # ---- receivers ----
+# leftovers of an earlier run (receivers, control server on the port) would mix into this run: refuse to start
+PORT="${P5G_CONTROL_PORT:-8765}"
+if pgrep -x video_receiver >/dev/null || ss -ltn 2>/dev/null | grep -q ":$PORT "; then   # -x: process name, not command-line text
+  log "ABORT: receivers or a server on :$PORT are still running from an earlier run:"; { pgrep -a -x video_receiver; ss -ltnp 2>/dev/null | grep ":$PORT "; } | cut -c1-120 | tee -a "$LOG"
+  log "stop them first: pkill -f ffmpeg/build/apps/video_receiver; pkill -f ffmpeg/apps/control/control_server.py"; exit 1
+fi
 P5G_RECEIVER_NOTAIL=1 "$TREE/run_receiver.sh" "$RD" -n "$N" $RECV_EXTRA > "$RD/app/run_receiver.log" 2>&1 &
 RECV_PID=$!; sleep 2
 kill -0 "$RECV_PID" 2>/dev/null || { cat "$RD/app/run_receiver.log"; echo "[exp] receivers failed to start" >&2; exit 1; }
 log "receivers up (pid $RECV_PID): $(grep -c 'pid=' "$RD/app/run_receiver.log") of $N"
-cleanup() { set +e; log "stopping receivers"; kill -TERM "$RECV_PID" 2>/dev/null; wait "$RECV_PID" 2>/dev/null; }   # TERM: a backgrounded shell ignores INT; its EXIT trap INTs the receivers (traces flush)
+# stop: TERM run_receiver.sh (its EXIT trap INTs the receivers so traces flush, then stops the control server); bounded
+# wait; then, as a fallback, stop whatever of THIS run is still alive from receiver.pids (INT, then KILL after 10 s)
+cleanup() { set +e; log "stopping receivers"; kill -TERM "$RECV_PID" 2>/dev/null
+  for i in $(seq 1 150); do kill -0 "$RECV_PID" 2>/dev/null || break; sleep 0.1; done
+  local left=""; [ -f "$RD/app/receiver.pids" ] && left="$(sed -n 's/^[a-z]*=//p' "$RD/app/receiver.pids" | tr ' ' '\n' | while read -r p; do [ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo "$p"; done)"
+  if [ -n "$left" ] || kill -0 "$RECV_PID" 2>/dev/null; then
+    log "WARNING: receiver processes still alive after 15 s ($left) -> INT, then KILL"; kill -INT $left 2>/dev/null; kill -TERM "$RECV_PID" 2>/dev/null
+    for i in $(seq 1 100); do alive=0; for p in $left; do kill -0 "$p" 2>/dev/null && alive=1; done; [ $alive = 0 ] && break; sleep 0.1; done
+    kill -KILL $left "$RECV_PID" 2>/dev/null
+  fi
+  wait "$RECV_PID" 2>/dev/null; }
 trap cleanup EXIT
 
 # ---- preflight ----
@@ -95,10 +111,15 @@ for c in "${CAMS[@]}"; do
   srcs="$(sed -n 's/.*--source \([^ ]*\).*/\1/p' <<<"$args" | tr ',' '\n' | sed 's/@.*//' | tr '\n' ' ')"   # repo-relative; on_host cd's into ffmpeg/ -> ../
   chk="for f in $srcs; do b=\$(basename \$f); [ -f ../\$f ] || { echo asset=MISSING:\$b; continue; }; w=\$(grep \"^file=\$b \" ../video/assets/h264_ladders.txt | sed -n 's/.* sha256=//p'); [ -n \"\$w\" ] && [ \"\$w\" = \"\$(sha256sum ../\$f | cut -c1-64)\" ] || echo asset=MISSING:\$b:sha; done; echo assets_checked=\$(echo $srcs | wc -w);"
   [ -n "$srcs" ] || chk=""
-  out="$(on_host "$c" "git rev-parse --short HEAD 2>/dev/null; $chk chronyc tracking 2>/dev/null | awk '/RMS offset/{print \"rms_ms=\" \$4*1000}' || echo chrony=none" 2>&1 | tr '\n' ' ')" \
+  # media route: on a laptop the route to the receiver host must leave through the phone's tethering interface — not
+  # Wi-Fi (media would bypass the 5G link) and not the sync LAN (firewalled; only NTP/SSH). Reported as route_dev=.
+  rchk="d=\$(ip route get $RELAY_HOST 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p'); s=\$(ip -o -4 addr show | awk '/ 192\.168\.77\./{print \$2}'); echo route_dev=\${d:-none}; case \"\$d\" in ''|wl*) echo route=BAD;; \"\$s\") echo route=BAD;; *) echo route=ok;; esac;"
+  [ "$HOST_MODE" = "local" ] && rchk=""
+  out="$(on_host "$c" "git rev-parse --short HEAD 2>/dev/null; $chk $rchk chronyc tracking 2>/dev/null | awk '/RMS offset/{print \"rms_ms=\" \$4*1000}' || echo chrony=none" 2>&1 | tr '\n' ' ')" \
     && STATUS[$c]="ok: $out" || STATUS[$c]="UNREACHABLE: $out"
   log "preflight $c @ $( [ "$HOST_MODE" = local ] && echo local || host_of "$c"): ${STATUS[$c]}"
   case "${STATUS[$c]}" in *asset=MISSING*) log "ABORT: $c: pre-encoded source missing on its host (run ffmpeg/scripts/prepare_client.sh there)"; exit 1;; esac
+  case "${STATUS[$c]}" in *route=BAD*) log "ABORT: $c: media to $RELAY_HOST would not go over the 5G phone ($(grep -o 'route_dev=[^ ]*' <<<"${STATUS[$c]}")): turn Wi-Fi off (nmcli radio wifi off) and check the phone's USB tethering"; exit 1;; esac
 done
 log "gNB PC HEAD $(git rev-parse --short HEAD)"
 # ---- radio link check from the live gNB table (last ~10 s of gnb_stdout.log): CQI and power headroom per UE ----

@@ -49,12 +49,17 @@ cleanup() {
   echo "[receiver] stopped. traces: $RD/app"
 }
 trap cleanup EXIT
+# TERM/INT must END the script so the EXIT trap runs even while it waits (run_experiment.sh stops it with TERM);
+# without these traps the receivers could outlive a killed parent and keep port 8765 (seen 2026-10-01).
+trap 'exit 143' TERM; trap 'exit 130' INT
 
 PORT="${P5G_CONTROL_PORT:-8765}"
 if ss -ltn | grep -q ":$PORT "; then
   # Something listens already: reuse it only if it is THIS tree's control server (the webrtc signaling
   # relay uses the same default port and a different protocol).
-  if printf '{"type":"ping"}\n' | timeout 2 nc -q1 127.0.0.1 "$PORT" 2>/dev/null | grep -q '"p5g-ffmpeg-control"'; then
+  if [ "${P5G_RECEIVER_NOTAIL:-0}" = 1 ]; then   # orchestrated run: never reuse a server another run started (its control.log is elsewhere)
+    echo "[receiver] port $PORT is already in use (a previous run's control server?) -> refusing to share it; stop it first" >&2; exit 1
+  elif printf '{"type":"ping"}\n' | timeout 2 nc -q1 127.0.0.1 "$PORT" 2>/dev/null | grep -q '"p5g-ffmpeg-control"'; then
     echo "[receiver] ffmpeg control server already listening on :$PORT (reusing it)"
   else
     echo "[receiver] port $PORT is taken by something that is not the ffmpeg control server (gstreamer/webrtc?). Stop it or set P5G_CONTROL_PORT." >&2; exit 1
@@ -72,5 +77,6 @@ for i in $(seq 0 $((N - 1))); do
   PIDS+=($!); LOGS+=("$LOG")
   echo "[receiver] $RID pid=$! -> sender: ./run_sender.sh <host> --to $RID --stream-id cam$i"
 done
+printf 'control=%s\nreceivers=%s\n' "$RELAY_PID" "${PIDS[*]}" > "$RD/app/receiver.pids"   # for the orchestrator's fallback stop
 echo "[receiver] run dir: $RD   (Ctrl-C to stop)"
 if [ "${P5G_RECEIVER_NOTAIL:-0}" = 1 ]; then wait "${PIDS[@]}"; else tail -n +1 -F "${LOGS[@]}"; fi   # NOTAIL: orchestrated by run_experiment.sh
