@@ -1057,3 +1057,6 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   state starts empty for every new UE context (index or RNTI change), so a reused UE index cannot resurrect an old backlog
   (Codex's 0 -> 1 -> 0 reproduction now gives 1000 -> 0 -> 0); the run window also reads a one-PC run's sender log
   (<run>/app/<cam>-tx-rtp.csv).
+* Codex pass 6 (closing, 2026-10-01): both pass-5 items fixed (BSR reset per (ue_index, rnti) incl. the 6870efd shadowing
+  fix; run window precedence collected sender log > one-PC sender log > receiver log). "No identified defect of any severity
+  remains outstanding from my reviews of the ffmpeg tree's run/analysis path."
