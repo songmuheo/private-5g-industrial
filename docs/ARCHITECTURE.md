@@ -108,3 +108,9 @@ tx-events (GoogCC: delay/loss estimate, probes, ALR; ICE/DTLS)        rx-events 
   so profile effects and phone effects are only separable by moving profiles across phones (`run_experiment.sh --rotate R`), and
   a 5-UE matrix needs several runs per gNB session (each run in `<session>/runs/`, gNB traces linked); the summary compares
   scenarios, rotations, and phone x profile cells. `run_batch.sh post` re-analyses every run once the gNB traces are complete.
+* `ffmpeg/run_session.sh` + `ffmpeg/scripts/phone.sh` (2026-10-01): one command per OTA session — preflight of every laptop
+  and phone, core + gNB (waits for the AMF connection and "gNB started"), phones over adb (airplane mode, attach wait,
+  USB tethering via the Settings UI because Android 17 has no shell command for it, end-to-end ping of the core through
+  each phone), the batch run by run with a path check + one repair before each run, and a teardown that always runs
+  (tethering off, airplane on, gNB SIGINT, post-processing). Reason: the first 5-UE batch failed on hosts/phones that
+  dropped out unnoticed; this removes the manual phone/gNB steps and checks the 5G path before every run.

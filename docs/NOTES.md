@@ -1073,3 +1073,16 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   hibernate.target hybrid-sleep.target`; prepare_client.sh now does it too); (2) every ssh/rsync to a laptop in the three
   orchestrators uses ServerAliveInterval=5 / ServerAliveCountMax=3. Test: blocking .10 on the gNB PC firewall mid-session ->
   the old options were still waiting after 60 s, the new ones gave up after 19 s (rule removed afterwards).
+
+## 2026-10-01 — phones under adb control; one-command session script
+* Laptops got Google platform-tools (adb 37, copied from the gNB PC to ~/platform-tools), an Android udev rule and plugdev
+  membership; all five phones (4 x Pixel 7, 1 x Pixel 6, Android 17) authorised with "Always allow" (verified by two USB
+  re-enumerations each), stay-awake-while-charging on, battery saver off.
+* USB tethering: no shell command on Android 17 (`cmd tethering` has none; `svc usb setFunctions rndis` does not start
+  tethering and re-enumerates USB, which de-authorised phones without "Always allow"). phone.sh drives the Settings page
+  through uiautomator and accepts the result only when the laptop sees the interface; on/off verified on all five phones.
+* run_session.sh: tested without radio (bad inputs, gNB already running, full laptop/phone preflight = PASS). Mistake during
+  testing: the first version parsed a non-batch file into an EMPTY laptop list without failing (eval of a failed command
+  substitution), passed the empty preflight and started the real core + gNB for ~20 s (phones in airplane mode, nothing
+  attached; stopped cleanly by its teardown). Fixed: the parse result is checked before eval and runs/laptops must be
+  non-empty; re-tested: nothing starts. The accidental session directory was deleted.
