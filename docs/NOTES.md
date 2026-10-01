@@ -1060,3 +1060,12 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
 * Codex pass 6 (closing, 2026-10-01): both pass-5 items fixed (BSR reset per (ue_index, rnti) incl. the 6870efd shadowing
   fix; run window precedence collected sender log > one-PC sender log > receiver log). "No identified defect of any severity
   remains outstanding from my reviews of the ffmpeg tree's run/analysis path."
+
+## 2026-10-01 — first 5-UE batch (batch-5ue-3rounds) INVALID: two laptops suspended (negative result)
+* results/invalid/20261001-180950-5ue-batch_INVALID-laptops-suspended/ (INVALID_README.md inside). Runs 1-6 of 12; no run
+  had all five cameras. .14: phone tether route lost ~1 min into run 1 (`sendto: Network is unreachable`), then the laptop
+  stopped answering (suspended, no reboot); run 1 waited for its SSH timeout (22 min). .12: automatic suspend at 18:27:28,
+  10 min after its run-1 sender finished (journal), woke 19:10:50. Runs 2-5: 3 cameras. Run 6: Ctrl-C.
+* Lessons: (1) laptops need system suspend masked (default desktop idle-suspend hit during the batch's pauses / idle hosts);
+  (2) the orchestrator must not wait for a vanished host's SSH timeout (keepalive/timeout); (3) after resume, chrony takes
+  minutes to converge (.12 1.9 ms, .14 12.5 ms right after wake-up) - the preflight's 1 ms gate catches that.
