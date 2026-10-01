@@ -170,7 +170,7 @@ done
 
 # ---- stop receivers, verify, report ----
 cleanup; trap - EXIT
-AN="$(readlink -f "$RD")-analysis"; mkdir -p "$AN"   # derived outputs live beside the run directory (rule 3), never inside it
+AN="$RD/analysis"; mkdir -p "$AN"   # derived outputs (summary, report, graphs, INVALID) in the run's analysis/ subdirectory (rule 3)
 if [ -n "${MISSING:-}" ]; then log "RESULT INVALID: sender(s) failed or left no traces:${MISSING}"; echo "INVALID: senders failed / traces missing:${MISSING}" >> "$AN/INVALID"; fi
 "$PY" analysis/verify_run.py "$RD" 2>&1 | tail -3 | tee -a "$LOG"
 log "note: gNB trace files get their footers only when ./run_gnb_core.sh is stopped; re-run: make verify RD=$RD afterwards"

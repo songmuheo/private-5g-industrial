@@ -82,4 +82,4 @@ joins late enters at its next IDR, visible as `late_start_slots`). Scenarios: `5
 bitrate, and `{"type":"profile","stream":"camK","bitrate_kbps":B}` switches to rung B at that camera's next IDR (with
 staggered IDRs the cameras switch at their own IDR instants). Pre-encoded means B must be one of the rungs (default
 500/1000/1500/2500/4000; another value = one more `--rungs` encode). Derived files (verify summary, report, graphs, INVALID)
-go to `results/<run>-analysis/`, never into the run directory.
+go to `results/<run>/analysis/`, a subdirectory of the run kept apart from the traces.

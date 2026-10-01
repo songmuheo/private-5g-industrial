@@ -21,8 +21,9 @@ gstreamer/ and ffmpeg/; a change to `webrtc/` is recorded in `webrtc/README.md`.
    (`<tree>/apps/common/trace_ring.h`, `patches/srsran_gnb/p5g_gnb_tracer.h`: fixed circular rings,
    background flusher at nice 19, overflow counted into `.ERROR`). Anything that adds load
    (pcaps, extra logs) is opt-in and off by default.
-3. **Real-time logging only.** Every file in a run is written by the running process. No derived
-   files; analysis happens later, outside this repo's run path.
+3. **Real-time logging only.** Every trace file in a run is written by the running process. Derived
+   outputs (verify summary, report, graphs, analysis results) go only into the run's own `analysis/`
+   subdirectory (`results/<run>/analysis/`), never next to or mixed with the traces.
 4. **Follow the framework examples** (GStreamer monorepo @ 1.20.3: `gst-plugins-good/tests/examples/rtp/
    {server-alsasrc-PCMA,client-PCMA}.c`, `gst-plugins-base/tests/examples/app/appsrc-stream.c` — fetched by
    `gstreamer/scripts/fetch_gst_examples.sh`; webrtc tree: `examples/peerconnection/client/conductor.cc`,

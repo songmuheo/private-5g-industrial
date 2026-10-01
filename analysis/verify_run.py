@@ -5,17 +5,17 @@
 FAIL (exit 1) when an existing trace is empty, lacks its `# rows=` footer (process killed before its
 traces were flushed) or a `.ERROR` sidecar exists (ring overflow / write failure). Prints row counts, event-type counts, RTP sent/received/lost per SSRC (sequence-number set
 difference of the two ledgers when both sides are present) and per-RNTI grant counts, so a run can be
-sanity-checked at a glance. Writes the same numbers to results/<run>-analysis/summary.json — BESIDE the run
-directory, never inside it (CLAUDE.md rule 3: a run directory holds only what the running processes wrote).
+sanity-checked at a glance. Writes the same numbers to results/<run>/analysis/summary.json — derived outputs live in
+the run's own analysis/ subdirectory, apart from the traces the running processes wrote (CLAUDE.md rule 3).
 """
 from __future__ import annotations
 
 
 def analysis_dir(rd):
-    """results/<run>-analysis/ next to the (resolved) run directory: derived files never go into the run itself."""
+    """results/<run>/analysis/: every derived file of a run (summary, report, graphs) in one subdirectory of the run."""
     from pathlib import Path
     rd = Path(rd).resolve()
-    out = rd.parent / (rd.name + "-analysis")
+    out = rd / "analysis"
     out.mkdir(parents=True, exist_ok=True)
     return out
 

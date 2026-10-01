@@ -1,4 +1,4 @@
-# plot_run.py <results/run> [bitrate|fps|delay|latency|all]  — graphs of one run into <run>/graphs/*.png
+# plot_run.py <results/run> [bitrate|fps|delay|latency|all]  — graphs of one run into <run>/analysis/graphs/*.png
 #
 #   bitrate  : per UE, the bitrate the encoder is actually told to produce (tx-encoder-rates target_bps =
 #              VideoEncoder::SetRates target_bitrate sum, solid) over GoogCC's estimated bandwidth (tx-cc target_bps =
@@ -33,7 +33,7 @@ import csv, sys, os, glob, re, bisect, collections
 RD = sys.argv[1].rstrip('/'); WHAT = sys.argv[2] if len(sys.argv) > 2 else 'all'
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-OUT = f'{os.path.realpath(RD)}-analysis/graphs'; os.makedirs(OUT, exist_ok=True)   # derived files live beside the run, never inside it
+OUT = f'{RD}/analysis/graphs'; os.makedirs(OUT, exist_ok=True)   # derived files: the run's own analysis/ subdirectory (rule 3)
 NTP_UNIX_MS = 2208988800000
 PALETTE = {'cam0': '#2a78d6', 'cam1': '#eb6834', 'cam2': '#1baf7a', 'cam3': '#eda100', 'cam4': '#e87ba4',
            'cam5': '#008300', 'cam6': '#4a3aa7', 'cam7': '#e34948'}

@@ -965,3 +965,13 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   gnb/performance_mode.txt); laptops 4 CPUs schedutil -> performance. Laptop net.core.wmem_max was 212992, so the
   sender's 4 MiB SO_SNDBUF request had been capped at ~416 KiB (no missed slots or send failures resulted); now
   32 MiB. ffmpeg preflight reports gov= per laptop and warns if not performance. Not persistent across reboots.
+
+## 2026-10-01 — research framing recorded: multi-camera fusion groups; derived outputs inside the run
+* User scenario recorded in docs/SCENARIO_EDGE_PROFILES.md §0 and new §5.6: a fusion task needs the SAME frame number
+  from every camera of its group; the gNB does not know the group, so it can serve cameras that are already ahead
+  while the straggler (e.g. frontiers 444/444/440 -> serve cam3) holds the group back. Camera profiles change with the
+  tasks a camera serves. §5.3's "order does not matter inside a group" is now qualified (true only with one group
+  frame in flight). Analysis items 1-9 for the stock baseline listed in §5.6; plan step PG added to §8.
+* Derived outputs moved INTO the run (user instruction): results/<run>/analysis/{summary.json, report.txt, graphs/,
+  INVALID} for every tree (verify_run.py, plot_run.py, three run_experiment.sh); CLAUDE.md rule 3 reworded
+  accordingly. Verified with a loopback run (then deleted); the 2-UE MOT17-03 run's analysis moved into it.

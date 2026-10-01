@@ -11,7 +11,7 @@ results/<run>/
   gnb/              gNB tracer gnb_*.csv, gnb.log, gnb_stdout.log, gnb_metrics.jsonl [, *.pcap]
   core/             open5gs.log
   ue/               (코드 테스트만) srsUE ue.log, ue_metrics.csv, ue_mac_nr.pcap
-results/<run>-analysis/   파생물은 실행 디렉터리 밖(옆)에: summary.json(verify_run.py), report.txt(run_experiment.sh), graphs/(plot_run.py), INVALID
+  analysis/        파생물(실행 후 분석이 쓰는 것, 트레이스와 분리): summary.json(verify_run.py), report.txt(run_experiment.sh), graphs/(plot_run.py), INVALID
 ```
 
 ## 0-a. 두 전송 트리와 파일 계약 (2026-09-30)
