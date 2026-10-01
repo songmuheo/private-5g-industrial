@@ -73,17 +73,20 @@ def iter_error_sidecars(root: pathlib.Path) -> Iterator[pathlib.Path]:
             if n.endswith(".ERROR"): yield pathlib.Path(dp) / n
 
 def run_window(rd):
-    """[start - 1 s, max(start + duration + 5 s, last decoded frame + 2 s)] in wall ns, or None without experiment.json.
-    The end follows the recorded execution: gstreamer/webrtc senders count their duration from application start, which
-    can be later than the scheduled start (start-at waits, negotiation)."""
-    import csv as _csv, glob as _glob, json as _json, os as _os
+    """[start - 1 s, max(start + duration + 5 s, last packet sent by a DECLARED camera + 5 s)] in wall ns, or None without
+    experiment.json. The end follows the recorded execution of the scenario's own cameras (their tx-rtp log; receiver
+    rx-rtp as fallback): gstreamer/webrtc senders count their duration from application start, which can be later than
+    the scheduled start. Files of cameras not in the scenario are ignored."""
+    import csv as _csv, json as _json, os as _os
     p = f"{rd}/experiment.json"
     if not _os.path.exists(p): return None
     e = _json.load(open(p)); t0 = int(e["start_time_epoch"] * 1e9); end = t0 + (int(e["scenario"].get("duration_s", 300)) + 5) * 1_000_000_000
-    for f in _glob.glob(f"{rd}/app/*-rx-frames.csv"):
-        last = None
-        with open(f) as fh:
-            for r in _csv.DictReader(l for l in fh if not l.startswith("#")):
-                if r.get("recv_wall_ns"): last = r["recv_wall_ns"]
-        if last: end = max(end, int(last) + 2_000_000_000)
+    for cam in e["scenario"].get("cams", {}):
+        for f, col in ((f"{rd}/senders/{cam}/app/{cam}-tx-rtp.csv", "log_wall_ns"), (f"{rd}/app/{cam}-rx-rtp.csv", "log_wall_ns")):
+            if not _os.path.exists(f): continue
+            last = None
+            with open(f) as fh:
+                for r in _csv.DictReader(l for l in fh if not l.startswith("#")):
+                    if r.get(col): last = r[col]
+            if last: end = max(end, int(last) + 5_000_000_000); break   # the sender's own log when present
     return (t0 - 1_000_000_000, end)

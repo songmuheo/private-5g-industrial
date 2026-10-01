@@ -105,7 +105,7 @@ kill -0 "$RECV_PID" 2>/dev/null || { cat "$RD/app/run_receiver.log"; echo "[exp]
 log "receivers up (pid $RECV_PID): $(grep -c 'pid=' "$RD/app/run_receiver.log") of $N"
 # stop: TERM run_receiver.sh (its EXIT trap INTs the receivers so traces flush, then stops the control server); bounded
 # wait; then, as a fallback, stop whatever of THIS run is still alive from receiver.pids (INT, then KILL after 10 s)
-declare -A LPID; LAUNCHED=(); FINISHED=0
+declare -A LPID; declare -A FAILED=(); LAUNCHED=(); FINISHED=0   # all state the EXIT trap reads exists before the trap
 # The senders of THIS launch carry P5G_RUN_ID=<RUN_ID> in their environment (run_sender.sh is started with it): only those
 # are signalled, never another experiment's or another tree's video_sender on the same laptop.
 owned_stop_cmd() {   # remote shell snippet: INT this run's senders, wait up to 10 s, print how many are left
@@ -234,7 +234,6 @@ json.dump(rec, open(f"{rd}/experiment.json", "w"), indent=2)
 PYEOF
 
 # ---- wait for the senders ----
-declare -A FAILED=()
 for c in "${!LPID[@]}"; do
   if wait "${LPID[$c]}"; then log "$c finished"; else log "$c FAILED (see senders/$c.launch.log)"; FAILED[$c]=1; fi
 done

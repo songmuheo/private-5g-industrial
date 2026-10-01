@@ -98,11 +98,19 @@ def load(rd, cams, warmup_s):
         app = {r["rtp_ts"]: int(r["recv_wall_ns"]) for r in rows(f"{rd}/app/{c}-rx-frames.csv") if r["ssrc"] == ssrc}
         C[c] = dict(ssrc=ssrc, frames=fr, app=app, fps=fps[c])
     by_ssrc = {v["ssrc"]: c for c, v in C.items()}
+    all_ssrc = {}                                            # every scenario camera's SSRC (for UE-index ownership checks)
+    for oc in exp["scenario"]["cams"]:
+        f = f"{rd}/senders/{oc}/app/{oc}-tx-rtp.csv"
+        if os.path.exists(f):
+            for r in rows(f): all_ssrc[r["ssrc"]] = oc; break
     pk = {c: collections.defaultdict(list) for c in cams}   # (wall, sdu_bytes, marker) per rtp_ts, in arrival order
     lo = T + int(warmup_s * 1e9); hi = T + dur * 1_000_000_000
     ue = collections.defaultdict(set)                       # camera -> UE indexes its SSRC used inside this run's window
+    owners = collections.defaultdict(set)                   # UE index -> scenario cameras that used it in this run's window
     for r in rows(f"{rd}/gnb/gnb_pdcp_ul.csv"):
         if r["rtp_like"] != "1": continue
+        oc = all_ssrc.get(r["rtp_ssrc"])
+        if oc and T <= int(r["wall_ns"]) < T + (dur + 5) * 1_000_000_000: owners[r["ue_index"]].add(oc)
         c = by_ssrc.get(r["rtp_ssrc"])
         if c is None: continue
         if T <= int(r["wall_ns"]) < hi + 5_000_000_000: ue[c].add(r["ue_index"])
@@ -114,10 +122,7 @@ def load(rd, cams, warmup_s):
     sched.sort(key=lambda r: r["dec_ns"])
     # RAN rows are matched to cameras by UE index (grants, BSR and RLC rows all carry it), and only inside this run's
     # window: a reconnection that changes the RNTI keeps working; a UE index used by two cameras makes RAN metrics ambiguous.
-    owners = collections.defaultdict(set)
-    for c, us in ue.items():
-        for u in us: owners[u].add(c)
-    shared_ue = {u: sorted(cs) for u, cs in owners.items() if len(cs) > 1}
+    shared_ue = {u: sorted(cs) for u, cs in owners.items() if len(cs) > 1 and any(c in cams for c in cs)}   # across ALL scenario cameras
     ran_ok = all(ue.get(c) for c in cams) and not shared_ue
     no_marker = 0
     for c in cams:
@@ -410,9 +415,11 @@ def analyse_group(rd, g, warmup_s, out, gdir):
     for r in rows(f"{rd}/gnb/gnb_bsr.csv"):
         if r["ue_index"] in ue2cam: BS[ue2cam[r["ue_index"]]].append((int(r["wall_ns"]), (r["ue_index"], r["lcg_id"]), int(r["buffer_bytes"])))
     BSt, BSv = {}, {}
-    for rn, v in BS.items():   # per RNTI: total = sum over LCGs of each LCG's latest report, after every report
-        v.sort(); state = {}; ts = []; tot = []
-        for w, lcg, b in v: state[lcg] = b; ts.append(w); tot.append(sum(state.values()))
+    for rn, v in BS.items():   # per camera: sum over LCGs of the latest report of its CURRENT connection (UE index)
+        v.sort(); state = collections.defaultdict(dict); cur = None; ts = []; tot = []
+        for w, (u, lcg), b in v:
+            cur = u                                    # a report from a (new) UE context retires the previous one's backlog
+            state[u][lcg] = b; ts.append(w); tot.append(sum(state[cur].values()))
         BSt[rn], BSv[rn] = ts, tot
     def bsr_total(c, t):
         i = bisect.bisect_right(BSt.get(c, []), t) - 1

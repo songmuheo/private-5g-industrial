@@ -1047,3 +1047,9 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   run_batch post writes VERIFY_FAILED and batch_summary excludes such runs; fusion_report maps RAN rows to cameras by UE
   index inside the run window (reconnections keep working, a shared index disables RAN items), reports items 1-2 even
   without gNB data, measures progress in RTP-payload units on both sides, and uses the sender's integer-µs grid.
+* Codex pass 4 (2026-10-01): pass-3 High (unrelated senders) confirmed fixed. New and fixed: FAILED declared with the other
+  trap state before the EXIT trap (an interrupt right after launching raised `unbound variable` and skipped the receiver
+  cleanup; re-tested at 3.4 / 3.8 / 4.3 s: 0 errors, 5/5 senders stopped, aborted marker, nothing left); BSR state per camera
+  follows its CURRENT UE context (a reconnection retires the old backlog); UE-index ownership checked across ALL scenario
+  cameras; run window from the declared cameras' own send logs (+5 s), unrelated files ignored; prepare_client.sh must run
+  as the scenario's hosts.user and verifies the gNB -> laptop login for exactly that account.

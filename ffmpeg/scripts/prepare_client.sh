@@ -45,7 +45,12 @@ GKEYS="$(ssh -o BatchMode=yes "$GNB" 'cat ~/.ssh/id_*.pub 2>/dev/null')" || { ec
 GKEYS="$(grep -E '^(ssh-|ecdsa-)[^ ]+ [A-Za-z0-9+/=]+' <<<"$GKEYS" || true)"
 [ -n "$GKEYS" ] || { echo "[prepare_client] the gNB PC account has no public key (~/.ssh/id_*.pub): run ssh-keygen there first" >&2; exit 1; }
 while read -r t b _; do grep -qF "$b" ~/.ssh/authorized_keys || { echo "$t $b gnb-pc" >> ~/.ssh/authorized_keys; echo "   gNB -> laptop: key authorized"; }; done <<<"$GKEYS"
-ME="$(whoami)@192.168.77.1$K"   # verify the reverse direction from the gNB PC (what run_experiment.sh will do)
+HUSER="$(python3 -c "
+import json, glob
+u = {json.load(open(f)).get('hosts', {}).get('user') for f in glob.glob('$TREE/experiments/*.json')} - {None}
+print(' '.join(sorted(u)))")"
+[ "$HUSER" = "$(whoami)" ] || { echo "[prepare_client] run this as the account the orchestrator logs in as (scenario hosts.user = '$HUSER'), not '$(whoami)'" >&2; exit 1; }
+ME="$HUSER@192.168.77.1$K"   # verify the reverse direction from the gNB PC exactly as run_experiment.sh will do it
 ssh -o BatchMode=yes "$GNB" "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 $ME true" \
   && echo "   gNB -> laptop ($ME): verified" || { echo "[prepare_client] the gNB PC cannot log in here as $ME without a password (sync LAN up? sshd running?)" >&2; exit 1; }
 echo "[prepare_client] 4/6 build";    "$TREE/scripts/build_apps.sh" | tail -1
