@@ -6,7 +6,7 @@
 # on every camera, IDRs staggered — encoded once there by prepare_video.sh --source mot17-03, so every host has
 # bit-identical sources; P5G_ASSETS=all fetches every *.h264 instead), sha256 check against the manifest,
 # sync-LAN/chrony setup if missing, and a go/no-go check. --clean first deletes every other video file in
-# video/assets (*.h264, *.yuv; the gstreamer/webrtc YUVs come back with video/fetch_asset.sh). Re-runnable.
+# video/assets (*.h264, *.264, *.yuv, *.y4m, *.mp4, *.mkv; the gstreamer/webrtc YUVs come back with video/fetch_asset.sh). Re-runnable.
 set -euo pipefail
 K="${1:?camera id K (this laptop plays cam<K>)}"; shift
 GNB=songmu@192.168.77.1; CLEAN=0
@@ -18,7 +18,7 @@ echo "[prepare_client] 1/5 packages"; sudo apt-get install -y --no-install-recom
 echo "[prepare_client] 2/5 build";    "$TREE/scripts/build_apps.sh" | tail -1
 echo "[prepare_client] 3/5 pre-encoded rungs ($PATTERN) from $GNB (sync LAN)"; mkdir -p video/assets
 if [ "$CLEAN" = 1 ]; then
-  n=0; for f in video/assets/*.h264 video/assets/*.yuv; do [ -e "$f" ] || continue
+  n=0; for f in video/assets/*.h264 video/assets/*.264 video/assets/*.yuv video/assets/*.y4m video/assets/*.mp4 video/assets/*.mkv; do [ -e "$f" ] || continue
     case "$(basename "$f")" in $PATTERN) ;; *) rm -f "$f"; n=$((n + 1));; esac; done
   echo "   --clean: removed $n other video file(s)"
 fi
