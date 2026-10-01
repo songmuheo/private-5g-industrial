@@ -1022,3 +1022,17 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   frame sizes much less so. Associations in item 5 and the IDR residual in item 8 are descriptive, not causal.
 * 5-UE matrix comparison axes reworded (SCENARIO §8.1): only A vs D isolates one factor (load); A vs C and D vs B change the
   whole task structure at similar load (descriptive comparisons).
+* Codex pass 2 (2026-10-01): 10/15 earlier findings fixed, 5 partially; plus 12 new (mostly run SCOPE once several runs share
+  one gNB session). Fixed: expected group frames generated from the schedule (epoch, duration, task rate) so frames a member
+  never captured/sent are misses too; online persistence uses every group frame already complete at the gNB; BSR keeps
+  per-LCG state without a lookback cut-off; progress capped (RTP payload vs Annex-B units differ by < 0.5 %); UE index ->
+  RNTI resolved inside the run window (warning if it changes); no complete group frame / constant inputs no longer crash;
+  frontier occupancy runs to the window end and reports right-censored episodes; verify_run follows the gnb symlink for
+  .ERROR sidecars, fails on footer overflow counts, and scopes radio statistics to the run window; exp_run_report keeps
+  only this run's window of the session's gNB traces and judges the media path by this run's SSRCs (n now equals the run's
+  packets exactly); batch_summary never pools different deadlines/scenarios, calls the rotation spread "variation across
+  rotations/rounds" (placement and round effects are confounded), handles missing latencies; run_batch post guards every
+  step and returns an aggregate status, Ctrl-C during the pause reaches the summary; rotation follows numeric camera ids;
+  an aborted run stops the remote senders before the receivers (verified locally: Ctrl-C mid-run -> 0 senders, 0 receivers,
+  port free). Design judgement recorded (Codex): 2 rounds = a screening design; it cannot separate rotation from round/time,
+  phone hardware from placement, profile from its competing profiles, nor repeatability (one observation per cell).

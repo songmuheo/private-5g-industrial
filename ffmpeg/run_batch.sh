@@ -17,16 +17,18 @@ if [ "${1:-}" = "post" ]; then
   SESSION="${2:-}"; [ -n "$SESSION" ] || SESSION="$(ls -td results/*/runs 2>/dev/null | head -1 | xargs -r dirname)"
   [ -d "$SESSION/runs" ] || { echo "no session with runs/ (give results/<session>)" >&2; exit 1; }
   pgrep -x gnb >/dev/null && { echo "the gNB is still running: stop ./run_gnb_core.sh first (its traces get their footers on exit)" >&2; exit 1; }
-  for RD in "$SESSION"/runs/*/; do
-    RD="${RD%/}"; echo "== $RD"
-    "$PY" analysis/verify_run.py "$RD" 2>&1 | tail -1
-    "$PY" analysis/exp_run_report.py "$RD" 5 > "$RD/analysis/report.txt" 2>&1 || echo "   report failed"
-    if "$PY" -c "import json,sys; sys.exit(0 if json.load(open('$RD/scenario.json')).get('groups') else 1)"; then
-      "$PY" analysis/fusion_report.py "$RD" > "$RD/analysis/fusion_run.log" 2>&1 || echo "   fusion failed (see $RD/analysis/fusion_run.log)"
+  FAILS=0
+  for RD in "$SESSION"/runs/*/; do   # every step guarded: one failing run never stops the others or the summary
+    RD="${RD%/}"; echo "== $RD"; mkdir -p "$RD/analysis"
+    if "$PY" analysis/verify_run.py "$RD" > "$RD/analysis/verify.log" 2>&1; then tail -1 "$RD/analysis/verify.log"; else echo "   verify FAILED (see $RD/analysis/verify.log)"; FAILS=$((FAILS + 1)); fi
+    "$PY" analysis/exp_run_report.py "$RD" 5 > "$RD/analysis/report.txt" 2>&1 || { echo "   report failed"; FAILS=$((FAILS + 1)); }
+    if "$PY" -c "import json,sys; sys.exit(0 if json.load(open('$RD/scenario.json')).get('groups') else 1)" 2>/dev/null; then
+      "$PY" analysis/fusion_report.py "$RD" > "$RD/analysis/fusion_run.log" 2>&1 || { echo "   fusion failed (see $RD/analysis/fusion_run.log)"; FAILS=$((FAILS + 1)); }
     fi
-    "$PY" analysis/plot_run.py "$RD" > /dev/null 2>&1 || echo "   graphs failed"
+    "$PY" analysis/plot_run.py "$RD" > /dev/null 2>&1 || { echo "   graphs failed"; FAILS=$((FAILS + 1)); }
   done
-  "$PY" analysis/batch_summary.py "$SESSION"
+  "$PY" analysis/batch_summary.py "$SESSION" || FAILS=$((FAILS + 1))
+  [ "$FAILS" = 0 ] || { echo "[batch] post: $FAILS step(s) failed (see the logs above)"; exit 1; }
   exit 0
 fi
 
@@ -46,11 +48,11 @@ STOP=0; trap 'STOP=1' INT
 i=0
 for line in "${RUNS[@]}"; do
   i=$((i + 1)); scen="${line% *}"; rot="${line##* }"
-  [ "$STOP" = 1 ] && { blog "stopped by Ctrl-C before run $i"; break; }
+  if [ "$STOP" = 1 ]; then blog "stopped by Ctrl-C before run $i"; break; fi
   blog "run $i/${#RUNS[@]}: $scen --rotate $rot"
   if "$TREE/run_experiment.sh" "$scen" --rotate "$rot"; then blog "run $i done"; else blog "run $i FAILED (exit $?) - continuing"; fi
-  [ "$STOP" = 1 ] && { blog "stopped by Ctrl-C after run $i"; break; }
-  [ "$i" -lt "${#RUNS[@]}" ] && sleep "$PAUSE"
+  if [ "$STOP" = 1 ]; then blog "stopped by Ctrl-C after run $i"; break; fi
+  if [ "$i" -lt "${#RUNS[@]}" ]; then sleep "$PAUSE" || true; fi   # Ctrl-C during the pause: fall through to the STOP check
 done
 "$PY" analysis/batch_summary.py "$SESSION" | tee -a "$BLOG" || true
 blog "batch finished. Stop the gNB (Ctrl-C in terminal 1), then: ./ffmpeg/run_batch.sh post $SESSION"

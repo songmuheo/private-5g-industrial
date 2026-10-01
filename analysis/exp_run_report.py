@@ -4,8 +4,17 @@
 import csv, collections, statistics as st, json, bisect, glob, os, re, sys
 RD=sys.argv[1]; NTP_UNIX_MS=2208988800000; SPF=20  # slots per frame @30 kHz
 TDD_PERIOD=int(sys.argv[2]) if len(sys.argv)>2 else 10
+# gNB traces of a sub-run are the whole session's (results/<session>/runs/<run>/gnb -> ../../gnb): keep only this run's
+# window (experiment.json start .. start + duration + 5 s) so earlier experiments never enter this run's report
+WIN=None
+if os.path.exists(f'{RD}/experiment.json'):
+    _e=json.load(open(f'{RD}/experiment.json')); _t0=int(_e['start_time_epoch']*1e9)
+    WIN=(_t0, _t0+(int(_e['scenario'].get('duration_s',300))+5)*1_000_000_000)
 def rows(p):
-    with open(p) as f: return list(csv.DictReader(l for l in f if not l.startswith('#')))
+    with open(p) as f:
+        r=[x for x in csv.DictReader(l for l in f if not l.startswith('#')) if None not in x.values()]
+    if WIN and '/gnb/' in p and r and 'wall_ns' in r[0]: r=[x for x in r if WIN[0]<=int(x['wall_ns'])<WIN[1]]
+    return r
 def q(v,p): v=sorted(v); return v[min(len(v)-1,int(p*len(v)))] if v else None
 def f0(v): return "-" if v is None else f"{v:.0f}"
 def f1(v): return "-" if v is None else f"{v:.1f}"
@@ -71,8 +80,9 @@ for s in streams:
     print(f"   frame span med/p90/max (ms): {[f'{f0(st.median(span[i]))}/{f0(q(span[i],.9))}/{f0(max(span[i]))}' for i in range(0,NB) if span.get(i)]}")
 print("## A2. ICE path per stream: transport.selectedCandidatePairId (rx-stats) + gNB PDCP UL destination (RTP-like rows)")
 pdcp_dst=collections.defaultdict(collections.Counter)
+RUN_SSRCS={r['ssrc'] for s in streams for r in rows(f'{RD}/app/{s}-rx-frames.csv')[:50]}   # this run's streams only
 for r in (rows(f'{RD}/gnb/gnb_pdcp_ul.csv') if os.path.exists(f'{RD}/gnb/gnb_pdcp_ul.csv') else []):
-    if r['rtp_like'] in ('1','true','True') and r['src_ip'].startswith('10.45'): pdcp_dst[r['src_ip']][r['dst_ip']]+=1
+    if r['rtp_like'] in ('1','true','True') and r['src_ip'].startswith('10.45') and (not RUN_SSRCS or r['rtp_ssrc'] in RUN_SSRCS): pdcp_dst[r['src_ip']][r['dst_ip']]+=1
 s2ip={v:k for k,v in ip2s.items()}
 for s in streams:
     cands={}; pairs={}; tr=None; STATS=f'{RD}/app/{s}-rx-stats.jsonl'

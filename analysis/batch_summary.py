@@ -6,8 +6,9 @@
 Reads each run's experiment.json (scenario, rotation, which phone/laptop played which camera) and analysis/fusion_<gid>.json
 (analysis/fusion_report.py). Writes results/<session>/analysis/batch_summary.{txt,json} and graphs/batch_*.png:
   1. per run and group: deadline met, group latency median / p99
-  2. per scenario and group across rotations: spread between rotations = how much the phone placement matters
-  3. per phone x camera profile: per-camera latency (the same profile on different phones; the same phone with different profiles)
+  2. per scenario and group across rotations: observed variation across rotations/rounds (placement AND time/round effects
+     together; each rotation ran in a different round, so this is not a placement estimate)
+  3. per phone x (scenario, camera profile, deadline): per-camera latency, so different deadlines/backgrounds are never pooled
 """
 from __future__ import annotations
 
@@ -22,6 +23,9 @@ SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]     # validated
 plt.rcParams.update({"font.size": 9, "axes.edgecolor": INK2, "axes.labelcolor": INK, "xtick.color": INK2, "ytick.color": INK2,
                      "axes.spines.top": False, "axes.spines.right": False, "figure.facecolor": SURFACE, "axes.facecolor": SURFACE,
                      "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.6, "legend.frameon": False})
+
+
+def f1(x): return "n/a" if x is None else f"{x:.1f}"
 
 
 def main(session):
@@ -51,9 +55,9 @@ def main(session):
         for g in r["groups"]:
             phones = ",".join(f"{c}@{r['host'].get(c, '?').rsplit('.', 1)[-1]}" for c in g["cams"])
             if g.get("missing"): txt.append(f"     {g['id']} ({phones}) D={g['deadline_ms']:.0f}: no fusion analysis yet (run ./ffmpeg/run_batch.sh post)"); continue
-            txt.append(f"     {g['id']} ({phones}) D={g['deadline_ms']:.0f}: met {100 * g['met']:.2f} %  median {g['median']:.1f}  p99 {g['p99']:.1f} ms")
+            txt.append(f"     {g['id']} ({phones}) D={g['deadline_ms']:.0f}: met {100 * g['met']:.2f} %  median {f1(g['median'])}  p99 {f1(g['p99'])} ms")
 
-    txt += ["", "## 2. per scenario and group across rotations (phone placement effect = spread between rotations)"]
+    txt += ["", "## 2. per scenario and group across rotations: observed variation across rotations/rounds (placement and round/time effects are confounded)"]
     agg = collections.defaultdict(list)
     for r in runs:
         for g in r["groups"]:
@@ -63,17 +67,18 @@ def main(session):
         txt.append(f"  {name:34s} {gid}: met " + "  ".join(f"r{rot} {100 * m:.2f} %" for rot, m, _ in sorted(v))
                    + (f"   (range {100 * (max(mets) - min(mets)):.2f} pp)" if len(v) > 1 else ""))
 
-    txt += ["", "## 3. per phone (host) x camera profile: per-camera latency median / p99 ms, deadline met (all runs)"]
+    txt += ["", "## 3. per phone (host) x (scenario, camera profile, deadline): per-camera latency median / p99 ms, deadline met"]
     cell = collections.defaultdict(list)
     for r in runs:
         if r["invalid"]: continue
         for g in r["groups"]:
             if g.get("missing"): continue
-            for c, s in g["per_camera"].items():
-                cell[(r["host"].get(c, "?"), r["prof"][c])].append((s["median"], s["p99"], s["deadline_met"]))
+            for c, s in g["per_camera"].items():   # key includes scenario and deadline: never pool different success criteria
+                cell[(r["host"].get(c, "?"), f"{r['name'].split('-')[1]}:{r['prof'][c]} D{g['deadline_ms']:.0f}")].append((s["median"], s["p99"], s["deadline_met"]))
     hosts = sorted({h for h, _ in cell}); profs = sorted({p for _, p in cell})
+    def mean_or_none(v): v = [x for x in v if x is not None]; return st.mean(v) if v else None
     for h in hosts:
-        txt.append(f"  {h}: " + "   ".join(f"{p}: {st.mean(x[0] for x in cell[(h, p)]):.1f}/{st.mean(x[1] for x in cell[(h, p)]):.1f} "
+        txt.append(f"  {h}: " + "   ".join(f"{p}: {f1(mean_or_none(x[0] for x in cell[(h, p)]))}/{f1(mean_or_none(x[1] for x in cell[(h, p)]))} "
                                            f"({100 * st.mean(x[2] for x in cell[(h, p)]):.1f} %, n={len(cell[(h, p)])})" for p in profs if (h, p) in cell))
 
     # graphs: group deadline met by scenario/group and rotation; per-camera median by phone x profile
@@ -94,14 +99,15 @@ def main(session):
     fig.tight_layout(); fig.savefig(f"{out}/graphs/batch_group_met.png", dpi=130); plt.close(fig)
     if cell:
         fig, ax = plt.subplots(figsize=(max(6, 1.4 * len(profs) + 2), 0.5 * len(hosts) + 1.6))
-        im = [[(st.mean(x[0] for x in cell[(h, p)]) if (h, p) in cell else float("nan")) for p in profs] for h in hosts]
+        im = [[(mean_or_none(x[0] for x in cell[(h, p)]) if (h, p) in cell else None) for p in profs] for h in hosts]
+        im = [[float("nan") if x is None else x for x in row] for row in im]
         m = ax.imshow(im, cmap="Blues", aspect="auto")
         for i in range(len(hosts)):
             for j in range(len(profs)):
-                if (hosts[i], profs[j]) in cell: ax.text(j, i, f"{im[i][j]:.0f}", ha="center", va="center", color=INK if im[i][j] < 60 else SURFACE, fontsize=8)
-        ax.set_xticks(range(len(profs))); ax.set_xticklabels(profs, fontsize=8); ax.set_yticks(range(len(hosts))); ax.set_yticklabels(hosts, fontsize=8)
+                if (hosts[i], profs[j]) in cell and im[i][j] == im[i][j]: ax.text(j, i, f"{im[i][j]:.0f}", ha="center", va="center", color=INK if im[i][j] < 60 else SURFACE, fontsize=8)
+        ax.set_xticks(range(len(profs))); ax.set_xticklabels(profs, fontsize=7, rotation=30, ha="right"); ax.set_yticks(range(len(hosts))); ax.set_yticklabels(hosts, fontsize=8)
         ax.grid(False); fig.colorbar(m, ax=ax, label="per-camera latency median (ms)")
-        ax.set_title("phone x profile: same profile on different phones (columns), same phone with different profiles (rows)", fontsize=9, loc="left")
+        ax.set_title("phone x (scenario:profile, deadline): per-camera latency median", fontsize=9, loc="left")
         fig.tight_layout(); fig.savefig(f"{out}/graphs/batch_phone_profile.png", dpi=130); plt.close(fig)
 
     json.dump({"runs": runs}, open(f"{out}/batch_summary.json", "w"), indent=2, default=str)

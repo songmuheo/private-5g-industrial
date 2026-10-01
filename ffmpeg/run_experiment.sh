@@ -66,8 +66,10 @@ N=${#CAMS[@]}
 camK() { echo "${1//[!0-9]/}"; }
 base_host() { local v="CAM_HOST_$1"; echo "${!v:-${HOST_PATTERN//\{K\}/$(camK "$1")}}"; }    # cams.camK.host overrides the pattern
 base_repo() { local v="CAM_REPO_$1"; echo "${!v:-$HOST_REPO}"; }                               # cams.camK.repo overrides hosts.repo
-cam_index() { local i; for i in "${!CAMS[@]}"; do [ "${CAMS[$i]}" = "$1" ] && { echo "$i"; return; }; done; }
-host_cam() { echo "${CAMS[$(( ($(cam_index "$1") + ROTATE) % N ))]}"; }                      # whose host this cam runs on
+# rotation over the cameras in NUMERIC id order (cam0, cam1, ..), independent of the key order in the JSON
+mapfile -t SORTED_CAMS < <(printf '%s\n' "${CAMS[@]}" | sort -t m -k2 -n)
+cam_index() { local i; for i in "${!SORTED_CAMS[@]}"; do [ "${SORTED_CAMS[$i]}" = "$1" ] && { echo "$i"; return; }; done; }
+host_cam() { echo "${SORTED_CAMS[$(( ($(cam_index "$1") + ROTATE) % N ))]}"; }                # whose host this cam runs on
 host_of() { base_host "$(host_cam "$1")"; }
 repo_of() { base_repo "$(host_cam "$1")"; }
 # run a command on a camera host (ssh) or locally
@@ -103,7 +105,17 @@ kill -0 "$RECV_PID" 2>/dev/null || { cat "$RD/app/run_receiver.log"; echo "[exp]
 log "receivers up (pid $RECV_PID): $(grep -c 'pid=' "$RD/app/run_receiver.log") of $N"
 # stop: TERM run_receiver.sh (its EXIT trap INTs the receivers so traces flush, then stops the control server); bounded
 # wait; then, as a fallback, stop whatever of THIS run is still alive from receiver.pids (INT, then KILL after 10 s)
-cleanup() { set +e; log "stopping receivers"; kill -TERM "$RECV_PID" 2>/dev/null
+declare -A LPID
+stop_senders() {   # aborted run (Ctrl-C, error): stop the senders on their hosts too, not only the local ssh clients
+  local c alive=""
+  for c in "${!LPID[@]}"; do kill -0 "${LPID[$c]}" 2>/dev/null && alive="$alive $c"; done
+  [ -n "$alive" ] || return 0
+  log "aborting: stopping the senders still running on their hosts:$alive"
+  for c in $alive; do on_host "$c" "pkill -INT -x video_sender || true" >/dev/null 2>&1 & done; wait_bg=$!
+  for i in $(seq 1 100); do local a=0; for c in $alive; do kill -0 "${LPID[$c]}" 2>/dev/null && a=1; done; [ $a = 0 ] && break; sleep 0.1; done
+  for c in $alive; do kill -0 "${LPID[$c]}" 2>/dev/null && { log "WARNING: $c's launcher still alive after 10 s"; kill -TERM "${LPID[$c]}" 2>/dev/null; }; done
+}
+cleanup() { set +e; stop_senders; log "stopping receivers"; kill -TERM "$RECV_PID" 2>/dev/null
   for i in $(seq 1 150); do kill -0 "$RECV_PID" 2>/dev/null || break; sleep 0.1; done
   local left=""; [ -f "$RD/app/receiver.pids" ] && left="$(sed -n 's/^[a-z]*=//p' "$RD/app/receiver.pids" | tr ' ' '\n' | while read -r p; do [ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo "$p"; done)"
   if [ -n "$left" ] || kill -0 "$RECV_PID" 2>/dev/null; then
@@ -171,7 +183,6 @@ fi
 RUN_ID="$(basename "$(readlink -f "$RD")")-$(date +%H%M%S)"
 T="$(awk -v n="$(date +%s.%N)" -v d="$START_DELAY" 'BEGIN{printf "%.3f", n+d}')"
 log "start time T=$T ($(date -d "@$T" +%H:%M:%S.%3N))"
-declare -A LPID
 for c in "${CAMS[@]}"; do
   case "${STATUS[$c]}" in UNREACHABLE*) log "skip $c (unreachable)"; continue;; esac
   var="CAM_ARGS_$c"; K="$(camK "$c")"

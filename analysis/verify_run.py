@@ -113,23 +113,33 @@ def main(run_dir: str) -> int:
                 print(f"[WARN] {name}.csv has no rows")
             if rows and "rows" not in footer:
                 fail(f"{name}.csv has no '# rows=' footer: the gNB did not shut down cleanly, tail lost")
+            if str(footer.get("overflow", "0")) not in ("0", "0.0"):
+                fail(f"{name}.csv footer reports overflow={footer['overflow']}: rows were dropped by the tracer ring")
         for name in GNB_FILES:
             f = gnb / name
             g[name] = {"bytes": f.stat().st_size if f.exists() else 0}
             if name.endswith((".log", ".jsonl")):
                 g[name]["lines"] = line_count(f)
+        # radio statistics: only this run's window when the gNB traces are a whole session's (sub-run of run_batch.sh /
+        # run_experiment.sh inside a live gNB session) -> experiment.json start + duration; otherwise the whole trace
+        win = None
+        if (rd / "experiment.json").exists():
+            e = json.loads((rd / "experiment.json").read_text())
+            t0 = int(e["start_time_epoch"] * 1e9); win = (t0, t0 + (int(e["scenario"].get("duration_s", 300)) + 5) * 1_000_000_000)
+        inwin = (lambda r: win[0] <= int(r["wall_ns"]) < win[1]) if win else (lambda r: True)
+        g["radio_stats_scope"] = "run window (experiment.json)" if win else "whole trace"
         per_rnti: dict = collections.defaultdict(collections.Counter)
         for d in ("ul", "dl"):
-            for r in read_trace(gnb / f"gnb_sched_{d}.csv")[0]:
+            for r in filter(inwin, read_trace(gnb / f"gnb_sched_{d}.csv")[0]):
                 c = per_rnti[r["rnti"]]
                 c[f"{d}_grants"] += 1
                 c[f"{d}_tbs_bytes"] += r["tbs_bytes"]
                 c[f"{d}_retx"] += 0 if r["new_data"] else 1
         g["per_rnti"] = {hex(k): dict(v) for k, v in per_rnti.items()}
-        crc = read_trace(gnb / "gnb_ul_crc.csv")[0]
+        crc = [r for r in read_trace(gnb / "gnb_ul_crc.csv")[0] if inwin(r)]
         if crc:
             g["ul_bler"] = sum(1 for r in crc if not r["crc_ok"]) / len(crc)
-        print("       gnb rows: " + ", ".join(f"{n[4:]}={g[n]['rows']}" for n in GNB_TRACES))
+        print("       gnb rows (whole trace): " + ", ".join(f"{n[4:]}={g[n]['rows']}" for n in GNB_TRACES) + f"; radio stats below: {g['radio_stats_scope']}")
         print("       gnb files: " + ", ".join(f"{n}={g[n].get('lines', g[n]['bytes'])}" for n in GNB_FILES if g[n]["bytes"]))
         for rnti, c in g["per_rnti"].items():
             print(f"       rnti={rnti} UL grants={c.get('ul_grants', 0)} ({c.get('ul_tbs_bytes', 0) / 1e6:.2f} MB, "

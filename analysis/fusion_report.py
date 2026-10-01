@@ -108,8 +108,12 @@ def load(rd, cams, warmup_s):
         r["dec_ns"] = int(r["wall_ns"]) - int(r["k_offset"] or 0) * SLOT_NS   # DCI (decision) instant
         sched.append(r)
     sched.sort(key=lambda r: r["dec_ns"])
-    rnti = {}
-    for r in sched: rnti.setdefault(r["ue_index"], r["rnti"])
+    lo = T + int(warmup_s * 1e9); hi = T + dur * 1_000_000_000
+    rn_cnt = collections.defaultdict(collections.Counter)   # UE index -> RNTI within THIS run's window (session traces may
+    for r in sched:                                          # hold earlier connections that reused the UE index)
+        if T <= r["dec_ns"] < hi: rn_cnt[r["ue_index"]][r["rnti"]] += 1
+    rnti = {u: c.most_common(1)[0][0] for u, c in rn_cnt.items()}
+    reconnect = {u: list(c) for u, c in rn_cnt.items() if len(c) > 1}
     no_marker = 0
     for c in cams:
         if c not in ue: sys.exit(f"{c}: no RTP rows at the gNB PDCP for ssrc {C[c]['ssrc']} (not an OTA run?)")
@@ -122,10 +126,15 @@ def load(rd, cams, warmup_s):
             if p and not m: no_marker += 1
             f["gpk"] = p
             f["app"] = C[c]["app"].get(f["ts"])
-    lo = T + int(warmup_s * 1e9); hi = T + dur * 1_000_000_000
-    common = sorted(set.intersection(*(set(C[c]["frames"]) for c in cams)))
-    E = [k for k in common if lo <= min(C[c]["frames"][k]["cap"] for c in cams) < hi]    # expected group frames
-    return T, dur, C, E, sched, no_marker
+    # A2: expected group frames come from the schedule (epoch T, duration, task rate), not from the rows that happen to
+    # exist: a frame a member never captured or sent (sender died, slot missed) is a placeholder and counts as a miss.
+    step_g = max(BASE_FPS // fps[c] for c in cams)
+    E = [k for k in range(0, dur * BASE_FPS + 1, step_g) if lo <= T + k * 1e9 / BASE_FPS < hi]
+    for c in cams:
+        for k in E:
+            C[c]["frames"].setdefault(k, dict(ts=None, cap=int(T + k * 1e9 / BASE_FPS), src=-1, submitted=False, sent0=None, sent1=None,
+                                              idr=False, bytes=0, g0=None, g1=None, gpk=[], app=None, absent=True))
+    return T, dur, C, E, sched, no_marker, reconnect
 
 
 # ------------------------------------------------------------------------------------------------ analysis
@@ -150,16 +159,18 @@ def write(out, gid, res, txt):
 
 def analyse_group(rd, g, warmup_s, out, gdir):
     gid, cams, D = g["id"], list(g["cams"]), float(g["deadline_ms"])
-    T, dur, C, E, sched, no_marker = load(rd, cams, warmup_s)
+    T, dur, C, E, sched, no_marker, reconnect = load(rd, cams, warmup_s)
     if not E: print(f"[fusion_report] group {gid}: no common capture instants in the window"); return
     F = lambda c, k: C[c]["frames"][k]
     fps_g = min(C[c]["fps"] for c in cams); period = 1000.0 / fps_g          # group frame period (ms)
     res = {"group": gid, "cams": cams, "deadline_ms": D, "warmup_s": warmup_s, "expected_frames": len(E), "group_fps": fps_g,
-           "member_fps": {c: C[c]["fps"] for c in cams}, "frames_without_marker_at_gnb": no_marker}
+           "member_fps": {c: C[c]["fps"] for c in cams}, "frames_without_marker_at_gnb": no_marker,
+           "member_frames_absent": {c: sum(1 for k in E if F(c, k).get("absent")) for c in cams}, "rnti_changes_in_run": reconnect}
+    if reconnect: print(f"[fusion_report] WARNING: UE index -> RNTI changed inside the run window: {reconnect} (the most frequent RNTI is used)")
     txt = [f"# fusion analysis {rd}  group {gid} = {'+'.join(cams)}  deadline {D:.0f} ms  group rate {fps_g} fps "
            f"(expected group frames with capture >= T+{warmup_s:g} s: {len(E)})",
-           f"# same content frame at every member: {all(len({F(c, k)['src'] * (BASE_FPS // C[c]['fps']) for c in cams}) == 1 for k in E)}"
-           f";  member frames seen at the gNB without their marker packet: {no_marker}"]
+           f"# same content frame at every member: {all(len({F(c, k)['src'] * (BASE_FPS // C[c]['fps']) for c in cams if not F(c, k).get('absent')}) <= 1 for k in E)}"
+           f";  member frames seen at the gNB without their marker packet: {no_marker};  member frames absent (never captured/sent): {res['member_frames_absent']}"]
     cap = {k: min(F(c, k)["cap"] for c in cams) for k in E}
     lat = {c: [((F(c, k)["app"] - cap[k]) / 1e6) if F(c, k)["app"] else INF for k in E] for c in cams}
     glat = [max(lat[c][i] for c in cams) for i in range(len(E))]
@@ -219,7 +230,10 @@ def analyse_group(rd, g, warmup_s, out, gdir):
     spread = [(gc[k] - min(arr[k].values())) / 1e6 for k in full]
     wait = [sum(gc[k] - v for v in arr[k].values()) / 1e6 for k in full]
     gl_full = [(gc[k] - cap[k]) / 1e6 for k in full]
-    corr = st.correlation(spread, gl_full) if len(full) > 2 else float("nan")
+    if not full:
+        txt.append("  (no group frame with every member delivered: items 2-8 unavailable)"); write(out, gid, res, txt); return
+    try: corr = st.correlation(spread, gl_full) if len(full) > 2 else float("nan")
+    except st.StatisticsError: corr = float("nan")                       # constant input
     res["2_spread"] = {"frames": len(full), "spread": dist(spread), "waiting_sum": dist(wait), "corr_spread_group_latency": round(corr, 3),
                        # waiting / total member time from capture to GROUP completion (each member is held until the group is complete)
                        "waiting_share_of_member_time_to_group_completion": round(sum(wait) / sum(len(cams) * (gc[k] - cap[k]) / 1e6 for k in full), 4),
@@ -248,7 +262,8 @@ def analyse_group(rd, g, warmup_s, out, gdir):
         for x in comp[c]: m = max(m, x); pre.append(m)
         prefix[c] = pre                                                   # non-decreasing -> frontier by bisect
     def frontier_idx(c, t): return bisect.bisect_right(prefix[c], t) - 1
-    evt = sorted({x for c in cams for x in prefix[c] if x != INF})
+    w_end = T + dur * 1_000_000_000                                      # observation window end (frames still blocked count until here)
+    evt = sorted({x for c in cams for x in prefix[c] if x != INF and x < w_end} | {w_end})
     gap_t = [(w, max(frontier_idx(c, w) for c in cams) - min(frontier_idx(c, w) for c in cams)) for w in evt]
     tw = collections.Counter(); s2 = collections.defaultdict(int); smax = collections.defaultdict(int)
     for (w0, gp), (w1, _) in zip(gap_t, gap_t[1:]):
@@ -260,16 +275,17 @@ def analyse_group(rd, g, warmup_s, out, gdir):
             if gp >= 2: s2[sec] += b - a
             a = b
     total = sum(tw.values()) or 1
-    episodes = []; start = None
+    episodes = []; start = None; censored = 0
     for w, gp in gap_t:
         if gp >= 2 and start is None: start = w
         if gp < 2 and start is not None: episodes.append((w - start) / 1e6); start = None
+    if start is not None: episodes.append((w_end - start) / 1e6); censored = 1   # still behind at the window end (right-censored)
     res["3_frontier"] = {"time_share_by_gap_frames": {str(k): round(v / total, 4) for k, v in sorted(tw.items())},
                          "time_share_gap_ge_2": round(sum(v for k, v in tw.items() if k >= 2) / total, 4),
-                         "episodes_gap_ge_2": dist(episodes), "max_gap": max(tw) if tw else 0}
+                         "episodes_gap_ge_2": dist(episodes), "episodes_right_censored": censored, "max_gap": max(tw) if tw else 0}
     txt += ["", "## 3. frontier lag at the gNB: gap = max_i f_i(t) - min_i f_i(t) in group frames; f_i = last frame received (marker) from member i with all earlier ones"]
     txt.append("  share of time by gap: " + ", ".join(f"{k}: {100 * v / total:.1f} %" for k, v in sorted(tw.items())))
-    txt.append(f"  episodes with a member >= 2 frames behind: {len(episodes)}, duration {fmt(dist(episodes)) if episodes else 'n=0'} ms")
+    txt.append(f"  episodes with a member >= 2 frames behind: {len(episodes)} ({censored} still open at the window end), duration {fmt(dist(episodes)) if episodes else 'n=0'} ms")
     fig, ax = plt.subplots(1, 2, figsize=(12, 3.4), gridspec_kw={"width_ratios": [1.8, 1]})
     secs = sorted(smax)
     ax[0].bar(secs, [smax[x] for x in secs], width=1.0, color=GRID, edgecolor=INK2, lw=0.3, label="max gap in the second")
@@ -381,16 +397,18 @@ def analyse_group(rd, g, warmup_s, out, gdir):
     BS = collections.defaultdict(list)
     for r in rows(f"{rd}/gnb/gnb_bsr.csv"):
         if r["rnti"] in rnti2cam: BS[r["rnti"]].append((int(r["wall_ns"]), r["lcg_id"], int(r["buffer_bytes"])))
-    for v in BS.values(): v.sort()
-    BSt = {k: [w for w, _, _ in v] for k, v in BS.items()}
-    def bsr_total(c, t):   # latest report of every LCG up to t, summed (one BSR row per LCG)
-        v = BS.get(C[c]["rnti"], []); i = bisect.bisect_right(BSt.get(C[c]["rnti"], []), t)
-        last = {}
-        for w, lcg, b in reversed(v[max(0, i - 64):i]): last.setdefault(lcg, b)
-        return sum(last.values())
+    BSt, BSv = {}, {}
+    for rn, v in BS.items():   # per RNTI: total = sum over LCGs of each LCG's latest report, after every report
+        v.sort(); state = {}; ts = []; tot = []
+        for w, lcg, b in v: state[lcg] = b; ts.append(w); tot.append(sum(state.values()))
+        BSt[rn], BSv[rn] = ts, tot
+    def bsr_total(c, t):
+        rn = C[c]["rnti"]; i = bisect.bisect_right(BSt.get(rn, []), t) - 1
+        return BSv[rn][i] if i >= 0 else 0
     def received(c, k, t): return sum(max(0, b - RTP_IP_UDP_OVERHEAD) for w, b, _ in F(c, k)["gpk"] if w <= t)
     gnb_strag = [k for k in strag if all(F(c, k)["g1"] and F(c, k)["g0"] for c in cams)]
-    done_list = sorted((max(F(c, k)["g1"] for c in cams), max(cams, key=lambda c: F(c, k)["g1"])) for k in gnb_strag)
+    done_list = sorted((max(F(c, k)["g1"] for c in cams), max(cams, key=lambda c: F(c, k)["g1"]))   # every group frame complete at the gNB
+                       for k in E if all(F(c, k)["g1"] for c in cams))
     done_t = [x for x, _ in done_list]
     names = ("BSR, all LCGs (stock)", "PDCP frontier (lowest)", "arrival order (no frame size)", "progress vs descriptor size", "last completed straggler")
     pred = {nm: collections.defaultdict(float) for nm in names}; lead = collections.defaultdict(list); cnt = collections.Counter()
@@ -405,7 +423,7 @@ def analyse_group(rd, g, warmup_s, out, gdir):
                 names[0]: {c: bsr_total(c, t) for c in cams},
                 names[1]: {c: -frontier_idx(c, t) for c in cams},
                 names[2]: {c: (F(c, k)["g0"] if F(c, k)["g0"] <= t else INF) for c in cams},
-                names[3]: {c: -received(c, k, t) / max(1, F(c, k)["bytes"]) for c in cams},
+                names[3]: {c: -min(1.0, received(c, k, t) / max(1, F(c, k)["bytes"])) for c in cams},   # RTP payload vs Annex-B size: < 0.5 % unit mismatch, capped
                 names[4]: {c: (1 if c == last_s else 0) for c in cams},
             }
             for nm, sc in choices.items():

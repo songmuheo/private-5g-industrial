@@ -65,4 +65,9 @@ def percentiles(xs: list[float], ps=(50, 90, 99)) -> dict:
 
 
 def iter_error_sidecars(root: pathlib.Path) -> Iterator[pathlib.Path]:
-    yield from root.rglob("*.ERROR")
+    # os.walk(followlinks=True): a sub-run's gnb/ is a symlink to the session's gNB traces, and Path.rglob does not
+    # descend into directory symlinks (Python < 3.13) -> an overflow sidecar there would be missed
+    import os
+    for dp, _, fn in os.walk(root, followlinks=True):
+        for n in fn:
+            if n.endswith(".ERROR"): yield pathlib.Path(dp) / n
