@@ -82,7 +82,8 @@ def run_window(rd):
     if not _os.path.exists(p): return None
     e = _json.load(open(p)); t0 = int(e["start_time_epoch"] * 1e9); end = t0 + (int(e["scenario"].get("duration_s", 300)) + 5) * 1_000_000_000
     for cam in e["scenario"].get("cams", {}):
-        for f, col in ((f"{rd}/senders/{cam}/app/{cam}-tx-rtp.csv", "log_wall_ns"), (f"{rd}/app/{cam}-rx-rtp.csv", "log_wall_ns")):
+        for f, col in ((f"{rd}/senders/{cam}/app/{cam}-tx-rtp.csv", "log_wall_ns"), (f"{rd}/app/{cam}-tx-rtp.csv", "log_wall_ns"),
+                       (f"{rd}/app/{cam}-rx-rtp.csv", "log_wall_ns")):   # collected sender log, one-PC sender log, receiver fallback
             if not _os.path.exists(f): continue
             last = None
             with open(f) as fh:

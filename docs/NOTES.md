@@ -1053,3 +1053,7 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
   follows its CURRENT UE context (a reconnection retires the old backlog); UE-index ownership checked across ALL scenario
   cameras; run window from the declared cameras' own send logs (+5 s), unrelated files ignored; prepare_client.sh must run
   as the scenario's hosts.user and verifies the gNB -> laptop login for exactly that account.
+* Codex pass 5 (2026-10-01): launch/abort path has no Medium-or-higher defect left. Fixed the last two analysis items: BSR
+  state starts empty for every new UE context (index or RNTI change), so a reused UE index cannot resurrect an old backlog
+  (Codex's 0 -> 1 -> 0 reproduction now gives 1000 -> 0 -> 0); the run window also reads a one-PC run's sender log
+  (<run>/app/<cam>-tx-rtp.csv).

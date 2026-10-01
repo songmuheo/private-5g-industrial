@@ -413,13 +413,13 @@ def analyse_group(rd, g, warmup_s, out, gdir):
     # ---------------------------------------------------------------- 6. can the RAN identify the straggler from what it observes?
     BS = collections.defaultdict(list)
     for r in rows(f"{rd}/gnb/gnb_bsr.csv"):
-        if r["ue_index"] in ue2cam: BS[ue2cam[r["ue_index"]]].append((int(r["wall_ns"]), (r["ue_index"], r["lcg_id"]), int(r["buffer_bytes"])))
+        if r["ue_index"] in ue2cam: BS[ue2cam[r["ue_index"]]].append((int(r["wall_ns"]), (r["ue_index"], r["rnti"], r["lcg_id"]), int(r["buffer_bytes"])))
     BSt, BSv = {}, {}
     for rn, v in BS.items():   # per camera: sum over LCGs of the latest report of its CURRENT connection (UE index)
-        v.sort(); state = collections.defaultdict(dict); cur = None; ts = []; tot = []
-        for w, (u, lcg), b in v:
-            cur = u                                    # a report from a (new) UE context retires the previous one's backlog
-            state[u][lcg] = b; ts.append(w); tot.append(sum(state[cur].values()))
+        v.sort(); state = {}; cur = None; ts = []; tot = []
+        for w, (u, rn, lcg), b in v:
+            if (u, rn) != cur: cur = (u, rn); state = {}   # new UE context (index or RNTI changed): start from an empty state,
+            state[lcg] = b; ts.append(w); tot.append(sum(state.values()))   # even when an old index is reused later
         BSt[rn], BSv[rn] = ts, tot
     def bsr_total(c, t):
         i = bisect.bisect_right(BSt.get(c, []), t) - 1
