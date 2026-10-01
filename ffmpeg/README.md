@@ -78,6 +78,11 @@ mix). 1500 is a multiple of the GOP, so the loop seam adds no IDR. A camera star
 joins late enters at its next IDR, visible as `late_start_slots`). Scenarios: `5ue-720p30.json`, `2ue-720p30-mot03.json`,
 `demo-local-5cam.json`.
 
+**Fusion groups.** A scenario may declare `"groups": [{"id": "g1", "cams": ["cam0", "cam1"], "deadline_ms": 100}]`
+(an inference needs frame k from every member within the deadline; docs/SCENARIO_EDGE_PROFILES.md §5.6). It is not sent to
+the RAN; `run_experiment.sh` then runs `analysis/fusion_report.py` (group latency, spread, frontier lag, PRBs spent ahead of
+the frontier, stragglers, straggler predictability, IDR placement) into `<run>/analysis/`.
+
 **Bitrate in the profile.** Each camera's profile is (1280x720, 30 fps, bitrate): `kbps` in the scenario is the start
 bitrate, and `{"type":"profile","stream":"camK","bitrate_kbps":B}` switches to rung B at that camera's next IDR (with
 staggered IDRs the cameras switch at their own IDR instants). Pre-encoded means B must be one of the rungs (default

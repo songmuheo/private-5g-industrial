@@ -198,6 +198,10 @@ RTCP SR 또는 abs-capture-time 헤더 확장, 혹은 descriptor의 epoch·phase
 (`--content-origin`, `tx-frames.src_frame_idx == grid_slot`) 캡처 시각이 µs 단위로 맞는다. 그래서 RAN이 그룹을 모르는
 stock 기준선에서, **분석 시점에 임의의 카메라 부분집합을 그룹으로 정의해** 그룹 지표를 계산할 수 있다(실험 1회로 모든 그룹 구성 평가).
 
+**그룹 조건의 출처.** 그룹(구성원, 마감 D)은 edge가 내려주는 descriptor다. testbed에서는 시나리오 JSON의
+`"groups": [{"id": "g1", "cams": ["cam0", "cam1"], "deadline_ms": 100}]`로 선언하고(추후 profile 메시지로 이동), stock 기준선에서는
+RAN에 전달하지 않고 분석에만 쓴다. 구현: `analysis/fusion_report.py`(항목 1~6, 8; 결과는 `<run>/analysis/fusion_<gid>.*`).
+
 **분석 항목(기준선, stock RAN):**
 1. 그룹 지연 L_k = C_k − capture_k 분포와 그룹 마감 충족률(D ∈ {50, 100, 200} ms), 그룹 크기 |G| = 2..N별(모든 부분집합).
 2. 그룹 내 도착 편차(max − min)와 "기다린 시간" = Σ_i (C_k − c_{i,k}): 먼저 온 프레임이 낭비한 시간.

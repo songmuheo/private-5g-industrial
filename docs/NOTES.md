@@ -975,3 +975,27 @@ needs `rtpgccbwe` from gst-plugins-rs; its main branch's webrtc plugin requires 
 * Derived outputs moved INTO the run (user instruction): results/<run>/analysis/{summary.json, report.txt, graphs/,
   INVALID} for every tree (verify_run.py, plot_run.py, three run_experiment.sh); CLAUDE.md rule 3 reworded
   accordingly. Verified with a loopback run (then deleted); the 2-UE MOT17-03 run's analysis moved into it.
+
+## 2026-10-01 — fusion analysis of the 2-UE MOT17-03 run, group g1 = cam0 + cam1, D = 100 ms (analysis/fusion_report.py)
+* 1 Group latency (capture -> last member decoded, t >= 5 s, 8851 frames): median 42.6, p90 52.1, p99 129.7, max 279 ms;
+  deadline met 98.02 % (cam0 98.82, cam1 98.35; independence would give 97.19 % -> misses are positively correlated,
+  concentrated at t = 150-170 and 205-245 s: 16.3 % misses in 210-220 s). Group cost over the faster member ~+6 ms median.
+* 2 Spread (last - first member): median 10.0, p99 50.3 ms; > 1 frame period in 2.1 % of frames; 16.3 % of all member
+  latency is spent waiting for the other member; corr(spread, group latency) = 0.59.
+* 3 Frontier (gNB): gap 0 for 64.5 % of the time, 1 for 34.5 %, >= 2 for 1.1 %; 191 episodes >= 2 frames behind, median
+  7.5 ms, p99 190 ms (the long ones = the BLER-burst windows).
+* 4 7.1 % of all UL PRBs went to the member that was AHEAD of the group frontier while the other was behind with data
+  waiting; 20-32 % in the burst seconds (upper bound for what a frontier-aware scheduler could re-assign).
+* 5 Straggler (spread > 5 ms, 7523 frames): cam1 60 %, cam0 40 %; runs SHORTER than i.i.d. (1.1 / 1.6 vs 1.7 / 2.5) ->
+  stragglers alternate, i.e. driven by per-frame timing, not by one bad link. Cause: access wait (SR/BSR -> first grant)
+  78.5 % overall; for spreads > 33 ms: RLC recovery 48.9 %, HARQ retx 37.5 %, access wait 10.3 %.
+* 6 Predicting the straggler at the gNB while the frame is in flight (decision when the first member's frame-k data
+  arrives, +0/+5/+10 ms; random = 50 %): stock BSR 20 / 37 / 69 % (worse than random early: the member that just sent
+  reports a large buffer while the other's BSR is stale); PDCP frontier 52 / 63 / 82 %; frame progress (RTP at PDCP + the
+  frame size from the descriptor) 93 / 94 / 97 %; persistence 32 %. => identifying the straggler early needs the frame
+  structure (frame number/size per flow), not stock BSR — supports a descriptor/observation path (§4 (c)+(d)).
+* 8 Phase effect FOUND (was SPECULATION in §2): 30 fps vs the 20 ms SR period / 2.5 ms UL slot realign every 100 ms = 3
+  frames; non-IDR group latency median by k mod 3 = 33.0 / 43.3 / 43.6 ms. IDR effect measured against same-phase
+  frames: +1.9 ms median (p99 +88), +4.9 ms (cam0) / +1.7 ms (cam1) at the IDR frame, small after it (HRD-CBR IDRs are
+  only 1.37 x a P frame). Without the phase correction the IDR frames looked FASTER (both origins 0 and 3 sit on the
+  favourable phase) — a confounder to keep in mind for the 5-UE design (origins 3 apart = same phase).

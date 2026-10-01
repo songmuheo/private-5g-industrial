@@ -46,5 +46,16 @@
       ],
       "kbps": 2500
     }
-  }
+  },
+  "groups": [
+    {
+      "id": "g1",
+      "cams": [
+        "cam0",
+        "cam1"
+      ],
+      "deadline_ms": 100
+    }
+  ],
+  "_groups_note": "fusion groups (edge descriptor, docs/SCENARIO_EDGE_PROFILES.md \u00a75.6): an inference needs frame k from EVERY member within deadline_ms of capture; analysed by analysis/fusion_report.py after the run. Not sent to the RAN (stock baseline)."
 }

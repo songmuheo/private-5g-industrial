@@ -202,6 +202,9 @@ if [ -n "${MISSING:-}" ]; then log "RESULT INVALID: sender(s) failed or left no 
 "$PY" analysis/verify_run.py "$RD" 2>&1 | tail -3 | tee -a "$LOG"
 log "note: gNB trace files get their footers only when ./run_gnb_core.sh is stopped; re-run: make verify RD=$RD afterwards"
 "$PY" analysis/exp_run_report.py "$RD" 5 > "$AN/report.txt" 2>&1 && log "report: $AN/report.txt"
+if "$PY" -c "import json,sys; sys.exit(0 if json.load(open('$RD/scenario.json')).get('groups') else 1)"; then   # fusion groups declared -> group analysis
+  "$PY" analysis/fusion_report.py "$RD" > "$AN/fusion_run.log" 2>&1 && log "fusion: $AN/fusion_*.txt, graphs/fusion_*" || log "fusion report FAILED (see $AN/fusion_run.log)"
+fi
 sed -n '/## A\./,/## B\./p' "$AN/report.txt" | grep -E "^cam|A2|selected|^  cam" | head -20
 if grep -q "WARNING: check path" "$AN/report.txt" && [ "$HOST_MODE" = "ssh" ]; then
   log "RESULT INVALID: at least one stream did not travel over the 5G link (report.txt section A2). Check the sync-LAN firewall and laptop Wi-Fi."
