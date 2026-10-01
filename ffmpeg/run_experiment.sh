@@ -115,10 +115,12 @@ for c in "${CAMS[@]}"; do
   # Wi-Fi (media would bypass the 5G link) and not the sync LAN (firewalled; only NTP/SSH). Reported as route_dev=.
   rchk="d=\$(ip route get $RELAY_HOST 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p'); s=\$(ip -o -4 addr show | awk '/ 192\.168\.77\./{print \$2}'); echo route_dev=\${d:-none}; case \"\$d\" in ''|wl*) echo route=BAD;; \"\$s\") echo route=BAD;; *) echo route=ok;; esac;"
   [ "$HOST_MODE" = "local" ] && rchk=""
+  rchk="$rchk g=\$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | paste -sd+); echo gov=\${g:-n/a};"   # performance expected (scripts/setup/performance_mode.sh)
   out="$(on_host "$c" "git rev-parse --short HEAD 2>/dev/null; $chk $rchk chronyc tracking 2>/dev/null | awk '/RMS offset/{print \"rms_ms=\" \$4*1000}' || echo chrony=none" 2>&1 | tr '\n' ' ')" \
     && STATUS[$c]="ok: $out" || STATUS[$c]="UNREACHABLE: $out"
   log "preflight $c @ $( [ "$HOST_MODE" = local ] && echo local || host_of "$c"): ${STATUS[$c]}"
   case "${STATUS[$c]}" in *asset=MISSING*) log "ABORT: $c: pre-encoded source missing on its host (run ffmpeg/scripts/prepare_client.sh there)"; exit 1;; esac
+  case "${STATUS[$c]}" in *gov=performance\ *) ;; *) log "WARNING: $c: CPU governor is not 'performance' on its host ($(grep -o 'gov=[^ ]*' <<<"${STATUS[$c]}")): run scripts/setup/performance_mode.sh there";; esac
   case "${STATUS[$c]}" in *route=BAD*) log "ABORT: $c: media to $RELAY_HOST would not go over the 5G phone ($(grep -o 'route_dev=[^ ]*' <<<"${STATUS[$c]}")): turn Wi-Fi off (nmcli radio wifi off) and check the phone's USB tethering"; exit 1;; esac
 done
 log "gNB PC HEAD $(git rev-parse --short HEAD)"
